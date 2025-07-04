@@ -1,121 +1,121 @@
-import {defineStore} from 'pinia'
-import {ref, computed} from 'vue'
+// frontend/src/stores/system.js
+import { defineStore } from 'pinia'
+import { ref, computed } from 'vue'
 import api from '@/utils/api'
 
 export const useSystemStore = defineStore('system', () => {
-    // State
-    const status = ref({
-        proxy_server: 'unknown',
-        total_modems: 0,
-        online_modems: 0,
-        offline_modems: 0
-    })
-    const isLoading = ref(false)
-    const lastUpdate = ref(null)
+  // State
+  const systemHealth = ref({
+    database: 'unknown',
+    redis: 'unknown',
+    proxy_server: 'unknown',
+    modem_manager: 'unknown'
+  })
 
-    // Getters
-    const systemStatus = computed(() => {
-        const {online_modems, total_modems} = status.value
+  const systemMetrics = ref({
+    total_modems: 0,
+    online_modems: 0,
+    offline_modems: 0,
+    total_requests: 0,
+    success_rate: 0,
+    avg_response_time: 0
+  })
 
-        if (total_modems === 0) {
-            return {
-                text: 'No modems configured',
-                color: 'bg-gray-400'
-            }
-        }
+  const isLoading = ref(false)
+  const lastUpdated = ref(null)
 
-        if (online_modems === 0) {
-            return {
-                text: 'All modems offline',
-                color: 'bg-red-500'
-            }
-        }
+  // Computed
+  const systemStatus = computed(() => {
+    const allUp = Object.values(systemHealth.value).every(status =>
+      status === 'up' || status === 'running'
+    )
 
-        if (online_modems < total_modems) {
-            return {
-                text: 'Some modems offline',
-                color: 'bg-yellow-500'
-            }
-        }
-
-        return {
-            text: 'All systems operational',
-            color: 'bg-green-500'
-        }
-    })
-
-    const totalModems = computed(() => status.value.total_modems || 0)
-    const onlineModems = computed(() => status.value.online_modems || 0)
-    const offlineModems = computed(() => status.value.offline_modems || 0)
-    const uptimePercentage = computed(() => {
-        const total = totalModems.value
-        const online = onlineModems.value
-        return total > 0 ? Math.round((online / total) * 100) : 0
-    })
-
-    // Actions
-    const fetchSystemStatus = async () => {
-        try {
-            isLoading.value = true
-            const response = await api.get('/proxy/health')
-
-            status.value = {
-                proxy_server: 'running',
-                total_modems: response.data.total_modems || 0,
-                online_modems: response.data.online_modems || 0,
-                offline_modems: (response.data.total_modems || 0) - (response.data.online_modems || 0)
-            }
-
-            lastUpdate.value = new Date()
-        } catch (error) {
-            console.error('Failed to fetch system status:', error)
-            status.value = {
-                proxy_server: 'error',
-                total_modems: 0,
-                online_modems: 0,
-                offline_modems: 0
-            }
-        } finally {
-            isLoading.value = false
-        }
+    if (allUp) {
+      return {
+        text: 'All Systems Operational',
+        color: 'bg-green-400'
+      }
     }
 
-    const getHealthCheck = async () => {
-        try {
-            const response = await api.get('/admin/system/health')
-            return response.data
-        } catch (error) {
-            console.error('Health check failed:', error)
-            throw error
-        }
-    }
+    const someDown = Object.values(systemHealth.value).some(status =>
+      status === 'down' || status === 'stopped'
+    )
 
-    const restartSystem = async () => {
-        try {
-            const response = await api.post('/admin/system/restart')
-            return response.data
-        } catch (error) {
-            console.error('System restart failed:', error)
-            throw error
-        }
+    if (someDown) {
+      return {
+        text: 'System Issues Detected',
+        color: 'bg-red-400'
+      }
     }
 
     return {
-        // State
-        status,
-        isLoading,
-        lastUpdate,
-
-        // Getters
-        systemStatus,
-        totalModems,
-        onlineModems,
-        offlineModems,
-        uptimePercentage,
-
-        // Actions
-        fetchSystemStatus,
-        getHealthCheck,
-        restartSystem
+      text: 'System Status Unknown',
+      color: 'bg-yellow-400'
     }
+  })
+
+  const totalModems = computed(() => systemMetrics.value.total_modems)
+  const onlineModems = computed(() => systemMetrics.value.online_modems)
+  const offlineModems = computed(() => systemMetrics.value.offline_modems)
+  const successRate = computed(() => systemMetrics.value.success_rate)
+
+  // Actions
+  const fetchSystemStatus = async () => {
+    try {
+      isLoading.value = true
+
+      const response = await api.get('/admin/system/health')
+      systemHealth.value = response.data.components || systemHealth.value
+      lastUpdated.value = new Date()
+
+    } catch (error) {
+      console.error('Failed to fetch system status:', error)
+      // Don't throw error to prevent breaking the UI
+    } finally {
+      isLoading.value = false
+    }
+  }
+
+  const fetchSystemMetrics = async () => {
+    try {
+      const response = await api.get('/stats/overview')
+      systemMetrics.value = {
+        total_modems: response.data.total_modems || 0,
+        online_modems: response.data.online_modems || 0,
+        offline_modems: response.data.offline_modems || 0,
+        total_requests: response.data.total_requests || 0,
+        success_rate: response.data.success_rate || 0,
+        avg_response_time: response.data.avg_response_time || 0
+      }
+    } catch (error) {
+      console.error('Failed to fetch system metrics:', error)
+    }
+  }
+
+  const refreshAll = async () => {
+    await Promise.all([
+      fetchSystemStatus(),
+      fetchSystemMetrics()
+    ])
+  }
+
+  return {
+    // State
+    systemHealth,
+    systemMetrics,
+    isLoading,
+    lastUpdated,
+
+    // Computed
+    systemStatus,
+    totalModems,
+    onlineModems,
+    offlineModems,
+    successRate,
+
+    // Actions
+    fetchSystemStatus,
+    fetchSystemMetrics,
+    refreshAll
+  }
 })

@@ -1,303 +1,459 @@
+<!-- frontend/src/views/Logs.vue -->
 <template>
     <div class="space-y-6">
-        <!-- Page header -->
-        <div class="flex-between">
+        <!-- Header -->
+        <div class="sm:flex sm:items-center sm:justify-between">
             <div>
-                <h1 class="text-2xl font-bold text-gray-900">Logs</h1>
-                <p class="text-gray-500">View and analyze system logs</p>
+                <h1 class="text-2xl font-bold text-gray-900">Request Logs</h1>
+                <p class="mt-2 text-sm text-gray-700">
+                    Monitor all proxy requests and troubleshoot issues
+                </p>
             </div>
-            <div class="flex space-x-3">
-                <button
-                    @click="refreshLogs"
-                    :disabled="isLoading"
-                    class="btn btn-md btn-secondary"
-                >
-                    <ArrowPathIcon class="h-4 w-4 mr-1" :class="{ 'animate-spin': isLoading }"/>
-                    Refresh
-                </button>
+            <div class="mt-4 sm:mt-0 sm:ml-16 sm:flex-none space-x-3 flex">
                 <button
                     @click="exportLogs"
-                    class="btn btn-md btn-primary"
+                    :disabled="isExporting"
+                    class="btn btn-secondary btn-sm"
                 >
-                    <DocumentArrowDownIcon class="h-4 w-4 mr-1"/>
-                    Export
+                    <DocumentArrowDownIcon class="h-4 w-4 mr-2"/>
+                    {{ isExporting ? 'Exporting...' : 'Export CSV' }}
+                </button>
+                <button
+                    @click="clearLogs"
+                    class="btn btn-error btn-sm"
+                >
+                    <TrashIcon class="h-4 w-4 mr-2"/>
+                    Clear Old Logs
                 </button>
             </div>
         </div>
 
         <!-- Filters -->
-        <div class="bg-white p-4 rounded-lg shadow-sm border border-gray-200">
-            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
-                <!-- Search -->
-                <div class="lg:col-span-2">
-                    <div class="relative">
-                        <MagnifyingGlassIcon
-                            class="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400"/>
-                        <input
-                            v-model="searchQuery"
-                            type="text"
-                            placeholder="Search logs..."
-                            class="pl-10 pr-4 py-2 w-full border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary-500"
-                        />
-                    </div>
+        <div class="bg-white shadow rounded-lg p-6">
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                <!-- Time Range -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Time Range</label>
+                    <select
+                        v-model="filters.timeRange"
+                        @change="fetchLogs"
+                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-primary-500 focus:ring-primary-500"
+                    >
+                        <option value="1h">Last Hour</option>
+                        <option value="24h">Last 24 Hours</option>
+                        <option value="7d">Last 7 Days</option>
+                        <option value="30d">Last 30 Days</option>
+                    </select>
                 </div>
 
-                <!-- Modem filter -->
+                <!-- Modem Filter -->
                 <div>
+                    <label class="block text-sm font-medium text-gray-700">Modem</label>
                     <select
-                        v-model="selectedModem"
-                        class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary-500"
+                        v-model="filters.modemId"
+                        @change="fetchLogs"
+                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-primary-500 focus:ring-primary-500"
                     >
                         <option value="">All Modems</option>
-                        <option v-for="modem in modems" :key="modem.id" :value="modem.id">
+                        <option
+                            v-for="modem in availableModems"
+                            :key="modem.id"
+                            :value="modem.id"
+                        >
                             {{ modem.name }}
                         </option>
                     </select>
                 </div>
 
-                <!-- Status filter -->
+                <!-- Status Filter -->
                 <div>
+                    <label class="block text-sm font-medium text-gray-700">Status</label>
                     <select
-                        v-model="selectedStatus"
-                        class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary-500"
+                        v-model="filters.statusCode"
+                        @change="fetchLogs"
+                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-primary-500 focus:ring-primary-500"
                     >
                         <option value="">All Status</option>
-                        <option value="200">Success (2xx)</option>
-                        <option value="400">Client Error (4xx)</option>
-                        <option value="500">Server Error (5xx)</option>
+                        <option value="200">Success (200)</option>
+                        <option value="400">Bad Request (400)</option>
+                        <option value="404">Not Found (404)</option>
+                        <option value="500">Server Error (500)</option>
                     </select>
                 </div>
 
-                <!-- Time range -->
+                <!-- Search -->
                 <div>
-                    <select
-                        v-model="timeRange"
-                        class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary-500"
+                    <label class="block text-sm font-medium text-gray-700">Search URL</label>
+                    <input
+                        v-model="filters.search"
+                        @input="debounceSearch"
+                        type="text"
+                        placeholder="Search in URLs..."
+                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-primary-500 focus:ring-primary-500"
                     >
-                        <option value="1h">Last hour</option>
-                        <option value="24h">Last 24 hours</option>
-                        <option value="7d">Last 7 days</option>
-                        <option value="30d">Last 30 days</option>
-                    </select>
                 </div>
             </div>
-        </div>
 
-        <!-- Log level toggle -->
-        <div class="bg-white p-4 rounded-lg shadow-sm border border-gray-200">
-            <div class="flex items-center justify-between">
-                <h3 class="text-sm font-medium text-gray-900">Log Levels</h3>
-                <div class="flex space-x-2">
-                    <button
+            <!-- Log Level Filters -->
+            <div class="mt-4">
+                <label class="block text-sm font-medium text-gray-700 mb-2">Log Levels</label>
+                <div class="flex space-x-4">
+                    <label
                         v-for="level in logLevels"
-                        :key="level.name"
-                        @click="toggleLogLevel(level.name)"
-                        :class="[
-              enabledLevels.includes(level.name) ? level.activeClass : level.inactiveClass,
-              'px-3 py-1 rounded-md text-sm font-medium transition-colors'
-            ]"
+                        :key="level.value"
+                        class="inline-flex items-center"
                     >
-                        {{ level.name }}
-                    </button>
+                        <input
+                            type="checkbox"
+                            :value="level.value"
+                            v-model="filters.enabledLevels"
+                            @change="fetchLogs"
+                            class="rounded border-gray-300 text-primary-600 shadow-sm focus:border-primary-500 focus:ring-primary-500"
+                        >
+                        <span class="ml-2 text-sm" :class="level.class">
+              {{ level.label }}
+            </span>
+                    </label>
                 </div>
             </div>
         </div>
 
-        <!-- Logs table -->
-        <div class="bg-white rounded-lg shadow-sm border border-gray-200">
-            <div class="p-6">
-                <!-- Loading state -->
-                <div v-if="isLoading" class="space-y-4">
-                    <div v-for="i in 10" :key="i" class="loading-pulse h-16 rounded-lg"></div>
-                </div>
-
-                <!-- Empty state -->
-                <div v-else-if="filteredLogs.length === 0" class="text-center py-12">
-                    <DocumentTextIcon class="mx-auto h-12 w-12 text-gray-400"/>
-                    <h3 class="mt-2 text-sm font-medium text-gray-900">No logs found</h3>
-                    <p class="mt-1 text-sm text-gray-500">
-                        Try adjusting your filters or check back later
-                    </p>
-                </div>
-
-                <!-- Logs list -->
-                <div v-else class="space-y-2">
-                    <div
-                        v-for="log in filteredLogs"
-                        :key="log.id"
-                        :class="[
-              'p-4 rounded-lg border cursor-pointer transition-colors',
-              getLogLevelClass(log.level),
-              'hover:bg-gray-50'
-            ]"
-                        @click="selectedLog = log"
-                    >
-                        <div class="flex items-start justify-between">
-                            <div class="flex-1 min-w-0">
-                                <div class="flex items-center space-x-3">
-                  <span :class="getLogLevelBadgeClass(log.level)" class="px-2 py-1 rounded-full text-xs font-medium">
-                    {{ log.level }}
-                  </span>
-                                    <span class="text-sm font-medium text-gray-900">
-                    {{ log.method }} {{ log.status_code }}
-                  </span>
-                                    <span class="text-sm text-gray-500">
-                    {{ formatTime(log.created_at) }}
-                  </span>
-                                </div>
-                                <div class="mt-1 flex items-center space-x-4">
-                  <span class="text-sm text-gray-600">
-                    {{ log.client_ip }}
-                  </span>
-                                    <span class="text-sm text-gray-600">
-                    {{ log.modem_id || 'N/A' }}
-                  </span>
-                                    <span class="text-sm text-gray-600">
-                    {{ log.response_time_ms }}ms
-                  </span>
-                                </div>
-                                <div class="mt-1 text-sm text-gray-700 truncate">
-                                    {{ log.target_url }}
-                                </div>
-                                <div v-if="log.error_message" class="mt-1 text-sm text-red-600">
-                                    {{ log.error_message }}
-                                </div>
-                            </div>
-                            <div class="flex-shrink-0 ml-4">
-                                <ChevronRightIcon class="h-5 w-5 text-gray-400"/>
-                            </div>
+        <!-- Stats Summary -->
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
+            <div class="bg-white overflow-hidden shadow rounded-lg">
+                <div class="p-5">
+                    <div class="flex items-center">
+                        <div class="flex-shrink-0">
+                            <DocumentTextIcon class="h-6 w-6 text-gray-400"/>
+                        </div>
+                        <div class="ml-5 w-0 flex-1">
+                            <dl>
+                                <dt class="text-sm font-medium text-gray-500 truncate">Total Requests</dt>
+                                <dd class="text-lg font-medium text-gray-900">{{
+                                        stats.totalRequests.toLocaleString()
+                                    }}
+                                </dd>
+                            </dl>
                         </div>
                     </div>
                 </div>
+            </div>
+
+            <div class="bg-white overflow-hidden shadow rounded-lg">
+                <div class="p-5">
+                    <div class="flex items-center">
+                        <div class="flex-shrink-0">
+                            <CheckCircleIcon class="h-6 w-6 text-green-400"/>
+                        </div>
+                        <div class="ml-5 w-0 flex-1">
+                            <dl>
+                                <dt class="text-sm font-medium text-gray-500 truncate">Success Rate</dt>
+                                <dd class="text-lg font-medium text-gray-900">{{ stats.successRate }}%</dd>
+                            </dl>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="bg-white overflow-hidden shadow rounded-lg">
+                <div class="p-5">
+                    <div class="flex items-center">
+                        <div class="flex-shrink-0">
+                            <ClockIcon class="h-6 w-6 text-blue-400"/>
+                        </div>
+                        <div class="ml-5 w-0 flex-1">
+                            <dl>
+                                <dt class="text-sm font-medium text-gray-500 truncate">Avg Response Time</dt>
+                                <dd class="text-lg font-medium text-gray-900">{{ stats.avgResponseTime }}ms</dd>
+                            </dl>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="bg-white overflow-hidden shadow rounded-lg">
+                <div class="p-5">
+                    <div class="flex items-center">
+                        <div class="flex-shrink-0">
+                            <ExclamationTriangleIcon class="h-6 w-6 text-red-400"/>
+                        </div>
+                        <div class="ml-5 w-0 flex-1">
+                            <dl>
+                                <dt class="text-sm font-medium text-gray-500 truncate">Error Rate</dt>
+                                <dd class="text-lg font-medium text-gray-900">{{ stats.errorRate }}%</dd>
+                            </dl>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Logs Table -->
+        <div class="bg-white shadow overflow-hidden sm:rounded-md">
+            <div class="px-4 py-5 sm:p-6">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-lg leading-6 font-medium text-gray-900">
+                        Request Logs
+                    </h3>
+                    <div class="flex items-center space-x-2">
+            <span class="text-sm text-gray-500">
+              Auto-refresh:
+            </span>
+                        <button
+                            @click="toggleAutoRefresh"
+                            :class="[
+                autoRefresh ? 'bg-primary-600 text-white' : 'bg-gray-200 text-gray-700',
+                'px-3 py-1 rounded-md text-sm font-medium transition-colors'
+              ]"
+                        >
+                            {{ autoRefresh ? 'ON' : 'OFF' }}
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Loading State -->
+                <div v-if="isLoading" class="flex justify-center py-8">
+                    <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-primary-600"></div>
+                </div>
+
+                <!-- Empty State -->
+                <div v-else-if="!logs.length" class="text-center py-8">
+                    <DocumentTextIcon class="mx-auto h-12 w-12 text-gray-400"/>
+                    <h3 class="mt-2 text-sm font-medium text-gray-900">No logs found</h3>
+                    <p class="mt-1 text-sm text-gray-500">
+                        No request logs match your current filters.
+                    </p>
+                </div>
+
+                <!-- Logs Table -->
+                <div v-else class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-gray-200">
+                        <thead class="bg-gray-50">
+                        <tr>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                Timestamp
+                            </th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                Method
+                            </th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                Status
+                            </th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                URL
+                            </th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                Client IP
+                            </th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                External IP
+                            </th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                Response Time
+                            </th>
+                            <th class="relative px-6 py-3">
+                                <span class="sr-only">Actions</span>
+                            </th>
+                        </tr>
+                        </thead>
+                        <tbody class="bg-white divide-y divide-gray-200">
+                        <tr
+                            v-for="log in logs"
+                            :key="log.id"
+                            class="hover:bg-gray-50 cursor-pointer"
+                            @click="selectLog(log)"
+                        >
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                                {{ formatDate(log.created_at) }}
+                            </td>
+                            <td class="px-6 py-4 whitespace-nowrap">
+                  <span :class="getMethodClass(log.method)" class="px-2 py-1 text-xs font-medium rounded-full">
+                    {{ log.method }}
+                  </span>
+                            </td>
+                            <td class="px-6 py-4 whitespace-nowrap">
+                  <span :class="getStatusClass(log.status_code)" class="px-2 py-1 text-xs font-medium rounded-full">
+                    {{ log.status_code }}
+                  </span>
+                            </td>
+                            <td class="px-6 py-4 text-sm text-gray-900 max-w-xs truncate">
+                                {{ log.target_url }}
+                            </td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                {{ log.client_ip }}
+                            </td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                {{ log.external_ip }}
+                            </td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                {{ log.response_time_ms }}ms
+                            </td>
+                            <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                                <button
+                                    @click.stop="selectLog(log)"
+                                    class="text-primary-600 hover:text-primary-900"
+                                >
+                                    View Details
+                                </button>
+                            </td>
+                        </tr>
+                        </tbody>
+                    </table>
+                </div>
 
                 <!-- Pagination -->
-                <div v-if="filteredLogs.length > 0" class="mt-6 flex items-center justify-between">
-                    <div class="text-sm text-gray-700">
-                        Showing {{ Math.min(pagination.offset + 1, totalLogs) }} to
-                        {{ Math.min(pagination.offset + pagination.limit, totalLogs) }} of {{ totalLogs }} results
-                    </div>
-                    <div class="flex space-x-2">
+                <div class="bg-white px-4 py-3 flex items-center justify-between border-t border-gray-200 sm:px-6">
+                    <div class="flex-1 flex justify-between sm:hidden">
                         <button
                             @click="previousPage"
                             :disabled="pagination.offset === 0"
-                            class="btn btn-sm btn-secondary"
+                            class="relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50"
                         >
                             Previous
                         </button>
                         <button
                             @click="nextPage"
                             :disabled="pagination.offset + pagination.limit >= totalLogs"
-                            class="btn btn-sm btn-secondary"
+                            class="ml-3 relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50"
                         >
                             Next
                         </button>
+                    </div>
+                    <div class="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
+                        <div>
+                            <p class="text-sm text-gray-700">
+                                Showing
+                                <span class="font-medium">{{ pagination.offset + 1 }}</span>
+                                to
+                                <span class="font-medium">{{
+                                        Math.min(pagination.offset + pagination.limit, totalLogs)
+                                    }}</span>
+                                of
+                                <span class="font-medium">{{ totalLogs }}</span>
+                                results
+                            </p>
+                        </div>
+                        <div>
+                            <nav class="relative z-0 inline-flex rounded-md shadow-sm -space-x-px">
+                                <button
+                                    @click="previousPage"
+                                    :disabled="pagination.offset === 0"
+                                    class="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50 disabled:opacity-50"
+                                >
+                                    <ChevronLeftIcon class="h-5 w-5"/>
+                                </button>
+                                <button
+                                    @click="nextPage"
+                                    :disabled="pagination.offset + pagination.limit >= totalLogs"
+                                    class="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50 disabled:opacity-50"
+                                >
+                                    <ChevronRightIcon class="h-5 w-5"/>
+                                </button>
+                            </nav>
+                        </div>
                     </div>
                 </div>
             </div>
         </div>
 
-        <!-- Log detail modal -->
-        <div v-if="selectedLog" class="fixed inset-0 bg-gray-500 bg-opacity-75 flex items-center justify-center z-50">
-            <div class="bg-white rounded-lg max-w-4xl w-full mx-4 max-h-[80vh] overflow-y-auto">
-                <div class="p-6">
-                    <div class="flex items-center justify-between mb-6">
-                        <h3 class="text-lg font-medium text-gray-900">Log Details</h3>
-                        <button
-                            @click="selectedLog = null"
-                            class="text-gray-400 hover:text-gray-600"
-                        >
-                            <XMarkIcon class="h-6 w-6"/>
-                        </button>
-                    </div>
+        <!-- Log Detail Modal -->
+        <div v-if="selectedLog" class="fixed inset-0 z-50 overflow-y-auto">
+            <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+                <div class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity"
+                     @click="selectedLog = null"></div>
 
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                        <!-- Request details -->
-                        <div>
-                            <h4 class="text-sm font-medium text-gray-900 mb-3">Request Details</h4>
-                            <div class="space-y-3">
-                                <div class="flex justify-between">
-                                    <span class="text-sm text-gray-500">Method</span>
-                                    <span class="text-sm font-medium">{{ selectedLog.method }}</span>
+                <div
+                    class="inline-block align-bottom bg-white rounded-lg text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-4xl sm:w-full">
+                    <div class="bg-white px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
+                        <div class="sm:flex sm:items-start">
+                            <div class="mt-3 text-center sm:mt-0 sm:text-left w-full">
+                                <h3 class="text-lg leading-6 font-medium text-gray-900 mb-4">
+                                    Request Details
+                                </h3>
+
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <div>
+                                        <h4 class="text-sm font-medium text-gray-900 mb-2">Basic Information</h4>
+                                        <dl class="space-y-2">
+                                            <div>
+                                                <dt class="text-sm font-medium text-gray-500">Timestamp</dt>
+                                                <dd class="text-sm text-gray-900">{{
+                                                        formatDate(selectedLog.created_at)
+                                                    }}
+                                                </dd>
+                                            </div>
+                                            <div>
+                                                <dt class="text-sm font-medium text-gray-500">Method</dt>
+                                                <dd class="text-sm text-gray-900">{{ selectedLog.method }}</dd>
+                                            </div>
+                                            <div>
+                                                <dt class="text-sm font-medium text-gray-500">Status Code</dt>
+                                                <dd class="text-sm text-gray-900">{{ selectedLog.status_code }}</dd>
+                                            </div>
+                                            <div>
+                                                <dt class="text-sm font-medium text-gray-500">Response Time</dt>
+                                                <dd class="text-sm text-gray-900">{{
+                                                        selectedLog.response_time_ms
+                                                    }}ms
+                                                </dd>
+                                            </div>
+                                        </dl>
+                                    </div>
+
+                                    <div>
+                                        <h4 class="text-sm font-medium text-gray-900 mb-2">Network Information</h4>
+                                        <dl class="space-y-2">
+                                            <div>
+                                                <dt class="text-sm font-medium text-gray-500">Client IP</dt>
+                                                <dd class="text-sm text-gray-900">{{ selectedLog.client_ip }}</dd>
+                                            </div>
+                                            <div>
+                                                <dt class="text-sm font-medium text-gray-500">External IP</dt>
+                                                <dd class="text-sm text-gray-900">{{ selectedLog.external_ip }}</dd>
+                                            </div>
+                                            <div>
+                                                <dt class="text-sm font-medium text-gray-500">Modem ID</dt>
+                                                <dd class="text-sm text-gray-900">{{ selectedLog.modem_id }}</dd>
+                                            </div>
+                                        </dl>
+                                    </div>
                                 </div>
-                                <div class="flex justify-between">
-                                    <span class="text-sm text-gray-500">Status Code</span>
-                                    <span :class="getStatusCodeClass(selectedLog.status_code)"
-                                          class="text-sm font-medium">
-                    {{ selectedLog.status_code }}
-                  </span>
+
+                                <div class="mt-6">
+                                    <h4 class="text-sm font-medium text-gray-900 mb-2">Target URL</h4>
+                                    <p class="text-sm text-gray-600 bg-gray-50 p-3 rounded break-all">
+                                        {{ selectedLog.target_url }}
+                                    </p>
                                 </div>
-                                <div class="flex justify-between">
-                                    <span class="text-sm text-gray-500">Response Time</span>
-                                    <span class="text-sm font-medium">{{ selectedLog.response_time_ms }}ms</span>
+
+                                <div v-if="selectedLog.user_agent" class="mt-6">
+                                    <h4 class="text-sm font-medium text-gray-900 mb-2">User Agent</h4>
+                                    <p class="text-sm text-gray-600 bg-gray-50 p-3 rounded break-all">
+                                        {{ selectedLog.user_agent }}
+                                    </p>
                                 </div>
-                                <div class="flex justify-between">
-                                    <span class="text-sm text-gray-500">Client IP</span>
-                                    <span class="text-sm font-mono">{{ selectedLog.client_ip }}</span>
-                                </div>
-                                <div class="flex justify-between">
-                                    <span class="text-sm text-gray-500">External IP</span>
-                                    <span class="text-sm font-mono">{{ selectedLog.external_ip || 'N/A' }}</span>
-                                </div>
-                                <div class="flex justify-between">
-                                    <span class="text-sm text-gray-500">Modem ID</span>
-                                    <span class="text-sm font-mono">{{ selectedLog.modem_id || 'N/A' }}</span>
-                                </div>
-                                <div class="flex justify-between">
-                                    <span class="text-sm text-gray-500">Timestamp</span>
-                                    <span class="text-sm">{{ formatFullTime(selectedLog.created_at) }}</span>
+
+                                <div v-if="selectedLog.error_message" class="mt-6">
+                                    <h4 class="text-sm font-medium text-gray-900 mb-2">Error Message</h4>
+                                    <p class="text-sm text-red-600 bg-red-50 p-3 rounded">
+                                        {{ selectedLog.error_message }}
+                                    </p>
                                 </div>
                             </div>
                         </div>
-
-                        <!-- Request data -->
-                        <div>
-                            <h4 class="text-sm font-medium text-gray-900 mb-3">Request Data</h4>
-                            <div class="space-y-3">
-                                <div>
-                                    <span class="text-sm text-gray-500 block mb-1">Target URL</span>
-                                    <span class="text-sm font-mono bg-gray-50 p-2 rounded block break-all">
-                    {{ selectedLog.target_url }}
-                  </span>
-                                </div>
-                                <div>
-                                    <span class="text-sm text-gray-500 block mb-1">User Agent</span>
-                                    <span class="text-sm bg-gray-50 p-2 rounded block break-all">
-                    {{ selectedLog.user_agent || 'N/A' }}
-                  </span>
-                                </div>
-                                <div class="flex justify-between">
-                                    <span class="text-sm text-gray-500">Request Size</span>
-                                    <span class="text-sm">{{ formatBytes(selectedLog.request_size) }}</span>
-                                </div>
-                                <div class="flex justify-between">
-                                    <span class="text-sm text-gray-500">Response Size</span>
-                                    <span class="text-sm">{{ formatBytes(selectedLog.response_size) }}</span>
-                                </div>
-                            </div>
-                        </div>
                     </div>
-
-                    <!-- Error message -->
-                    <div v-if="selectedLog.error_message" class="mt-6">
-                        <h4 class="text-sm font-medium text-gray-900 mb-3">Error Details</h4>
-                        <div class="bg-red-50 border border-red-200 rounded-lg p-4">
-                            <p class="text-sm text-red-800">{{ selectedLog.error_message }}</p>
-                        </div>
-                    </div>
-
-                    <!-- Actions -->
-                    <div class="mt-6 flex justify-end space-x-3">
-                        <button
-                            @click="selectedLog = null"
-                            class="btn btn-md btn-secondary"
-                        >
-                            Close
-                        </button>
+                    <div class="bg-gray-50 px-4 py-3 sm:px-6 sm:flex sm:flex-row-reverse">
                         <button
                             @click="copyLogDetails"
-                            class="btn btn-md btn-primary"
+                            class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-primary-600 text-base font-medium text-white hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 sm:ml-3 sm:w-auto sm:text-sm"
                         >
                             Copy Details
+                        </button>
+                        <button
+                            @click="selectedLog = null"
+                            class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 sm:mt-0 sm:ml-3 sm:w-auto sm:text-sm"
+                        >
+                            Close
                         </button>
                     </div>
                 </div>
@@ -307,109 +463,90 @@
 </template>
 
 <script setup>
-import {ref, computed, onMounted, onUnmounted, watch} from 'vue'
-import {useToast} from 'vue-toastification'
+import {ref, onMounted, onUnmounted, computed} from 'vue'
 import {format} from 'date-fns'
+import {useToast} from 'vue-toastification'
 import api from '@/utils/api'
+import {debounce} from 'lodash-es'
 
 // Icons
 import {
-    ArrowPathIcon,
-    DocumentArrowDownIcon,
-    MagnifyingGlassIcon,
     DocumentTextIcon,
-    ChevronRightIcon,
-    XMarkIcon
+    DocumentArrowDownIcon,
+    TrashIcon,
+    CheckCircleIcon,
+    ClockIcon,
+    ExclamationTriangleIcon,
+    ChevronLeftIcon,
+    ChevronRightIcon
 } from '@heroicons/vue/24/outline'
 
 const toast = useToast()
 
 // State
 const isLoading = ref(false)
+const isExporting = ref(false)
 const logs = ref([])
-const modems = ref([])
 const selectedLog = ref(null)
-const searchQuery = ref('')
-const selectedModem = ref('')
-const selectedStatus = ref('')
-const timeRange = ref('24h')
-const enabledLevels = ref(['INFO', 'WARN', 'ERROR'])
-const pagination = ref({
-    offset: 0,
-    limit: 50
-})
 const totalLogs = ref(0)
-const refreshInterval = ref(null)
+const autoRefresh = ref(true)
+const availableModems = ref([])
 
+// Filters
+const filters = ref({
+    timeRange: '24h',
+    modemId: '',
+    statusCode: '',
+    search: '',
+    enabledLevels: ['INFO', 'WARN', 'ERROR']
+})
+
+// Pagination
+const pagination = ref({
+    limit: 50,
+    offset: 0
+})
+
+// Stats
+const stats = ref({
+    totalRequests: 0,
+    successRate: 0,
+    avgResponseTime: 0,
+    errorRate: 0
+})
+
+// Constants
 const logLevels = [
-    {
-        name: 'INFO',
-        activeClass: 'bg-blue-100 text-blue-800',
-        inactiveClass: 'bg-gray-100 text-gray-600'
-    },
-    {
-        name: 'WARN',
-        activeClass: 'bg-yellow-100 text-yellow-800',
-        inactiveClass: 'bg-gray-100 text-gray-600'
-    },
-    {
-        name: 'ERROR',
-        activeClass: 'bg-red-100 text-red-800',
-        inactiveClass: 'bg-gray-100 text-gray-600'
-    }
+    {value: 'INFO', label: 'Info', class: 'text-blue-600'},
+    {value: 'WARN', label: 'Warning', class: 'text-yellow-600'},
+    {value: 'ERROR', label: 'Error', class: 'text-red-600'}
 ]
 
-// Computed
-const filteredLogs = computed(() => {
-    let filtered = logs.value
-
-    if (searchQuery.value) {
-        const query = searchQuery.value.toLowerCase()
-        filtered = filtered.filter(log =>
-            log.target_url.toLowerCase().includes(query) ||
-            log.client_ip.includes(query) ||
-            log.modem_id?.toLowerCase().includes(query) ||
-            log.error_message?.toLowerCase().includes(query)
-        )
-    }
-
-    if (selectedModem.value) {
-        filtered = filtered.filter(log => log.modem_id === selectedModem.value)
-    }
-
-    if (selectedStatus.value) {
-        const statusCode = parseInt(selectedStatus.value)
-        filtered = filtered.filter(log => {
-            const code = log.status_code
-            if (statusCode === 200) return code >= 200 && code < 300
-            if (statusCode === 400) return code >= 400 && code < 500
-            if (statusCode === 500) return code >= 500
-            return false
-        })
-    }
-
-    return filtered
-})
+// Auto-refresh interval
+let refreshInterval = null
 
 // Methods
 const fetchLogs = async () => {
     try {
         isLoading.value = true
-        const response = await api.get('/stats/logs', {
-            params: {
-                limit: pagination.value.limit,
-                offset: pagination.value.offset,
-                modem_id: selectedModem.value || undefined,
-                status_code: selectedStatus.value || undefined
-            }
-        })
 
-        logs.value = response.data.map(log => ({
-            ...log,
-            level: getLogLevel(log.status_code, log.error_message)
-        }))
+        const params = {
+            limit: pagination.value.limit,
+            offset: pagination.value.offset
+        }
 
-        totalLogs.value = response.data.length
+        if (filters.value.modemId) params.modem_id = filters.value.modemId
+        if (filters.value.statusCode) params.status_code = filters.value.statusCode
+        if (filters.value.search) params.search = filters.value.search
+
+        const response = await api.get('/stats/logs', {params})
+
+        logs.value = response.data.logs || response.data || []
+        totalLogs.value = response.data.total || logs.value.length
+
+        // Calculate stats from current logs
+        calculateStats()
+
     } catch (error) {
         console.error('Failed to fetch logs:', error)
         toast.error('Failed to load logs')
@@ -421,7 +558,7 @@ const fetchLogs = async () => {
 const fetchModems = async () => {
     try {
         const response = await api.get('/admin/modems')
-        modems.value = response.data.map(modem => ({
+        availableModems.value = response.data.map(modem => ({
             id: modem.modem_id,
             name: modem.modem_id
         }))
@@ -430,17 +567,46 @@ const fetchModems = async () => {
     }
 }
 
-const refreshLogs = () => {
-    fetchLogs()
+const calculateStats = () => {
+    const total = logs.value.length
+    if (total === 0) {
+        stats.value = {
+            totalRequests: 0,
+            successRate: 0,
+            avgResponseTime: 0,
+            errorRate: 0
+        }
+        return
+    }
+
+    const successful = logs.value.filter(log => log.status_code >= 200 && log.status_code < 400).length
+    const errors = logs.value.filter(log => log.status_code >= 400).length
+    const totalResponseTime = logs.value.reduce((sum, log) => sum + (log.response_time_ms || 0), 0)
+
+    stats.value = {
+        totalRequests: total,
+        successRate: Math.round((successful / total) * 100),
+        avgResponseTime: Math.round(totalResponseTime / total),
+        errorRate: Math.round((errors / total) * 100)
+    }
 }
 
 const exportLogs = async () => {
     try {
+        isExporting.value = true
+
+        const params = {
+            format: 'csv',
+            days: filters.value.timeRange === '1h' ? 1 :
+                filters.value.timeRange === '24h' ? 1 :
+                    filters.value.timeRange === '7d' ? 7 : 30
+        }
+
+        if (filters.value.modemId) params.modem_id = filters.value.modemId
+
         const response = await api.get('/stats/export', {
-            params: {
-                format: 'csv',
-                days: timeRange.value === '1h' ? 1 : timeRange.value === '24h' ? 1 : 7
-            }
+            params,
+            responseType: 'blob'
         })
 
         // Create download link
@@ -454,31 +620,30 @@ const exportLogs = async () => {
 
         toast.success('Logs exported successfully')
     } catch (error) {
+        console.error('Failed to export logs:', error)
         toast.error('Failed to export logs')
+    } finally {
+        isExporting.value = false
     }
 }
 
-const toggleLogLevel = (level) => {
-    const index = enabledLevels.value.indexOf(level)
-    if (index > -1) {
-        enabledLevels.value.splice(index, 1)
-    } else {
-        enabledLevels.value.push(level)
+const clearLogs = async () => {
+    if (!confirm('Are you sure you want to clear old logs? This action cannot be undone.')) {
+        return
+    }
+
+    try {
+        await api.delete('/admin/logs/cleanup?days_to_keep=30')
+        toast.success('Old logs cleared successfully')
+        await fetchLogs()
+    } catch (error) {
+        console.error('Failed to clear logs:', error)
+        toast.error('Failed to clear logs')
     }
 }
 
-const previousPage = () => {
-    if (pagination.value.offset > 0) {
-        pagination.value.offset = Math.max(0, pagination.value.offset - pagination.value.limit)
-        fetchLogs()
-    }
-}
-
-const nextPage = () => {
-    if (pagination.value.offset + pagination.value.limit < totalLogs.value) {
-        pagination.value.offset += pagination.value.limit
-        fetchLogs()
-    }
+const selectLog = (log) => {
+    selectedLog.value = log
 }
 
 const copyLogDetails = () => {
@@ -502,52 +667,88 @@ const copyLogDetails = () => {
     }
 }
 
+const toggleAutoRefresh = () => {
+    autoRefresh.value = !autoRefresh.value
+
+    if (autoRefresh.value) {
+        startAutoRefresh()
+    } else {
+        stopAutoRefresh()
+    }
+}
+
+const startAutoRefresh = () => {
+    if (refreshInterval) clearInterval(refreshInterval)
+    refreshInterval = setInterval(fetchLogs, 30000) // 30 seconds
+}
+
+const stopAutoRefresh = () => {
+    if (refreshInterval) {
+        clearInterval(refreshInterval)
+        refreshInterval = null
+    }
+}
+
+const previousPage = () => {
+    if (pagination.value.offset > 0) {
+        pagination.value.offset = Math.max(0, pagination.value.offset - pagination.value.limit)
+        fetchLogs()
+    }
+}
+
+const nextPage = () => {
+    if (pagination.value.offset + pagination.value.limit < totalLogs.value) {
+        pagination.value.offset += pagination.value.limit
+        fetchLogs()
+    }
+}
+
+// Debounced search
+const debounceSearch = debounce(() => {
+    pagination.value.offset = 0
+    fetchLogs()
+}, 500)
+
 // Utility functions
-const getLogLevel = (statusCode, errorMessage) => {
-    if (errorMessage) return 'ERROR'
-    if (statusCode >= 400) return 'WARN'
-    return 'INFO'
+const formatDate = (dateString) => {
+    return format(new Date(dateString), 'MMM dd, yyyy HH:mm:ss')
 }
 
-const getLogLevelClass = (level) => {
-    switch (level) {
-        case 'ERROR':
-            return 'border-red-200 bg-red-50'
-        case 'WARN':
-            return 'border-yellow-200 bg-yellow-50'
-        default:
-            return 'border-gray-200 bg-white'
+const getMethodClass = (method) => {
+    const classes = {
+        'GET': 'bg-blue-100 text-blue-800',
+        'POST': 'bg-green-100 text-green-800',
+        'PUT': 'bg-yellow-100 text-yellow-800',
+        'DELETE': 'bg-red-100 text-red-800',
+        'PATCH': 'bg-purple-100 text-purple-800'
     }
+    return classes[method] || 'bg-gray-100 text-gray-800'
 }
 
-const getLogLevelBadgeClass = (level) => {
-    switch (level) {
-        case 'ERROR':
-            return 'bg-red-100 text-red-800'
-        case 'WARN':
-            return 'bg-yellow-100 text-yellow-800'
-        default:
-            return 'bg-blue-100 text-blue-800'
+const getStatusClass = (statusCode) => {
+    if (statusCode >= 200 && statusCode < 300) {
+        return 'bg-green-100 text-green-800'
+    } else if (statusCode >= 300 && statusCode < 400) {
+        return 'bg-yellow-100 text-yellow-800'
+    } else if (statusCode >= 400 && statusCode < 500) {
+        return 'bg-orange-100 text-orange-800'
+    } else if (statusCode >= 500) {
+        return 'bg-red-100 text-red-800'
     }
+    return 'bg-gray-100 text-gray-800'
 }
 
-const getStatusCodeClass = (code) => {
-    if (code >= 200 && code < 300) return 'text-green-600'
-    if (code >= 400 && code < 500) return 'text-yellow-600'
-    if (code >= 500) return 'text-red-600'
-    return 'text-gray-600'
-}
+// Lifecycle
+onMounted(async () => {
+    await fetchModems()
+    await fetchLogs()
 
-const formatTime = (timestamp) => {
-    return format(new Date(timestamp), 'HH:mm:ss')
-}
-
-const formatFullTime = (timestamp) => {
-    return format(new Date(timestamp), 'yyyy-MM-dd HH:mm:ss')
-}
-
-const formatBytes = (bytes) => {
-    if (!bytes) return '0 B'
-    if (bytes >= 1024 * 1024) {
-        return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+    if (autoRefresh.value) {
+        startAutoRefresh()
     }
+})
+
+onUnmounted(() => {
+    stopAutoRefresh()
+})
+</script>
