@@ -79,7 +79,7 @@
             <div class="metric-card">
                 <div class="flex items-center">
                     <div class="p-2 bg-green-100 rounded-lg">
-                        <ChartLineIcon class="h-6 w-6 text-green-600"/>
+                        <PresentationChartLineIcon class="h-6 w-6 text-green-600"/>
                     </div>
                     <div class="ml-4">
                         <p class="text-sm font-medium text-gray-500">Success Rate</p>
@@ -296,7 +296,7 @@ import {
     CheckCircleIcon,
     XCircleIcon,
     ChartBarIcon,
-    ChartLineIcon,
+    PresentationChartLineIcon,
     GlobeAltIcon,
     ArrowPathIcon,
     DocumentArrowDownIcon,
