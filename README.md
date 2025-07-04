@@ -129,10 +129,20 @@ JWT_SECRET_KEY=your-jwt-secret-key
 
 ### Android устройства как модемы
 
+**Требования:**
+- ADB (Android Debug Bridge) установлен на сервере
+- USB-отладка включена на Android устройстве  
+- USB-модем включен в настройках Android
+
 1. **Подключите Android устройство через USB**
    ```bash
-   # Включите отладку по USB на устройстве
-   # Включите USB tethering (USB-модем)
+   # Проверьте, что ADB установлен
+   adb version
+   
+   # На Android устройстве:
+   # - Включите режим разработчика (Settings → About → Build number - 7 раз)
+   # - Включите USB-отладку (Settings → Developer options → USB debugging)
+   # - Включите USB-модем (Settings → Network → USB tethering)
    
    # Проверьте подключение
    adb devices
@@ -141,10 +151,19 @@ JWT_SECRET_KEY=your-jwt-secret-key
 2. **Система автоматически обнаружит устройство**
    - Устройство будет доступно через ADB
    - Ротация IP через команды: `svc data disable/enable`
+   - Поддержка режима полета: `airplane_mode`
 
 3. **Без установки приложений на телефон!**
 
-### Raspberry Pi с 4G модулями
+**⚠️ Важно**: Для работы с Android устройствами обязательно нужен пакет `android-tools-adb`:
+
+```bash
+# Ubuntu/Debian
+sudo apt install android-tools-adb android-tools-fastboot
+
+# Проверка установки
+adb version
+```
 
 1. **Подключите 4G модуль к Raspberry Pi**
    ```bash

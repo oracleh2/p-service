@@ -94,14 +94,54 @@ sudo npm install -g npm@latest
 # Инструменты для работы с USB модемами
 sudo apt install -y usb-modeswitch usb-modeswitch-data
 
-# Инструменты для работы с Android устройствами
+# Инструменты для работы с Android устройствами (ОБЯЗАТЕЛЬНО для Android модемов)
 sudo apt install -y android-tools-adb android-tools-fastboot
+
+# Проверка установки ADB
+adb version
 
 # Инструменты мониторинга системы
 sudo apt install -y htop iotop nethogs nmon
+
+# Дополнительные пакеты для работы с сетевыми интерфейсами
+sudo apt install -y net-tools iproute2 iputils-ping
 ```
 
-## 📁 Клонирование и настройка проекта
+**⚠️ Важно для Android устройств**: ADB (Android Debug Bridge) обязательно нужен для:
+- Обнаружения подключенных Android устройств
+- Выполнения команд ротации IP (`svc data disable/enable`)
+- Получения информации о состоянии устройства
+- Управления режимом полета (`airplane_mode`)
+
+Без ADB система не сможет управлять Android устройствами как прокси!
+
+### 6. Проверка настройки Android устройств
+
+```bash
+# Проверка доступности ADB
+which adb
+adb version
+
+# Подключите Android устройство и проверьте
+adb devices
+
+# Если устройство не видно, проверьте:
+# 1. Включена ли USB-отладка на телефоне
+# 2. Разрешили ли отладку с этого компьютера (на телефоне появится запрос)
+# 3. Правильно ли настроены udev правила
+
+# Тест выполнения команд ротации
+adb shell svc data disable
+sleep 3
+adb shell svc data enable
+
+# Проверка доступности команд режима полета
+adb shell settings put global airplane_mode_on 1
+adb shell am broadcast -a android.intent.action.AIRPLANE_MODE --ez state true
+sleep 5
+adb shell settings put global airplane_mode_on 0
+adb shell am broadcast -a android.intent.action.AIRPLANE_MODE --ez state false
+```
 
 ### 1. Клонирование репозитория
 
@@ -344,14 +384,53 @@ sudo udevadm trigger
 ```bash
 # Создание правил для ADB
 sudo tee /etc/udev/rules.d/51-android.rules << 'EOF'
+# Google/Pixel devices
 SUBSYSTEM=="usb", ATTR{idVendor}=="18d1", MODE="0666", GROUP="plugdev"
+# Samsung devices
 SUBSYSTEM=="usb", ATTR{idVendor}=="04e8", MODE="0666", GROUP="plugdev"
+# HTC devices
 SUBSYSTEM=="usb", ATTR{idVendor}=="0bb4", MODE="0666", GROUP="plugdev"
+# LG devices
+SUBSYSTEM=="usb", ATTR{idVendor}=="1004", MODE="0666", GROUP="plugdev"
+# Motorola devices
+SUBSYSTEM=="usb", ATTR{idVendor}=="22b8", MODE="0666", GROUP="plugdev"
+# Sony devices
+SUBSYSTEM=="usb", ATTR{idVendor}=="0fce", MODE="0666", GROUP="plugdev"
+# OnePlus devices
+SUBSYSTEM=="usb", ATTR{idVendor}=="2a70", MODE="0666", GROUP="plugdev"
+# Xiaomi devices
+SUBSYSTEM=="usb", ATTR{idVendor}=="2717", MODE="0666", GROUP="plugdev"
+# Huawei devices
+SUBSYSTEM=="usb", ATTR{idVendor}=="12d1", MODE="0666", GROUP="plugdev"
 EOF
 
 sudo chmod a+r /etc/udev/rules.d/51-android.rules
 sudo udevadm control --reload-rules
+
+# Перезапуск ADB сервера
+adb kill-server
+adb start-server
+
+# Проверка подключенных устройств
+adb devices
 ```
+
+**Важные шаги для настройки Android устройств:**
+
+1. **На Android устройстве:**
+   - Включите "Режим разработчика" (Settings → About → Build number - тапнуть 7 раз)
+   - Включите "USB-отладку" (Settings → Developer options → USB debugging)
+   - Включите "USB-модем" (Settings → Network → Mobile hotspot and tethering → USB tethering)
+
+2. **Проверка подключения:**
+   ```bash
+   # Должно показать подключенное устройство
+   adb devices
+   
+   # Проверка возможности выполнения команд
+   adb shell svc data disable
+   adb shell svc data enable
+   ```
 
 ## 📊 Мониторинг и логи
 
