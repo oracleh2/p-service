@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from datetime import timedelta
 from typing import Optional
 
-from ..database import get_db
+from ..models.database import get_db
 from ..models.base import User
 from ..utils.security import (
     verify_password,
@@ -15,7 +15,7 @@ from ..utils.security import (
     get_password_hash,
     generate_api_key
 )
-from ..config import settings
+from ..models.config import settings
 
 router = APIRouter()
 security = HTTPBearer()

@@ -6,7 +6,7 @@ from fastapi import HTTPException, status
 from pydantic import BaseModel
 import secrets
 import string
-from ..config import settings
+from ..models.config import settings
 
 # Настройка контекста для хеширования паролей
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -60,7 +60,7 @@ def verify_token(token: str, credentials_exception):
 def generate_api_key(length: int = None) -> str:
     """Генерация API ключа"""
     if length is None:
-        length = settings.API_KEY_LENGTH
+        length = 32  # используем константу вместо settings.API_KEY_LENGTH
 
     alphabet = string.ascii_letters + string.digits
     api_key = ''.join(secrets.choice(alphabet) for _ in range(length))
@@ -73,7 +73,7 @@ def validate_api_key(api_key: str) -> bool:
         return False
 
     # Проверяем длину
-    if len(api_key) != settings.API_KEY_LENGTH:
+    if len(api_key) != 32:  # используем константу
         return False
 
     # Проверяем символы

@@ -4,6 +4,11 @@ import os
 
 
 class Settings(BaseSettings):
+    # API
+    API_V1_STR: str = "/api/v1"
+    PROJECT_NAME: str = "Mobile Proxy Service"
+    PROJECT_VERSION: str = "1.0.0"
+
     # Database
     DATABASE_URL: str = "postgresql://proxy_user:proxy_password@localhost:5432/mobile_proxy"
     DATABASE_POOL_SIZE: int = 20

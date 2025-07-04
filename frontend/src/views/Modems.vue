@@ -506,12 +506,15 @@ const viewModemDetails = (modemId) => {
 
 // Utility functions
 const formatNumber = (num) => {
-    if (num >= 1000000) {
-        return (num / 1000000).toFixed(1) + 'M'
-    } else if (num >= 1000) {
-        return (num / 1000).toFixed(1) + 'K'
+    // Проверяем на undefined/null и возвращаем 0 по умолчанию
+    const number = num || 0;
+
+    if (number >= 1000000) {
+        return (number / 1000000).toFixed(1) + 'M'
+    } else if (number >= 1000) {
+        return (number / 1000).toFixed(1) + 'K'
     }
-    return num.toString()
+    return number.toString()
 }
 
 const formatTime = (timestamp) => {

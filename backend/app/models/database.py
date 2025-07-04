@@ -5,7 +5,7 @@ from redis.asyncio import Redis
 import redis
 from typing import AsyncGenerator
 from .config import settings
-from .models.base import Base
+from .base import Base
 import structlog
 
 logger = structlog.get_logger()
@@ -94,8 +94,8 @@ async def init_db():
 
 async def create_initial_data():
     """Создание начальных данных системы"""
-    from .models.base import SystemConfig, User
-    from .utils.security import get_password_hash, generate_api_key
+    from .base import SystemConfig, User
+    from ..utils.security import get_password_hash, generate_api_key
     from .config import DEFAULT_SYSTEM_CONFIG
 
     async with AsyncSessionLocal() as session:
@@ -143,8 +143,9 @@ async def create_initial_data():
 async def check_db_connection():
     """Проверка подключения к базе данных"""
     try:
+        from sqlalchemy import text
         async with AsyncSessionLocal() as session:
-            await session.execute("SELECT 1")
+            await session.execute(text("SELECT 1"))
         return True
     except Exception as e:
         logger.error("Database connection failed", error=str(e))
@@ -167,7 +168,7 @@ async def check_redis_connection():
 async def get_system_config(key: str, default_value: str = None):
     """Получение значения конфигурации из БД"""
     from sqlalchemy import select
-    from .models.base import SystemConfig
+    from .base import SystemConfig
 
     async with AsyncSessionLocal() as session:
         try:
@@ -196,7 +197,7 @@ async def get_system_config(key: str, default_value: str = None):
 async def update_system_config(key: str, value: str):
     """Обновление значения конфигурации в БД"""
     from sqlalchemy import select
-    from .models.base import SystemConfig
+    from .base import SystemConfig
 
     async with AsyncSessionLocal() as session:
         try:

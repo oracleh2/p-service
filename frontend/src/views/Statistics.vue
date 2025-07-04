@@ -386,13 +386,15 @@ const fetchStatistics = async () => {
 
         // Fetch overview stats
         const overviewResponse = await api.get('/stats/overview')
+        const data = overviewResponse.data
+
         overview.value = {
-            totalRequests: overviewResponse.data.total_requests,
-            successRate: overviewResponse.data.success_rate,
-            avgResponseTime: overviewResponse.data.avg_response_time_ms,
-            uniqueIPs: overviewResponse.data.unique_ips,
-            dataTransfer: overviewResponse.data.data_transferred_mb * 1024 * 1024,
-            errorRate: 100 - overviewResponse.data.success_rate,
+            totalRequests: data.total_requests ?? 0,
+            successRate: data.success_rate ?? 0,
+            avgResponseTime: data.avg_response_time ?? 0,
+            uniqueIPs: data.unique_ips ?? 0,
+            dataTransfer: (data.total_data_transferred ?? 0) * 1024 * 1024,
+            errorRate: 100 - (data.success_rate ?? 0),
             requestsGrowth: Math.floor(Math.random() * 20) + 5,
             successRateGrowth: Math.floor(Math.random() * 5) + 1,
             responseTimeGrowth: Math.floor(Math.random() * 10) + 2,
@@ -407,12 +409,14 @@ const fetchStatistics = async () => {
             api.get('/stats/ips?limit=10')
         ])
 
-        requestsData.value = requestsResponse.data
-        topIPs.value = ipsResponse.data.slice(0, 10).map(ip => ({
-            address: ip.ip_address,
+        // Извлекаем массив данных из ответа
+        requestsData.value = requestsResponse.data.data || []
+
+        topIPs.value = (ipsResponse.data || []).map(ip => ({
+            address: ip.ip_address || 'N/A',
             operator: ip.operator || 'Unknown',
-            requests: ip.total_requests,
-            successRate: Math.floor(Math.random() * 30) + 70
+            requests: ip.requests_count ?? 0,
+            successRate: ip.success_rate ?? 0
         }))
 
         // Generate mock data for charts and tables
@@ -421,6 +425,10 @@ const fetchStatistics = async () => {
     } catch (error) {
         console.error('Failed to fetch statistics:', error)
         toast.error('Failed to load statistics')
+
+        // Устанавливаем пустые массивы при ошибке
+        requestsData.value = []
+        topIPs.value = []
     } finally {
         isLoading.value = false
     }
@@ -429,14 +437,23 @@ const fetchStatistics = async () => {
 const fetchRealtimeStats = async () => {
     try {
         const response = await api.get('/stats/realtime')
+        const data = response.data
+
         realtimeStats.value = {
-            requestsPerMinute: response.data.requests_per_minute,
-            activeModems: response.data.modems.online,
-            avgResponseTime: response.data.recent_activity.avg_response_time_ms,
-            successRate: response.data.recent_activity.success_rate
+            requestsPerMinute: data.requests_per_minute ?? 0,
+            activeModems: data.modems?.online ?? 0,
+            avgResponseTime: data.recent_activity?.avg_response_time_ms ?? 0,
+            successRate: data.recent_activity?.success_rate ?? 0
         }
     } catch (error) {
         console.error('Failed to fetch realtime stats:', error)
+        // Используем заглушку при ошибке
+        realtimeStats.value = {
+            requestsPerMinute: 0,
+            activeModems: 0,
+            avgResponseTime: 0,
+            successRate: 0
+        }
     }
 }
 
@@ -470,28 +487,32 @@ const exportData = async () => {
 }
 
 const generateMockData = () => {
-    // Mock data for charts
-    successRateData.value = generateMockSuccessRateData()
-    modemPerformanceData.value = generateMockModemPerformanceData()
-    ipDistributionData.value = generateMockIPDistributionData()
-    hourlyData.value = generateMockHourlyData()
+    try {
+        // Mock data for charts
+        successRateData.value = generateMockSuccessRateData()
+        modemPerformanceData.value = generateMockModemPerformanceData()
+        ipDistributionData.value = generateMockIPDistributionData()
+        hourlyData.value = generateMockHourlyData()
 
-    // Mock data for tables
-    requestMethods.value = [
-        {method: 'GET', count: 15420, percentage: 45.2, avgTime: 234},
-        {method: 'POST', count: 12850, percentage: 37.6, avgTime: 456},
-        {method: 'PUT', count: 3210, percentage: 9.4, avgTime: 567},
-        {method: 'DELETE', count: 1890, percentage: 5.5, avgTime: 345},
-        {method: 'PATCH', count: 780, percentage: 2.3, avgTime: 289}
-    ]
+        // Mock data for tables
+        requestMethods.value = [
+            {method: 'GET', count: 15420, percentage: 45.2, avgTime: 234},
+            {method: 'POST', count: 12850, percentage: 37.6, avgTime: 456},
+            {method: 'PUT', count: 3210, percentage: 9.4, avgTime: 567},
+            {method: 'DELETE', count: 1890, percentage: 5.5, avgTime: 345},
+            {method: 'PATCH', count: 780, percentage: 2.3, avgTime: 289}
+        ]
 
-    statusCodes.value = [
-        {code: 200, count: 25640, percentage: 75.2},
-        {code: 404, count: 3210, percentage: 9.4},
-        {code: 500, count: 2140, percentage: 6.3},
-        {code: 403, count: 1890, percentage: 5.5},
-        {code: 429, count: 1230, percentage: 3.6}
-    ]
+        statusCodes.value = [
+            {code: 200, count: 25640, percentage: 75.2},
+            {code: 404, count: 3210, percentage: 9.4},
+            {code: 500, count: 2140, percentage: 6.3},
+            {code: 403, count: 1890, percentage: 5.5},
+            {code: 429, count: 1230, percentage: 3.6}
+        ]
+    } catch (error) {
+        console.error('Error generating mock data:', error)
+    }
 }
 
 const generateMockSuccessRateData = () => {
@@ -537,12 +558,15 @@ const generateMockHourlyData = () => {
 
 // Utility functions
 const formatNumber = (num) => {
-    if (num >= 1000000) {
-        return (num / 1000000).toFixed(1) + 'M'
-    } else if (num >= 1000) {
-        return (num / 1000).toFixed(1) + 'K'
+    // Безопасная проверка на undefined/null
+    const number = num ?? 0;
+
+    if (number >= 1000000) {
+        return (number / 1000000).toFixed(1) + 'M'
+    } else if (number >= 1000) {
+        return (number / 1000).toFixed(1) + 'K'
     }
-    return num.toString()
+    return number.toString()
 }
 
 const formatBytes = (bytes) => {

@@ -10,15 +10,15 @@ echo ""
 check_port() {
     local port=$1
     local service=$2
-    if lsof -Pi :$port -sTCP:LISTEN -t >/dev/null; then
+    if lsof -Pi :$port -sTCP:LISTEN -t >/dev/null 2>&1; then
         echo "⚠️  Порт $port уже занят ($service)"
         return 1
     fi
     return 0
 }
 
-# Функция для ожидания готовности сервиса
-wait_for_service() {
+# Функция для ожидания готовности HTTP сервиса
+wait_for_http_service() {
     local url=$1
     local service_name=$2
     local max_attempts=30
@@ -28,6 +28,75 @@ wait_for_service() {
 
     while [ $attempt -le $max_attempts ]; do
         if curl -s "$url" > /dev/null 2>&1; then
+            echo "✅ $service_name готов"
+            return 0
+        fi
+
+        echo "   Попытка $attempt/$max_attempts..."
+        sleep 2
+        attempt=$((attempt + 1))
+    done
+
+    echo "❌ $service_name не отвечает после $max_attempts попыток"
+    return 1
+}
+
+# Функция для ожидания готовности PostgreSQL
+wait_for_postgres() {
+    local max_attempts=30
+    local attempt=1
+
+    echo "⏳ Ожидание готовности PostgreSQL..."
+
+    while [ $attempt -le $max_attempts ]; do
+        if docker-compose -f docker-compose.yml exec -T postgres pg_isready -U proxy_user -d mobile_proxy > /dev/null 2>&1; then
+            echo "✅ PostgreSQL готов"
+            return 0
+        fi
+
+        echo "   Попытка $attempt/$max_attempts..."
+        sleep 2
+        attempt=$((attempt + 1))
+    done
+
+    echo "❌ PostgreSQL не отвечает после $max_attempts попыток"
+    return 1
+}
+
+# Функция для ожидания готовности Redis
+wait_for_redis() {
+    local max_attempts=30
+    local attempt=1
+
+    echo "⏳ Ожидание готовности Redis..."
+
+    while [ $attempt -le $max_attempts ]; do
+        if docker-compose -f docker-compose.yml exec -T redis redis-cli ping | grep -q "PONG" 2>/dev/null; then
+            echo "✅ Redis готов"
+            return 0
+        fi
+
+        echo "   Попытка $attempt/$max_attempts..."
+        sleep 2
+        attempt=$((attempt + 1))
+    done
+
+    echo "❌ Redis не отвечает после $max_attempts попыток"
+    return 1
+}
+
+# Альтернативная функция проверки TCP-порта (если docker exec не работает)
+wait_for_tcp_port() {
+    local host=$1
+    local port=$2
+    local service_name=$3
+    local max_attempts=30
+    local attempt=1
+
+    echo "⏳ Ожидание готовности $service_name на $host:$port..."
+
+    while [ $attempt -le $max_attempts ]; do
+        if timeout 3 bash -c "cat < /dev/null > /dev/tcp/$host/$port" 2>/dev/null; then
             echo "✅ $service_name готов"
             return 0
         fi
@@ -158,12 +227,42 @@ docker-compose -f docker-compose.yml up -d
 echo ""
 echo "⏳ Ожидание готовности сервисов..."
 
-wait_for_service "http://localhost:5432" "PostgreSQL" &
-wait_for_service "http://localhost:6379" "Redis" &
-wait_for_service "http://localhost:9090" "Prometheus" &
-wait_for_service "http://localhost:3001" "Grafana" &
+# Используем разные методы проверки для разных сервисов
+wait_for_postgres &
+postgres_pid=$!
 
-wait
+wait_for_redis &
+redis_pid=$!
+
+wait_for_http_service "http://localhost:9090" "Prometheus" &
+prometheus_pid=$!
+
+wait_for_http_service "http://localhost:3001" "Grafana" &
+grafana_pid=$!
+
+# Ждем завершения всех проверок
+wait $postgres_pid
+postgres_result=$?
+
+wait $redis_pid
+redis_result=$?
+
+wait $prometheus_pid
+prometheus_result=$?
+
+wait $grafana_pid
+grafana_result=$?
+
+# Если основные проверки не сработали, пробуем альтернативный метод
+if [ $postgres_result -ne 0 ]; then
+    echo "📡 Пробуем альтернативную проверку PostgreSQL..."
+    wait_for_tcp_port "localhost" "5432" "PostgreSQL"
+fi
+
+if [ $redis_result -ne 0 ]; then
+    echo "📡 Пробуем альтернативную проверку Redis..."
+    wait_for_tcp_port "localhost" "6379" "Redis"
+fi
 
 echo ""
 echo "📊 Статус контейнеров:"
@@ -218,5 +317,9 @@ echo "   docker-compose -f docker-compose.yml logs postgres  # Логи PostgreS
 echo "   docker-compose -f docker-compose.yml restart        # Перезапуск сервисов"
 echo ""
 
-echo "✅ Инфраструктурные сервисы запущены! Теперь запустите Backend и Frontend вручную."
+echo "🔧 Проверка готовности сервисов:"
+echo "   docker-compose -f docker-compose.yml exec postgres pg_isready -U proxy_user"
+echo "   docker-compose -f docker-compose.yml exec redis redis-cli ping"
+echo ""
 
+echo "✅ Инфраструктурные сервисы запущены! Теперь запустите Backend и Frontend вручную."

@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     debug: bool = False
     reload: bool = False
 
+    log_level: str = "INFO"
+    api_v1_str: str = "/api/v1"
+    project_name: str = "Mobile Proxy Service"
+    project_version: str = "1.0.0"
+
     # CORS
     cors_origins: list = [
         "http://localhost:3000",

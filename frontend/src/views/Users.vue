@@ -508,10 +508,11 @@ const userForm = ref({
 
 // Stats
 const stats = computed(() => {
-    const totalUsers = users.value.length
-    const activeUsers = users.value.filter(user => user.is_active).length
-    const adminUsers = users.value.filter(user => user.role === 'admin').length
-    const apiKeys = users.value.filter(user => user.api_key).length
+    const usersList = users.value || []
+    const totalUsers = usersList.length
+    const activeUsers = usersList.filter(user => user?.is_active).length
+    const adminUsers = usersList.filter(user => user?.role === 'admin').length
+    const apiKeys = usersList.filter(user => user?.api_key).length
 
     return {
         totalUsers,
@@ -590,23 +591,39 @@ const saveUser = async () => {
             const response = await api.put(`/admin/users/${editingUser.value.id}`, userForm.value)
 
             // Update user in list
-            const index = users.value.findIndex(u => u.id === editingUser.value.id)
+            const index = users.value.findIndex(u => u?.id === editingUser.value.id)
             if (index !== -1) {
-                users.value[index] = {...users.value[index], ...response.data}
+                users.value[index] = {
+                    ...users.value[index],
+                    ...userForm.value,
+                    id: editingUser.value.id
+                }
             }
 
             toast.success('User updated successfully')
         } else {
             // Create user
             const response = await api.post('/admin/users', userForm.value)
-            users.value.unshift(response.data)
+
+            // Добавляем нового пользователя с данными из формы + ответа сервера
+            const newUser = {
+                ...userForm.value,
+                ...(response.data.user || response.data),
+                id: response.data.user?.id || response.data.id || `user_${Date.now()}`
+            }
+
+            users.value.unshift(newUser)
             toast.success('User created successfully')
         }
 
         closeUserModal()
+
+        // Перезагружаем список пользователей для актуальных данных
+        fetchUsers()
+
     } catch (error) {
         console.error('Failed to save user:', error)
-        toast.error('Failed to save user')
+        toast.error(error.response?.data?.detail || 'Failed to save user')
     } finally {
         isSaving.value = false
     }
@@ -667,16 +684,27 @@ const debounceSearch = debounce(() => {
 
 // Utility functions
 const formatDate = (dateString) => {
-    return format(new Date(dateString), 'MMM dd, yyyy')
+    try {
+        if (!dateString) return 'Unknown'
+        const date = new Date(dateString)
+        if (isNaN(date.getTime())) return 'Invalid Date'
+        return format(date, 'MMM dd, yyyy')
+    } catch (error) {
+        console.error('Date formatting error:', error)
+        return 'Invalid Date'
+    }
 }
 
 const getUserInitials = (user) => {
+    if (!user || !user.username) return 'U'
+
     return user.username
+        .toString()
         .split(' ')
         .map(name => name.charAt(0))
         .join('')
         .toUpperCase()
-        .slice(0, 2)
+        .slice(0, 2) || 'U'
 }
 
 const getRoleClass = (role) => {
@@ -692,8 +720,9 @@ const getStatusClass = (isActive) => {
 }
 
 const getUsagePercentage = (user) => {
-    if (!user.requests_limit || user.requests_limit === 0) return 0
-    return Math.min(100, (user.requests_used / user.requests_limit) * 100)
+    if (!user || !user.requests_limit || user.requests_limit === 0) return 0
+    const used = user.requests_used || 0
+    return Math.min(100, (used / user.requests_limit) * 100)
 }
 
 // Lifecycle

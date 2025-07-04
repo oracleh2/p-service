@@ -579,15 +579,23 @@ const calculateStats = () => {
         return
     }
 
-    const successful = logs.value.filter(log => log.status_code >= 200 && log.status_code < 400).length
-    const errors = logs.value.filter(log => log.status_code >= 400).length
-    const totalResponseTime = logs.value.reduce((sum, log) => sum + (log.response_time_ms || 0), 0)
+    const successful = logs.value.filter(log =>
+        log.status_code && log.status_code >= 200 && log.status_code < 400
+    ).length
+
+    const errors = logs.value.filter(log =>
+        log.status_code && log.status_code >= 400
+    ).length
+
+    const totalResponseTime = logs.value.reduce((sum, log) =>
+        sum + (log.response_time_ms || 0), 0
+    )
 
     stats.value = {
         totalRequests: total,
-        successRate: Math.round((successful / total) * 100),
-        avgResponseTime: Math.round(totalResponseTime / total),
-        errorRate: Math.round((errors / total) * 100)
+        successRate: total > 0 ? Math.round((successful / total) * 100) : 0,
+        avgResponseTime: total > 0 ? Math.round(totalResponseTime / total) : 0,
+        errorRate: total > 0 ? Math.round((errors / total) * 100) : 0
     }
 }
 
@@ -711,7 +719,15 @@ const debounceSearch = debounce(() => {
 
 // Utility functions
 const formatDate = (dateString) => {
-    return format(new Date(dateString), 'MMM dd, yyyy HH:mm:ss')
+    try {
+        if (!dateString) return 'Unknown'
+        const date = new Date(dateString)
+        if (isNaN(date.getTime())) return 'Invalid Date'
+        return format(date, 'MMM dd, yyyy HH:mm:ss')
+    } catch (error) {
+        console.error('Date formatting error:', error)
+        return 'Invalid Date'
+    }
 }
 
 const getMethodClass = (method) => {
