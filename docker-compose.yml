@@ -1,0 +1,103 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: mobile_proxy_db
+    environment:
+      POSTGRES_DB: mobile_proxy
+      POSTGRES_USER: proxy_user
+      POSTGRES_PASSWORD: proxy_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: mobile_proxy_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    container_name: mobile_proxy_backend
+    ports:
+      - "8000:8000"  # API
+      - "8080:8080"  # Proxy Server
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      DATABASE_URL: postgresql://proxy_user:proxy_password@postgres:5432/mobile_proxy
+      REDIS_URL: redis://redis:6379
+      SECRET_KEY: your-secret-key-change-in-production
+      JWT_SECRET_KEY: your-jwt-secret-key-change-in-production
+      PROXY_PORT: 8080
+      API_PORT: 8000
+      DEFAULT_ROTATION_INTERVAL: 600
+      HEALTH_CHECK_INTERVAL: 30
+      HEARTBEAT_TIMEOUT: 60
+      LOG_LEVEL: INFO
+    volumes:
+      - ./backend:/app
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    container_name: mobile_proxy_frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    environment:
+      - NODE_ENV=production
+    volumes:
+      - ./frontend/nginx.conf:/etc/nginx/nginx.conf:ro
+    restart: unless-stopped
+    networks:
+      - default
+
+  celery_worker:
+    build: ./backend
+    container_name: mobile_proxy_celery
+    command: celery -A app.tasks.celery_app worker --loglevel=info
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      DATABASE_URL: postgresql://proxy_user:proxy_password@postgres:5432/mobile_proxy
+      REDIS_URL: redis://redis:6379
+      SECRET_KEY: your-secret-key-change-in-production
+    volumes:
+      - ./backend:/app
+    restart: unless-stopped
+
+  celery_beat:
+    build: ./backend
+    container_name: mobile_proxy_scheduler
+    command: celery -A app.tasks.celery_app beat --loglevel=info
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      DATABASE_URL: postgresql://proxy_user:proxy_password@postgres:5432/mobile_proxy
+      REDIS_URL: redis://redis:6379
+      SECRET_KEY: your-secret-key-change-in-production
+    volumes:
+      - ./backend:/app
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  default:
+    driver: bridge
