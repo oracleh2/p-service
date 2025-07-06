@@ -10,13 +10,10 @@ import random
 from datetime import datetime, timezone
 from .models.database import init_db
 from .models.config import settings
-from .core.modem_manager import ModemManager  # Добавить эту строку
+from .core.device_manager import ModemManager  # Добавить эту строку
 from .api import auth, proxy, admin, stats
-from .core.managers import init_managers
-from .core.managers import get_modem_manager
+from .core.managers import get_device_manager, get_proxy_server
 
-
-init_managers()
 
 created_users = []
 
@@ -193,7 +190,7 @@ async def admin_system_health():
             "proxy_server": "running",
             "database": "up",
             "redis": "up",
-            "modem_manager": "up"
+            "device_manager": "up"
         },
         "uptime": time.time(),
         "timestamp": time.time()
@@ -202,53 +199,62 @@ async def admin_system_health():
 
 @app.get("/admin/modems")
 async def admin_get_modems():
-    """Список реальных модемов"""
-    modem_manager = get_modem_manager()
-    if not modem_manager:
+    """Список всех устройств (Android + USB модемы + Raspberry Pi)"""
+    device_manager = get_device_manager()
+    if not device_manager:
         return []
     try:
-        # Обновляем список модемов
-        await modem_manager.discover_modems()
+        # Обновляем список устройств
+        await device_manager.discover_all_devices()
 
-        # Получаем все модемы
-        all_modems = await modem_manager.get_all_modems()
+        # Получаем все устройства
+        all_devices = await device_manager.get_all_devices()
 
-        modems_list = []
-        for modem_id, modem_info in all_modems.items():
+        devices_list = []
+        for device_id, device_info in all_devices.items():
             # Получаем внешний IP
-            external_ip = await modem_manager.get_modem_external_ip(modem_id)
+            external_ip = await device_manager.get_device_external_ip(device_id)
 
-            modem_data = {
-                "modem_id": modem_id,
-                "modem_type": modem_info['type'],
-                "status": modem_info['status'],
+            device_data = {
+                "modem_id": device_id,  # Оставляем для совместимости с фронтендом
+                "modem_type": device_info['type'],
+                "status": device_info['status'],
                 "external_ip": external_ip or "Not connected",
-                "operator": modem_info.get('operator', 'Unknown'),
-                "interface": modem_info['interface'],
-                "device_info": modem_info['device_info'],
+                "operator": device_info.get('operator', 'Unknown'),
+                "interface": device_info['interface'],
+                "device_info": device_info['device_info'],
                 "last_rotation": time.time(),
                 "total_requests": 0,
                 "success_rate": 100.0,
                 "auto_rotation": True
             }
 
-            # Добавляем специфичные для Android поля
-            if modem_info['type'] == 'android':
-                modem_data.update({
-                    "manufacturer": modem_info.get('manufacturer', 'Unknown'),
-                    "model": modem_info.get('model', 'Unknown'),
-                    "android_version": modem_info.get('android_version', 'Unknown'),
-                    "battery_level": modem_info.get('battery_level', 0),
-                    "adb_id": modem_info.get('adb_id', ''),
+            # Добавляем специфичные для типа поля
+            if device_info['type'] == 'android':
+                device_data.update({
+                    "manufacturer": device_info.get('manufacturer', 'Unknown'),
+                    "model": device_info.get('model', 'Unknown'),
+                    "android_version": device_info.get('android_version', 'Unknown'),
+                    "battery_level": device_info.get('battery_level', 0),
+                    "adb_id": device_info.get('adb_id', ''),
+                })
+            elif device_info['type'] == 'usb_modem':
+                device_data.update({
+                    "signal_strength": device_info.get('signal_strength', 'N/A'),
+                    "technology": device_info.get('technology', 'Unknown'),
+                })
+            elif device_info['type'] == 'raspberry_pi':
+                device_data.update({
+                    "interface_type": "PPP/WWAN",
                 })
 
-            modems_list.append(modem_data)
+            devices_list.append(device_data)
 
-        logger.info(f"Returning {len(modems_list)} real modems")
-        return modems_list
+        logger.info(f"Returning {len(devices_list)} devices")
+        return devices_list
 
     except Exception as e:
-        logger.error(f"Error getting modems: {e}")
+        logger.error(f"Error getting devices: {e}")
         return []
 
 
@@ -256,88 +262,90 @@ async def admin_get_modems():
 
 @app.get("/admin/modems/{modem_id}")
 async def admin_get_modem_by_id(modem_id: str):
-    """Получение информации о конкретном модеме"""
-    modem_manager = get_modem_manager()
-    if not modem_manager:
-        return []
+    """Получение информации о конкретном устройстве"""
+    device_manager = get_device_manager()
+    if not device_manager:
+        raise HTTPException(status_code=503, detail="Device manager not available")
+
     try:
-        # Получаем все модемы
-        all_modems = await modem_manager.get_all_modems()
+        logger.info(f"Getting info for device: {modem_id}")
 
-        if modem_id not in all_modems:
-            raise HTTPException(status_code=404, detail="Modem not found")
+        # Получаем все устройства
+        all_devices = await device_manager.get_all_devices()
 
-        modem_info = all_modems[modem_id]
+        if modem_id not in all_devices:
+            raise HTTPException(status_code=404, detail="Device not found")
+
+        device_info = all_devices[modem_id]
+        logger.info(f"Device info: {device_info}")
 
         # Получаем внешний IP
-        external_ip = await modem_manager.get_modem_external_ip(modem_id)
+        external_ip = await device_manager.get_device_external_ip(modem_id)
 
-        # Получаем дополнительную информацию в зависимости от типа модема
-        additional_info = {}
-
-        if modem_info['type'] == 'android':
-            # Для Android устройств получаем дополнительную информацию
-            device_details = await modem_manager.get_android_device_details(modem_info['interface'])
-            additional_info.update({
-                'manufacturer': device_details.get('manufacturer', 'Unknown'),
-                'model': device_details.get('model', 'Unknown'),
-                'android_version': device_details.get('android_version', 'Unknown'),
-                'battery_level': device_details.get('battery_level', 0),
-                'adb_id': modem_info.get('adb_id', ''),
-                'usb_tethering': device_details.get('usb_tethering', False),
-                'rotation_methods': ['data_toggle', 'airplane_mode']
-            })
-        elif modem_info['type'] == 'usb_modem':
-            # Для USB модемов получаем AT-команды информацию
-            usb_details = await modem_manager.get_usb_modem_details(modem_info)
-            additional_info.update({
-                'signal_strength': usb_details.get('signal_strength', 'N/A'),
-                'operator': usb_details.get('operator', 'Unknown'),
-                'technology': usb_details.get('technology', 'Unknown'),
-                'temperature': usb_details.get('temperature', 'N/A'),
-                'rotation_methods': ['at_commands', 'network_reset']
-            })
-
-        # Формируем полный ответ
-        modem_data = {
+        # Базовые данные устройства
+        device_data = {
             "modem_id": modem_id,
-            "modem_type": modem_info['type'],
-            "status": modem_info['status'],
+            "modem_type": device_info.get('type', 'unknown'),
+            "status": device_info.get('status', 'unknown'),
             "external_ip": external_ip or "Not connected",
-            "operator": modem_info.get('operator', 'Unknown'),
-            "interface": modem_info['interface'],
-            "device_info": modem_info['device_info'],
-            "last_rotation": time.time() - 300,  # Пример: 5 минут назад
+            "operator": device_info.get('operator', 'Unknown'),
+            "interface": device_info.get('interface', 'Unknown'),
+            "device_info": device_info.get('device_info', f"Device {modem_id}"),
+            "last_rotation": time.time() - 300,
             "total_requests": 0,
             "successful_requests": 0,
             "failed_requests": 0,
             "success_rate": 100.0,
             "avg_response_time": 250,
             "auto_rotation": True,
-            "rotation_interval": 600,  # 10 минут
-            "last_seen": modem_info.get('last_seen', datetime.now().isoformat()),
-            **additional_info
+            "rotation_interval": 600,
+            "last_seen": device_info.get('last_seen', datetime.now().isoformat()),
+            "rotation_methods": device_info.get('rotation_methods', [])
         }
 
-        logger.info(f"Returning detailed info for modem {modem_id}")
-        return modem_data
+        # Добавляем специфичную информацию по типу
+        if device_info.get('type') == 'android':
+            device_data.update({
+                'manufacturer': device_info.get('manufacturer', 'Unknown'),
+                'model': device_info.get('model', 'Unknown'),
+                'android_version': device_info.get('android_version', 'Unknown'),
+                'battery_level': device_info.get('battery_level', 0),
+                'adb_id': device_info.get('adb_id', ''),
+            })
+        elif device_info.get('type') == 'usb_modem':
+            device_data.update({
+                'signal_strength': device_info.get('signal_strength', 'N/A'),
+                'technology': device_info.get('technology', 'Unknown'),
+                'manufacturer': device_info.get('manufacturer', 'Unknown'),
+                'model': device_info.get('model', 'Unknown'),
+            })
+        elif device_info.get('type') == 'raspberry_pi':
+            device_data.update({
+                'interface_type': 'PPP/WWAN',
+                'connection_type': 'Network modem'
+            })
+
+        logger.info(f"Returning device data: {device_data}")
+        return device_data
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error getting modem {modem_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Unexpected error getting device {modem_id}: {str(e)}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
 # Также добавьте endpoint для статистики модема
 @app.get("/admin/modems/{modem_id}/stats")
 async def admin_get_modem_stats(modem_id: str):
     """Получение статистики конкретного модема"""
-    modem_manager = get_modem_manager()
-    if not modem_manager:
+    device_manager = get_device_manager()
+    if not device_manager:
         return []
     try:
-        all_modems = await modem_manager.get_all_modems()
+        all_modems = await device_manager.get_all_devices()
 
         if modem_id not in all_modems:
             raise HTTPException(status_code=404, detail="Modem not found")
@@ -378,11 +386,11 @@ async def admin_get_modem_stats(modem_id: str):
 @app.put("/admin/modems/{modem_id}")
 async def admin_update_modem(modem_id: str, update_data: dict):
     """Обновление настроек модема"""
-    modem_manager = get_modem_manager()
-    if not modem_manager:
+    device_manager = get_device_manager()
+    if not device_manager:
         return []
     try:
-        all_modems = await modem_manager.get_all_modems()
+        all_modems = await device_manager.get_all_devices()
 
         if modem_id not in all_modems:
             raise HTTPException(status_code=404, detail="Modem not found")
@@ -408,11 +416,11 @@ async def admin_update_modem(modem_id: str, update_data: dict):
 @app.delete("/admin/modems/{modem_id}")
 async def admin_delete_modem(modem_id: str):
     """Удаление модема из системы"""
-    modem_manager = get_modem_manager()
-    if not modem_manager:
+    device_manager = get_device_manager()
+    if not device_manager:
         return []
     try:
-        all_modems = await modem_manager.get_all_modems()
+        all_modems = await device_manager.get_all_devices()
 
         if modem_id not in all_modems:
             raise HTTPException(status_code=404, detail="Modem not found")
@@ -430,25 +438,30 @@ async def admin_delete_modem(modem_id: str):
 
 @app.post("/admin/modems/scan")
 async def scan_modems():
-    """Принудительное сканирование модемов"""
-    modem_manager = get_modem_manager()
-    if not modem_manager:
-        return []
+    """Принудительное сканирование всех устройств"""
+    device_manager = get_device_manager()
+    if not device_manager:
+        return {"error": "Device manager not available"}
     try:
-        logger.info("Manual modem scan initiated")
-        await modem_manager.discover_modems()
+        logger.info("Manual device scan initiated")
+        await device_manager.discover_all_devices()
 
-        all_modems = await modem_manager.get_all_modems()
+        all_devices = await device_manager.get_all_devices()
 
         return {
-            "message": "Modem scan completed",
-            "found_modems": len(all_modems),
-            "modems": list(all_modems.keys()),
+            "message": "Device scan completed",
+            "found_modems": len(all_devices),  # Оставляем для совместимости
+            "modems": list(all_devices.keys()),
+            "devices_by_type": {
+                "android": len([d for d in all_devices.values() if d['type'] == 'android']),
+                "usb_modem": len([d for d in all_devices.values() if d['type'] == 'usb_modem']),
+                "raspberry_pi": len([d for d in all_devices.values() if d['type'] == 'raspberry_pi'])
+            },
             "timestamp": time.time()
         }
 
     except Exception as e:
-        logger.error(f"Error scanning modems: {e}")
+        logger.error(f"Error scanning devices: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/stats/overview")
@@ -506,33 +519,32 @@ async def rotate_all_modems():
 
 @app.post("/admin/modems/{modem_id}/rotate")
 async def rotate_modem(modem_id: str):
-    """Реальная ротация IP конкретного модема"""
-    modem_manager = get_modem_manager()
-    if not modem_manager:
-        return []
+    """Ротация IP конкретного устройства"""
+    device_manager = get_device_manager()
+    if not device_manager:
+        raise HTTPException(status_code=503, detail="Device manager not available")
+
     try:
-        all_modems = await modem_manager.get_all_modems()
+        all_devices = await device_manager.get_all_devices()
 
-        if modem_id not in all_modems:
-            raise HTTPException(status_code=404, detail="Modem not found")
+        if modem_id not in all_devices:
+            raise HTTPException(status_code=404, detail="Device not found")
 
-        modem = all_modems[modem_id]
+        device = all_devices[modem_id]
+        logger.info(f"Starting IP rotation for {modem_id} ({device['type']})")
 
-        logger.info(f"Starting IP rotation for {modem_id}")
-
-        # Выполняем ротацию в зависимости от типа модема
-        if modem['type'] == 'android':
-            success = await modem_manager.rotate_android_modem(modem)
-        elif modem['type'] == 'usb_modem':
-            success = await modem_manager.rotate_usb_modem(modem)
-        else:
-            success = False
+        # Выполняем ротацию
+        success = await device_manager.rotate_device_ip(modem_id)
 
         if success:
-            new_ip = await modem_manager.get_modem_external_ip(modem_id)
+            # Ждем немного и получаем новый IP
+            await asyncio.sleep(2)
+            new_ip = await device_manager.get_device_external_ip(modem_id)
+
             return {
                 "message": f"IP rotation completed for {modem_id}",
-                "modem_id": modem_id,
+                "device_id": modem_id,
+                "device_type": device['type'],
                 "status": "success",
                 "new_ip": new_ip,
                 "timestamp": time.time()
@@ -540,7 +552,8 @@ async def rotate_modem(modem_id: str):
         else:
             return {
                 "message": f"IP rotation failed for {modem_id}",
-                "modem_id": modem_id,
+                "device_id": modem_id,
+                "device_type": device['type'],
                 "status": "failed",
                 "timestamp": time.time()
             }
@@ -548,7 +561,7 @@ async def rotate_modem(modem_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error rotating modem {modem_id}: {e}")
+        logger.error(f"Error rotating device {modem_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -580,18 +593,26 @@ async def startup_event():
     except Exception as e:
         logger.error(f"❌ Failed to initialize database: {e}")
 
-    # Запуск ModemManager (добавить этот блок)
-    modem_manager = get_modem_manager()
-    if not modem_manager:
-        return []
-    try:
-        await modem_manager.start()
-        logger.info("✅ ModemManager started successfully")
-    except Exception as e:
-        logger.error(f"❌ Failed to start ModemManager: {e}")
+    # Запуск DeviceManager
+    device_manager = get_device_manager()
+    if device_manager:
+        try:
+            await device_manager.start()
+            logger.info("✅ Device manager started successfully")
+        except Exception as e:
+            logger.error(f"❌ Failed to start device manager: {e}")
+
+    # Запуск ProxyServer
+    proxy_server = get_proxy_server()
+    if proxy_server:
+        try:
+            await proxy_server.start()
+            logger.info("✅ Proxy server started successfully")
+        except Exception as e:
+            logger.error(f"❌ Failed to start proxy server: {e}")
 
     logger.info(f"📡 API running on http://{getattr(settings, 'api_host', '0.0.0.0')}:{getattr(settings, 'api_port', 8000)}")
-    logger.info("🌐 CORS enabled for 192.168.1.50:3000")
+    logger.info(f"🌐 Proxy server running on http://{getattr(settings, 'proxy_host', '0.0.0.0')}:{getattr(settings, 'proxy_port', 8080)}")
     logger.info("✅ Service ready to handle requests")
 
 
@@ -600,15 +621,23 @@ async def startup_event():
 async def shutdown_event():
     logger.info("🛑 Mobile Proxy Service shutting down...")
 
-    # Добавить остановку ModemManager:
-    modem_manager = get_modem_manager()
-    if not modem_manager:
-        return []
-    try:
-        await modem_manager.stop()
-        logger.info("✅ ModemManager stopped")
-    except Exception as e:
-        logger.error(f"❌ Error stopping ModemManager: {e}")
+    # Остановка ProxyServer
+    proxy_server = get_proxy_server()
+    if proxy_server:
+        try:
+            await proxy_server.stop()
+            logger.info("✅ Proxy server stopped")
+        except Exception as e:
+            logger.error(f"❌ Error stopping proxy server: {e}")
+
+    # Остановка DeviceManager
+    device_manager = get_device_manager()
+    if device_manager:
+        try:
+            await device_manager.stop()
+            logger.info("✅ Device manager stopped")
+        except Exception as e:
+            logger.error(f"❌ Error stopping device manager: {e}")
 
 
 if __name__ == "__main__":

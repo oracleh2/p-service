@@ -1,450 +1,507 @@
-import asyncio
-import aiohttp
-from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional, Tuple
-from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
-import structlog
-import uuid
+# backend/app/core/device_manager.py - УНИВЕРСАЛЬНЫЙ МЕНЕДЖЕР УСТРОЙСТВ
 
-from ..database import AsyncSessionLocal, get_system_config
-from ..models.base import ProxyDevice, RotationConfig, IpHistory
-from ..config import settings
+import asyncio
+import serial
+import subprocess
+import time
+import re
+import json
+from typing import Dict, List, Optional, Tuple
+from datetime import datetime, timezone
+import structlog
+import psutil
+import netifaces
+import random
 
 logger = structlog.get_logger()
 
 
 class DeviceManager:
-    """Менеджер для управления мобильными устройствами"""
+    """Универсальный менеджер для всех типов устройств: Android, USB модемы, Raspberry Pi"""
 
     def __init__(self):
         self.devices: Dict[str, dict] = {}
         self.running = False
-        self.monitor_task = None
-        self.session: Optional[aiohttp.ClientSession] = None
 
     async def start(self):
         """Запуск менеджера устройств"""
         self.running = True
-        self.session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=30),
-            connector=aiohttp.TCPConnector(limit=100)
-        )
-
-        # Загрузка устройств из БД
-        await self.load_devices()
-
-        # Запуск мониторинга
-        self.monitor_task = asyncio.create_task(self.monitor_devices())
-
+        await self.discover_all_devices()
         logger.info("Device manager started")
 
     async def stop(self):
         """Остановка менеджера устройств"""
         self.running = False
-
-        if self.monitor_task:
-            self.monitor_task.cancel()
-            try:
-                await self.monitor_task
-            except asyncio.CancelledError:
-                pass
-
-        if self.session:
-            await self.session.close()
-
         logger.info("Device manager stopped")
 
-    def is_running(self) -> bool:
-        """Проверка запущен ли менеджер"""
-        return self.running
-
-    async def load_devices(self):
-        """Загрузка устройств из базы данных"""
+    async def discover_all_devices(self):
+        """Обнаружение всех типов устройств"""
         try:
-            async with AsyncSessionLocal() as db:
-                stmt = select(ProxyDevice).where(ProxyDevice.status != 'maintenance')
-                result = await db.execute(stmt)
-                devices = result.scalars().all()
+            # Очищаем старый список
+            self.devices.clear()
 
-                for device in devices:
-                    self.devices[str(device.id)] = {
-                        'id': str(device.id),
-                        'name': device.name,
-                        'device_type': device.device_type,
-                        'ip_address': device.ip_address,
-                        'port': device.port,
-                        'status': device.status,
-                        'current_external_ip': device.current_external_ip,
-                        'operator': device.operator,
-                        'region': device.region,
-                        'last_heartbeat': device.last_heartbeat,
-                        'last_ip_rotation': device.last_ip_rotation,
-                        'rotation_interval': device.rotation_interval,
-                        'total_requests': device.total_requests,
-                        'successful_requests': device.successful_requests,
-                        'failed_requests': device.failed_requests,
-                        'avg_response_time_ms': device.avg_response_time_ms,
-                        'is_available': False,
-                        'last_check': None
-                    }
+            # Обнаружение Android устройств
+            android_devices = await self.discover_android_devices()
 
-                logger.info(f"Loaded {len(self.devices)} devices from database")
+            # Обнаружение USB модемов
+            usb_modems = await self.discover_usb_modems()
 
-        except Exception as e:
-            logger.error("Failed to load devices from database", error=str(e))
+            # Обнаружение Raspberry Pi с модемами
+            raspberry_devices = await self.discover_raspberry_devices()
 
-    async def monitor_devices(self):
-        """Мониторинг состояния устройств"""
-        while self.running:
-            try:
-                await self.check_devices_health()
-                await asyncio.sleep(30)  # Проверка каждые 30 секунд
-            except Exception as e:
-                logger.error("Error in device monitoring", error=str(e))
-                await asyncio.sleep(5)
+            # Объединение всех устройств
+            all_devices = {**android_devices, **usb_modems, **raspberry_devices}
 
-    async def check_devices_health(self):
-        """Проверка здоровья всех устройств"""
-        if not self.devices:
-            return
-
-        tasks = []
-        for device_id in self.devices.keys():
-            task = asyncio.create_task(self.check_device_health(device_id))
-            tasks.append(task)
-
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-    async def check_device_health(self, device_id: str):
-        """Проверка здоровья конкретного устройства"""
-        try:
-            device = self.devices.get(device_id)
-            if not device:
-                return
-
-            # Проверка доступности через HTTP
-            is_available = await self.ping_device(device)
-
-            # Обновление статуса в памяти
-            device['is_available'] = is_available
-            device['last_check'] = datetime.now(timezone.utc)
-
-            # Определение нового статуса
-            new_status = 'online' if is_available else 'offline'
-
-            # Проверка heartbeat timeout
-            heartbeat_timeout = await get_system_config('heartbeat_timeout', 60)
-            if device['last_heartbeat']:
-                time_since_heartbeat = (datetime.now(timezone.utc) - device['last_heartbeat']).total_seconds()
-                if time_since_heartbeat > heartbeat_timeout:
-                    new_status = 'offline'
-
-            # Обновление статуса в БД если изменился
-            if device['status'] != new_status:
-                await self.update_device_status(device_id, new_status)
-                device['status'] = new_status
-
+            for device_id, device_info in all_devices.items():
+                self.devices[device_id] = device_info
                 logger.info(
-                    "Device status changed",
+                    "Discovered device",
                     device_id=device_id,
-                    device_name=device['name'],
-                    old_status=device['status'],
-                    new_status=new_status
+                    type=device_info['type'],
+                    info=device_info.get('device_info', 'Unknown')
                 )
 
+            logger.info(f"Total devices discovered: {len(self.devices)}")
+
         except Exception as e:
-            logger.error(f"Failed to check device health", device_id=device_id, error=str(e))
+            logger.error("Error discovering devices", error=str(e))
 
-    async def ping_device(self, device: dict) -> bool:
-        """Проверка доступности устройства"""
+    async def discover_android_devices(self) -> Dict[str, dict]:
+        """Обнаружение Android устройств через ADB"""
+        devices = {}
+
         try:
-            url = f"http://{device['ip_address']}:{device['port']}/health"
+            logger.info("Scanning for Android devices via ADB...")
 
-            async with self.session.get(url, timeout=5) as response:
-                return response.status == 200
+            result = await asyncio.create_subprocess_exec(
+                'adb', 'devices', '-l',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await result.communicate()
 
-        except Exception:
-            return False
+            if result.returncode != 0:
+                logger.error(f"ADB command failed: {stderr.decode()}")
+                return devices
 
-    async def update_device_status(self, device_id: str, status: str):
-        """Обновление статуса устройства в БД"""
+            devices_output = stdout.decode().strip()
+            lines = devices_output.split('\n')[1:]  # Пропускаем заголовок
+
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+
+                # Парсинг строки ADB
+                parts = line.split()
+                if len(parts) >= 2:
+                    device_id = parts[0]
+                    status = parts[1]
+
+                    if status == 'device':
+                        logger.info(f"Found Android device: {device_id}")
+
+                        # Получаем детальную информацию
+                        device_details = await self.get_android_device_details(device_id)
+
+                        android_device_id = f"android_{device_id}"
+                        devices[android_device_id] = {
+                            'id': android_device_id,
+                            'type': 'android',
+                            'interface': device_id,
+                            'adb_id': device_id,
+                            'device_info': device_details.get('friendly_name', f"Android device {device_id}"),
+                            'status': 'online',
+                            'manufacturer': device_details.get('manufacturer', 'Unknown'),
+                            'model': device_details.get('model', 'Unknown'),
+                            'android_version': device_details.get('android_version', 'Unknown'),
+                            'battery_level': device_details.get('battery_level', 0),
+                            'rotation_methods': ['data_toggle', 'airplane_mode'],
+                            'last_seen': datetime.now().isoformat()
+                        }
+
+        except FileNotFoundError:
+            logger.error("ADB not found - install android-tools-adb")
+        except Exception as e:
+            logger.error("Error discovering Android devices", error=str(e))
+
+        return devices
+
+    async def discover_usb_modems(self) -> Dict[str, dict]:
+        """Обнаружение USB 4G модемов"""
+        modems = {}
+
         try:
-            async with AsyncSessionLocal() as db:
-                stmt = update(ProxyDevice).where(
-                    ProxyDevice.id == uuid.UUID(device_id)
-                ).values(
-                    status=status,
-                    updated_at=datetime.now(timezone.utc)
+            logger.info("Scanning for USB modems...")
+
+            # Проверяем стандартные serial порты для USB модемов
+            for device_path in ['/dev/ttyUSB0', '/dev/ttyUSB1', '/dev/ttyUSB2',
+                                '/dev/ttyACM0', '/dev/ttyACM1', '/dev/ttyACM2']:
+                try:
+                    # Попытка открыть порт
+                    with serial.Serial(device_path, timeout=1) as ser:
+                        modem_id = f"usb_{device_path.split('/')[-1]}"
+
+                        # Получаем информацию о модеме через AT команды
+                        modem_info = await self.get_usb_modem_details(device_path)
+
+                        modems[modem_id] = {
+                            'id': modem_id,
+                            'type': 'usb_modem',
+                            'interface': device_path,
+                            'device_info': f"USB modem on {device_path}",
+                            'status': 'online',
+                            'operator': modem_info.get('operator', 'Unknown'),
+                            'signal_strength': modem_info.get('signal_strength', 'N/A'),
+                            'technology': modem_info.get('technology', 'Unknown'),
+                            'rotation_methods': ['at_commands', 'network_reset'],
+                            'last_seen': datetime.now().isoformat()
+                        }
+                        logger.info(f"Found USB modem on {device_path}")
+
+                except (serial.SerialException, PermissionError):
+                    continue
+
+        except Exception as e:
+            logger.error("Error discovering USB modems", error=str(e))
+
+        return modems
+
+    async def discover_raspberry_devices(self) -> Dict[str, dict]:
+        """Обнаружение Raspberry Pi с 4G модулями"""
+        devices = {}
+
+        try:
+            logger.info("Scanning for Raspberry Pi devices...")
+
+            # Поиск PPP и WWAN интерфейсов
+            interfaces = netifaces.interfaces()
+
+            for interface in interfaces:
+                if interface.startswith('ppp') or interface.startswith('wwan'):
+                    device_id = f"raspberry_{interface}"
+
+                    devices[device_id] = {
+                        'id': device_id,
+                        'type': 'raspberry_pi',
+                        'interface': interface,
+                        'device_info': f"Raspberry Pi with modem on {interface}",
+                        'status': 'online',
+                        'rotation_methods': ['ppp_reset', 'modem_restart'],
+                        'last_seen': datetime.now().isoformat()
+                    }
+                    logger.info(f"Found Raspberry Pi device on {interface}")
+
+        except Exception as e:
+            logger.error("Error discovering Raspberry Pi devices", error=str(e))
+
+        return devices
+
+    async def get_android_device_details(self, device_id: str) -> Dict[str, any]:
+        """Получение детальной информации об Android устройстве"""
+        details = {}
+
+        try:
+            commands = {
+                'manufacturer': ['getprop', 'ro.product.manufacturer'],
+                'model': ['getprop', 'ro.product.model'],
+                'android_version': ['getprop', 'ro.build.version.release'],
+                'brand': ['getprop', 'ro.product.brand'],
+            }
+
+            for key, cmd in commands.items():
+                try:
+                    result = await asyncio.create_subprocess_exec(
+                        'adb', '-s', device_id, 'shell', *cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    stdout, _ = await result.communicate()
+
+                    if result.returncode == 0:
+                        details[key] = stdout.decode().strip()
+
+                except Exception:
+                    details[key] = 'Unknown'
+
+            # Получение уровня батареи
+            try:
+                result = await asyncio.create_subprocess_exec(
+                    'adb', '-s', device_id, 'shell', 'dumpsys', 'battery',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
                 )
-                await db.execute(stmt)
-                await db.commit()
+                stdout, _ = await result.communicate()
+
+                if result.returncode == 0:
+                    battery_output = stdout.decode()
+                    level_match = re.search(r'level:\s*(\d+)', battery_output)
+                    if level_match:
+                        details['battery_level'] = int(level_match.group(1))
+
+            except Exception:
+                details['battery_level'] = 0
+
+            # Создаем friendly name
+            manufacturer = details.get('manufacturer', 'Unknown')
+            model = details.get('model', 'Unknown')
+            details['friendly_name'] = f"{manufacturer} {model}".strip()
 
         except Exception as e:
-            logger.error("Failed to update device status", device_id=device_id, error=str(e))
+            logger.error(f"Error getting Android device details: {e}")
 
-    async def get_available_devices(self) -> List[dict]:
-        """Получение списка доступных устройств"""
-        return [
-            device for device in self.devices.values()
-            if device['status'] == 'online' and device['is_available']
-        ]
+        return details
+
+    async def get_usb_modem_details(self, device_path: str) -> Dict[str, any]:
+        """Получение информации о USB модеме через AT команды"""
+        details = {}
+
+        try:
+            with serial.Serial(device_path, 115200, timeout=5) as ser:
+                commands = {
+                    'manufacturer': 'AT+CGMI',
+                    'model': 'AT+CGMM',
+                    'signal_strength': 'AT+CSQ',
+                    'operator': 'AT+COPS?',
+                    'technology': 'AT+CREG?'
+                }
+
+                for key, cmd in commands.items():
+                    try:
+                        ser.write(f'{cmd}\r\n'.encode())
+                        time.sleep(0.5)
+                        response = ser.read_all().decode('utf-8', errors='ignore')
+
+                        # Простой парсинг ответа
+                        if 'OK' in response:
+                            lines = response.split('\n')
+                            for line in lines:
+                                if line.strip() and not line.startswith('AT') and 'OK' not in line:
+                                    details[key] = line.strip()
+                                    break
+                        else:
+                            details[key] = 'Unknown'
+
+                    except Exception:
+                        details[key] = 'Unknown'
+
+        except Exception as e:
+            logger.error(f"Error getting USB modem details: {e}")
+
+        return details
+
+    async def get_all_devices(self) -> Dict[str, dict]:
+        """Получение всех устройств"""
+        return self.devices.copy()
 
     async def get_device_by_id(self, device_id: str) -> Optional[dict]:
         """Получение устройства по ID"""
         return self.devices.get(device_id)
 
+    async def get_available_devices(self) -> List[dict]:
+        """Получение доступных (онлайн) устройств"""
+        return [device for device in self.devices.values() if device.get('status') == 'online']
+
     async def get_random_device(self) -> Optional[dict]:
         """Получение случайного доступного устройства"""
-        import random
-
-        available_devices = await self.get_available_devices()
-        if available_devices:
-            return random.choice(available_devices)
-        return None
+        available = await self.get_available_devices()
+        return random.choice(available) if available else None
 
     async def get_device_by_operator(self, operator: str) -> Optional[dict]:
         """Получение устройства по оператору"""
-        import random
-
-        available_devices = await self.get_available_devices()
-        operator_devices = [
-            device for device in available_devices
-            if device['operator'] and device['operator'].lower() == operator.lower()
-        ]
-
-        if operator_devices:
-            return random.choice(operator_devices)
+        for device in self.devices.values():
+            if device.get('operator', '').lower() == operator.lower() and device.get('status') == 'online':
+                return device
         return None
 
     async def get_device_by_region(self, region: str) -> Optional[dict]:
         """Получение устройства по региону"""
-        import random
-
-        available_devices = await self.get_available_devices()
-        region_devices = [
-            device for device in available_devices
-            if device['region'] and device['region'].lower() == region.lower()
-        ]
-
-        if region_devices:
-            return random.choice(region_devices)
+        for device in self.devices.values():
+            if device.get('region', '').lower() == region.lower() and device.get('status') == 'online':
+                return device
         return None
 
-    async def add_device(self, device_data: dict):
-        """Добавление нового устройства"""
-        device_id = device_data['id']
-        self.devices[device_id] = {
-            **device_data,
-            'is_available': False,
-            'last_check': None
-        }
-
-        logger.info("Device added to manager", device_id=device_id, device_name=device_data['name'])
-
-    async def remove_device(self, device_id: str):
-        """Удаление устройства"""
-        if device_id in self.devices:
-            device_name = self.devices[device_id]['name']
-            del self.devices[device_id]
-            logger.info("Device removed from manager", device_id=device_id, device_name=device_name)
-
-    async def update_device(self, device_id: str, device_data: dict):
-        """Обновление данных устройства"""
-        if device_id in self.devices:
-            self.devices[device_id].update(device_data)
-            logger.info("Device updated in manager", device_id=device_id)
-
-    async def get_summary(self) -> dict:
-        """Получение общей статистики устройств"""
-        total_devices = len(self.devices)
-        online_devices = len([d for d in self.devices.values() if d['status'] == 'online'])
-        offline_devices = len([d for d in self.devices.values() if d['status'] == 'offline'])
-        busy_devices = len([d for d in self.devices.values() if d['status'] == 'busy'])
-        maintenance_devices = len([d for d in self.devices.values() if d['status'] == 'maintenance'])
-
-        return {
-            'total_devices': total_devices,
-            'online_devices': online_devices,
-            'offline_devices': offline_devices,
-            'busy_devices': busy_devices,
-            'maintenance_devices': maintenance_devices,
-            'available_devices': len(await self.get_available_devices())
-        }
-
-    async def update_device_stats(self, device_id: str, response_time: int, success: bool):
-        """Обновление статистики устройства"""
-        if device_id not in self.devices:
-            return
-
-        device = self.devices[device_id]
-        device['total_requests'] += 1
-
-        if success:
-            device['successful_requests'] += 1
-        else:
-            device['failed_requests'] += 1
-
-        # Обновление среднего времени ответа
-        if device['total_requests'] > 1:
-            device['avg_response_time_ms'] = (
-                    (device['avg_response_time_ms'] * (device['total_requests'] - 1) + response_time)
-                    / device['total_requests']
-            )
-        else:
-            device['avg_response_time_ms'] = response_time
-
-        # Периодическое обновление в БД (каждые 10 запросов)
-        if device['total_requests'] % 10 == 0:
-            await self.sync_device_stats_to_db(device_id)
-
-    async def sync_device_stats_to_db(self, device_id: str):
-        """Синхронизация статистики устройства с БД"""
-        try:
-            device = self.devices.get(device_id)
-            if not device:
-                return
-
-            async with AsyncSessionLocal() as db:
-                stmt = update(ProxyDevice).where(
-                    ProxyDevice.id == uuid.UUID(device_id)
-                ).values(
-                    total_requests=device['total_requests'],
-                    successful_requests=device['successful_requests'],
-                    failed_requests=device['failed_requests'],
-                    avg_response_time_ms=int(device['avg_response_time_ms']),
-                    updated_at=datetime.now(timezone.utc)
-                )
-                await db.execute(stmt)
-                await db.commit()
-
-        except Exception as e:
-            logger.error("Failed to sync device stats to DB", device_id=device_id, error=str(e))
-
-    async def restart_device(self, device_id: str) -> bool:
-        """Перезапуск устройства"""
-        try:
-            device = self.devices.get(device_id)
-            if not device:
-                return False
-
-            # Отправка команды перезапуска на устройство
-            url = f"http://{device['ip_address']}:{device['port']}/restart"
-
-            async with self.session.post(url, timeout=10) as response:
-                if response.status == 200:
-                    # Обновление статуса
-                    await self.update_device_status(device_id, 'offline')
-                    device['status'] = 'offline'
-
-                    logger.info("Device restart initiated", device_id=device_id)
-                    return True
-                else:
-                    logger.error("Failed to restart device", device_id=device_id, status=response.status)
-                    return False
-
-        except Exception as e:
-            logger.error("Error restarting device", device_id=device_id, error=str(e))
-            return False
+    async def is_device_online(self, device_id: str) -> bool:
+        """Проверка онлайн статуса устройства"""
+        device = self.devices.get(device_id)
+        return device is not None and device.get('status') == 'online'
 
     async def get_device_external_ip(self, device_id: str) -> Optional[str]:
         """Получение внешнего IP устройства"""
-        try:
-            device = self.devices.get(device_id)
-            if not device:
-                return None
-
-            # Запрос внешнего IP через устройство
-            url = f"http://{device['ip_address']}:{device['port']}/external-ip"
-
-            async with self.session.get(url, timeout=10) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    external_ip = data.get('external_ip')
-
-                    if external_ip:
-                        # Обновление IP в памяти и БД
-                        device['current_external_ip'] = external_ip
-                        await self.update_device_external_ip(device_id, external_ip)
-
-                        return external_ip
-
+        device = self.devices.get(device_id)
+        if not device:
             return None
 
-        except Exception as e:
-            logger.error("Error getting device external IP", device_id=device_id, error=str(e))
-            return None
+        device_type = device.get('type')
 
-    async def update_device_external_ip(self, device_id: str, external_ip: str):
-        """Обновление внешнего IP устройства в БД"""
+        if device_type == 'android':
+            return await self.get_android_external_ip(device)
+        elif device_type == 'usb_modem':
+            return await self.get_usb_modem_external_ip(device)
+        elif device_type == 'raspberry_pi':
+            return await self.get_raspberry_external_ip(device)
+
+        return None
+
+    async def get_android_external_ip(self, device: dict) -> Optional[str]:
+        """Получение внешнего IP Android устройства"""
         try:
-            async with AsyncSessionLocal() as db:
-                stmt = update(ProxyDevice).where(
-                    ProxyDevice.id == uuid.UUID(device_id)
-                ).values(
-                    current_external_ip=external_ip,
-                    updated_at=datetime.now(timezone.utc)
-                )
-                await db.execute(stmt)
-                await db.commit()
+            device_id = device['adb_id']
 
-                # Добавление в историю IP
-                await self.add_ip_to_history(device_id, external_ip)
-
-        except Exception as e:
-            logger.error("Failed to update device external IP", device_id=device_id, error=str(e))
-
-    async def add_ip_to_history(self, device_id: str, ip_address: str):
-        """Добавление IP в историю"""
-        try:
-            device = self.devices.get(device_id)
-            if not device:
-                return
-
-            async with AsyncSessionLocal() as db:
-                # Проверка существования IP в истории
-                stmt = select(IpHistory).where(
-                    IpHistory.device_id == uuid.UUID(device_id),
-                    IpHistory.ip_address == ip_address
-                )
-                result = await db.execute(stmt)
-                ip_history = result.scalar_one_or_none()
-
-                if ip_history:
-                    # Обновление времени последнего использования
-                    ip_history.last_seen = datetime.now(timezone.utc)
-                    ip_history.total_requests += 1
-                else:
-                    # Создание новой записи
-                    ip_history = IpHistory(
-                        device_id=uuid.UUID(device_id),
-                        ip_address=ip_address,
-                        operator=device['operator'],
-                        total_requests=1
-                    )
-                    db.add(ip_history)
-
-                await db.commit()
-
-        except Exception as e:
-            logger.error("Failed to add IP to history", device_id=device_id, error=str(e))
-
-    async def get_devices_by_status(self, status: str) -> List[dict]:
-        """Получение устройств по статусу"""
-        return [
-            device for device in self.devices.values()
-            if device['status'] == status
-        ]
-
-    async def set_device_maintenance(self, device_id: str, maintenance: bool):
-        """Установка/снятие режима обслуживания"""
-        if device_id in self.devices:
-            status = 'maintenance' if maintenance else 'offline'
-            await self.update_device_status(device_id, status)
-            self.devices[device_id]['status'] = status
-
-            logger.info(
-                "Device maintenance mode changed",
-                device_id=device_id,
-                maintenance=maintenance
+            # Попытка получить IP через ADB
+            result = await asyncio.create_subprocess_exec(
+                'adb', '-s', device_id, 'shell', 'ip', 'route', 'get', '8.8.8.8',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
             )
+            stdout, _ = await result.communicate()
+
+            if result.returncode == 0:
+                output = stdout.decode()
+                ip_match = re.search(r'src (\d+\.\d+\.\d+\.\d+)', output)
+                if ip_match:
+                    return ip_match.group(1)
+
+        except Exception as e:
+            logger.error(f"Error getting Android external IP: {e}")
+
+        return None
+
+    async def get_usb_modem_external_ip(self, device: dict) -> Optional[str]:
+        """Получение внешнего IP USB модема"""
+        try:
+            # Можно использовать AT команды или проверку сетевых интерфейсов
+            # Пока возвращаем None, можно дополнить позже
+            return None
+        except Exception as e:
+            logger.error(f"Error getting USB modem external IP: {e}")
+            return None
+
+    async def get_raspberry_external_ip(self, device: dict) -> Optional[str]:
+        """Получение внешнего IP Raspberry Pi"""
+        try:
+            interface = device['interface']
+            addrs = netifaces.ifaddresses(interface)
+
+            if netifaces.AF_INET in addrs:
+                return addrs[netifaces.AF_INET][0]['addr']
+
+        except Exception as e:
+            logger.error(f"Error getting Raspberry Pi external IP: {e}")
+
+        return None
+
+    async def rotate_device_ip(self, device_id: str) -> bool:
+        """Ротация IP устройства"""
+        device = self.devices.get(device_id)
+        if not device:
+            return False
+
+        device_type = device.get('type')
+
+        if device_type == 'android':
+            return await self.rotate_android_ip(device)
+        elif device_type == 'usb_modem':
+            return await self.rotate_usb_modem_ip(device)
+        elif device_type == 'raspberry_pi':
+            return await self.rotate_raspberry_ip(device)
+
+        return False
+
+    async def rotate_android_ip(self, device: dict) -> bool:
+        """Ротация IP для Android устройства"""
+        try:
+            device_id = device['adb_id']
+            logger.info(f"Starting Android IP rotation for {device_id}")
+
+            # Отключение мобильных данных
+            result = await asyncio.create_subprocess_exec(
+                'adb', '-s', device_id, 'shell', 'svc', 'data', 'disable'
+            )
+            await result.wait()
+
+            # Ждем немного
+            await asyncio.sleep(3)
+
+            # Включение мобильных данных
+            result = await asyncio.create_subprocess_exec(
+                'adb', '-s', device_id, 'shell', 'svc', 'data', 'enable'
+            )
+            await result.wait()
+
+            # Ждем восстановления соединения
+            await asyncio.sleep(10)
+
+            logger.info(f"Android IP rotation completed for {device_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error rotating Android IP: {e}")
+            return False
+
+    async def rotate_usb_modem_ip(self, device: dict) -> bool:
+        """Ротация IP для USB модема"""
+        try:
+            interface = device['interface']
+            logger.info(f"Starting USB modem IP rotation for {interface}")
+
+            with serial.Serial(interface, 115200, timeout=5) as ser:
+                # Отключение модема
+                ser.write(b'AT+CFUN=0\r\n')
+                time.sleep(2)
+
+                # Включение модема
+                ser.write(b'AT+CFUN=1\r\n')
+                time.sleep(10)
+
+            logger.info(f"USB modem IP rotation completed for {interface}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error rotating USB modem IP: {e}")
+            return False
+
+    async def rotate_raspberry_ip(self, device: dict) -> bool:
+        """Ротация IP для Raspberry Pi"""
+        try:
+            interface = device['interface']
+            logger.info(f"Starting Raspberry Pi IP rotation for {interface}")
+
+            # Перезапуск PPP соединения
+            if interface.startswith('ppp'):
+                # Отключение PPP
+                result = await asyncio.create_subprocess_exec('sudo', 'poff', interface)
+                await result.wait()
+
+                await asyncio.sleep(3)
+
+                # Включение PPP
+                result = await asyncio.create_subprocess_exec('sudo', 'pon', interface)
+                await result.wait()
+
+                await asyncio.sleep(10)
+
+            logger.info(f"Raspberry Pi IP rotation completed for {interface}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error rotating Raspberry Pi IP: {e}")
+            return False
+
+    async def get_summary(self) -> Dict[str, any]:
+        """Получение сводной информации об устройствах"""
+        total = len(self.devices)
+        online = len([d for d in self.devices.values() if d.get('status') == 'online'])
+
+        by_type = {}
+        for device in self.devices.values():
+            device_type = device.get('type', 'unknown')
+            by_type[device_type] = by_type.get(device_type, 0) + 1
+
+        return {
+            'total_devices': total,
+            'online_devices': online,
+            'offline_devices': total - online,
+            'devices_by_type': by_type,
+            'last_discovery': datetime.now().isoformat()
+        }

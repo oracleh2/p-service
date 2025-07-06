@@ -6,7 +6,7 @@ import uuid
 import asyncio
 
 from ..api.auth import get_current_active_user
-from ..core.managers import get_modem_manager, get_proxy_server, get_rotation_manager
+from ..core.managers import get_device_manager, get_proxy_server, get_rotation_manager
 from ..config import settings
 
 router = APIRouter()
@@ -59,10 +59,10 @@ async def get_proxy_status(
 ):
     """Получение статуса прокси-сервера"""
     try:
-        modem_manager = get_modem_manager()
+        device_manager = get_device_manager()
         proxy_server = get_proxy_server()
 
-        if not modem_manager:
+        if not device_manager:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Modem manager not available"
@@ -75,11 +75,11 @@ async def get_proxy_status(
             )
 
         # Информация о прокси-сервере
-        modems = await modem_manager.get_all_modems()
+        modems = await device_manager.get_all_devices()
         online_modems = 0
 
         for modem_id in modems.keys():
-            if await modem_manager.is_modem_online(modem_id):
+            if await device_manager.is_device_online(modem_id):
                 online_modems += 1
 
         proxy_info = ProxyInfo(
@@ -96,8 +96,8 @@ async def get_proxy_status(
         # Информация о модемах
         modem_infos = []
         for modem_id, modem_data in modems.items():
-            external_ip = await modem_manager.get_modem_external_ip(modem_id)
-            is_online = await modem_manager.is_modem_online(modem_id)
+            external_ip = await device_manager.get_device_external_ip(modem_id)
+            is_online = await device_manager.is_device_online(modem_id)
 
             modem_infos.append(ModemInfo(
                 id=modem_id,
@@ -131,20 +131,20 @@ async def get_proxy_list(
 ):
     """Получение списка доступных прокси"""
     try:
-        modem_manager = get_modem_manager()
+        device_manager = get_device_manager()
 
-        if not modem_manager:
+        if not device_manager:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Modem manager not available"
             )
 
-        modems = await modem_manager.get_all_modems()
+        modems = await device_manager.get_all_devices()
         proxy_list = []
 
         for modem_id, modem_data in modems.items():
-            is_online = await modem_manager.is_modem_online(modem_id)
-            external_ip = await modem_manager.get_modem_external_ip(modem_id)
+            is_online = await device_manager.is_device_online(modem_id)
+            external_ip = await device_manager.get_device_external_ip(modem_id)
 
             if is_online:
                 proxy_list.append({
@@ -186,24 +186,24 @@ async def get_random_proxy(
 ):
     """Получение случайного доступного прокси"""
     try:
-        modem_manager = get_modem_manager()
+        device_manager = get_device_manager()
 
-        if not modem_manager:
+        if not device_manager:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Modem manager not available"
             )
 
-        modems = await modem_manager.get_all_modems()
+        modems = await device_manager.get_all_devices()
         available_modems = []
 
         for modem_id, modem_data in modems.items():
-            if await modem_manager.is_modem_online(modem_id):
+            if await device_manager.is_device_online(modem_id):
                 available_modems.append({
                     "modem_id": modem_id,
                     "type": modem_data['type'],
                     "interface": modem_data['interface'],
-                    "external_ip": await modem_manager.get_modem_external_ip(modem_id)
+                    "external_ip": await device_manager.get_device_external_ip(modem_id)
                 })
 
         if not available_modems:
@@ -242,7 +242,7 @@ async def rotate_proxy_ips(
     """Ротация IP адресов прокси"""
     try:
         rotation_manager = get_rotation_manager()
-        modem_manager = get_modem_manager()
+        device_manager = get_device_manager()
 
         if not rotation_manager:
             raise HTTPException(
@@ -250,7 +250,7 @@ async def rotate_proxy_ips(
                 detail="Rotation manager not available"
             )
 
-        if not modem_manager:
+        if not device_manager:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Modem manager not available"
@@ -261,13 +261,13 @@ async def rotate_proxy_ips(
             target_modems = rotation_request.modem_ids
         else:
             # Все доступные модемы
-            modems = await modem_manager.get_all_modems()
+            modems = await device_manager.get_all_devices()
             target_modems = list(modems.keys())
 
         # Проверка доступности модемов
         available_modems = []
         for modem_id in target_modems:
-            if await modem_manager.is_modem_online(modem_id):
+            if await device_manager.is_device_online(modem_id):
                 available_modems.append(modem_id)
 
         if not available_modems:
@@ -318,7 +318,7 @@ async def get_proxy_health():
     """Проверка здоровья прокси-сервера (публичный эндпоинт)"""
     try:
         proxy_server = get_proxy_server()
-        modem_manager = get_modem_manager()
+        device_manager = get_device_manager()
 
         if not proxy_server:
             return {
@@ -327,7 +327,7 @@ async def get_proxy_health():
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
 
-        if not modem_manager:
+        if not device_manager:
             return {
                 "status": "error",
                 "message": "Modem manager not available",
@@ -335,11 +335,11 @@ async def get_proxy_health():
             }
 
         # Проверка доступности модемов
-        modems = await modem_manager.get_all_modems()
+        modems = await device_manager.get_all_devices()
         online_modems = 0
 
         for modem_id in modems.keys():
-            if await modem_manager.is_modem_online(modem_id):
+            if await device_manager.is_device_online(modem_id):
                 online_modems += 1
 
         status = "healthy" if online_modems > 0 else "degraded"
@@ -401,40 +401,72 @@ async def get_proxy_config(
 
 @router.post("/test")
 async def test_proxy(
-        target_url: str = Query(default="https://httpbin.org/ip", description="URL to test"),
-        modem_id: Optional[str] = Query(default=None, description="Specific modem to test"),
-        current_user=Depends(get_current_active_user)
+    target_url: str = Query(default="https://httpbin.org/ip", description="URL to test"),
+    modem_id: Optional[str] = Query(default=None, description="Specific device to test")
 ):
-    """Тестирование прокси-сервера"""
+    """Реальное тестирование прокси-сервера через устройства"""
     try:
         import aiohttp
         import time
 
-        proxy_url = f"http://{settings.proxy_host}:{settings.proxy_port}"
-
-        # Проверка доступности прокси-сервера
+        device_manager = get_device_manager()  # ИЗМЕНЕНО
         proxy_server = get_proxy_server()
-        if not proxy_server or not proxy_server.is_running():
+
+        if not device_manager:  # ИЗМЕНЕНО
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Device manager not available"
+            )
+
+        if not proxy_server:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Proxy server not available"
+            )
+
+        if not proxy_server.is_running():
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Proxy server is not running"
             )
 
+        # Проверяем что устройство существует (если указано)
+        all_devices = await device_manager.get_all_devices()  # ИЗМЕНЕНО
+
+        if modem_id and modem_id not in all_devices:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Device not found"
+            )
+
+        if not all_devices:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="No devices available"
+            )
+
+        # Подготовка для реального запроса через прокси
+        proxy_url = f"http://{settings.proxy_host}:{settings.proxy_port}"
+
         # Подготовка заголовков
-        headers = {}
+        headers = {
+            'User-Agent': 'Mobile-Proxy-Test/1.0'
+        }
+
         if modem_id:
-            headers["X-Proxy-Modem-ID"] = modem_id
+            headers["X-Proxy-Device-ID"] = modem_id  # Используем универсальный заголовок
 
         start_time = time.time()
 
-        # Выполнение тестового запроса
-        async with aiohttp.ClientSession() as session:
-            try:
+        # Выполнение реального запроса через прокси
+        timeout = aiohttp.ClientTimeout(total=30)
+
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(
-                        target_url,
-                        proxy=proxy_url,
-                        headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=30)
+                    target_url,
+                    proxy=proxy_url,
+                    headers=headers
                 ) as response:
 
                     response_time = int((time.time() - start_time) * 1000)
@@ -445,7 +477,25 @@ async def test_proxy(
                         import json
                         response_data = json.loads(response_text)
                     except:
-                        response_data = {"text": response_text[:500]}  # Первые 500 символов
+                        response_data = {"text": response_text[:500]}
+
+                    # Определяем какое устройство было использовано
+                    used_device_id = modem_id
+                    device_type = "unknown"
+
+                    if used_device_id and used_device_id in all_devices:
+                        device_type = all_devices[used_device_id].get('type', 'unknown')
+                    elif not used_device_id:
+                        # Попытка определить использованное устройство по IP
+                        if isinstance(response_data, dict) and 'origin' in response_data:
+                            origin_ip = response_data['origin']
+                            # Поиск устройства по внешнему IP
+                            for dev_id, device in all_devices.items():
+                                device_ip = await device_manager.get_device_external_ip(dev_id)
+                                if device_ip == origin_ip:
+                                    used_device_id = dev_id
+                                    device_type = device.get('type', 'unknown')
+                                    break
 
                     return {
                         "success": True,
@@ -453,33 +503,51 @@ async def test_proxy(
                         "response_time_ms": response_time,
                         "target_url": target_url,
                         "proxy_url": proxy_url,
-                        "modem_id": modem_id,
+                        "device_id": used_device_id,
+                        "device_type": device_type,
                         "response_data": response_data,
                         "response_headers": dict(response.headers),
+                        "test_details": {
+                            "proxy_connection": "ok",
+                            "dns_resolution": "ok",
+                            "http_response": "ok",
+                            "data_transfer": "ok"
+                        },
                         "timestamp": datetime.now(timezone.utc).isoformat()
                     }
 
-            except aiohttp.ClientError as e:
-                return {
-                    "success": False,
-                    "error": str(e),
-                    "error_type": "client_error",
-                    "target_url": target_url,
-                    "proxy_url": proxy_url,
-                    "modem_id": modem_id,
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                }
+        except aiohttp.ClientError as e:
+            response_time = int((time.time() - start_time) * 1000)
+            return {
+                "success": False,
+                "error": str(e),
+                "error_type": "client_error",
+                "response_time_ms": response_time,
+                "target_url": target_url,
+                "proxy_url": proxy_url,
+                "device_id": modem_id,
+                "test_details": {
+                    "proxy_connection": "failed",
+                    "error_detail": str(e)
+                },
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
 
-            except asyncio.TimeoutError:
-                return {
-                    "success": False,
-                    "error": "Request timeout",
-                    "error_type": "timeout",
-                    "target_url": target_url,
-                    "proxy_url": proxy_url,
-                    "modem_id": modem_id,
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                }
+        except asyncio.TimeoutError:
+            response_time = int((time.time() - start_time) * 1000)
+            return {
+                "success": False,
+                "error": "Request timeout",
+                "error_type": "timeout",
+                "response_time_ms": response_time,
+                "target_url": target_url,
+                "proxy_url": proxy_url,
+                "device_id": modem_id,
+                "test_details": {
+                    "proxy_connection": "timeout"
+                },
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
 
     except HTTPException:
         raise
@@ -498,19 +566,19 @@ async def get_proxy_metrics(
     try:
         from datetime import timedelta
 
-        modem_manager = get_modem_manager()
+        device_manager = get_device_manager()
         proxy_server = get_proxy_server()
 
-        if not modem_manager or not proxy_server:
+        if not device_manager or not proxy_server:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Services not available"
             )
 
         # Базовые метрики
-        modems = await modem_manager.get_all_modems()
+        modems = await device_manager.get_all_devices()
         online_modems = sum(1 for modem_id in modems.keys()
-                            if await modem_manager.is_modem_online(modem_id))
+                            if await device_manager.is_device_online(modem_id))
 
         # Метрики за последний час
         one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
