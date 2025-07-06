@@ -510,6 +510,95 @@ class DeviceManager:
         device = self.devices.get(device_id)
         return device is not None and device.get('status') == 'online'
 
+    async def get_device_external_ip(self, device_id: str) -> Optional[str]:
+        """Получение внешнего IP устройства"""
+        device = self.devices.get(device_id)
+        if not device:
+            return None
+
+        device_type = device.get('type')
+
+        if device_type == 'android':
+            return await self.get_android_external_ip(device)
+        elif device_type == 'usb_modem':
+            return await self.get_usb_modem_external_ip(device)
+        elif device_type == 'raspberry_pi':
+            return await self.get_raspberry_external_ip(device)
+
+        return None
+
+    async def get_android_external_ip(self, device: dict) -> Optional[str]:
+        """Получение внешнего IP Android устройства"""
+        try:
+            # Попробуем через USB интерфейс если есть
+            usb_interface = device.get('usb_interface')
+            if usb_interface:
+                try:
+                    # Используем curl через интерфейс для получения внешнего IP
+                    result = await asyncio.create_subprocess_exec(
+                        'curl', '--interface', usb_interface, '-s', '--connect-timeout', '10',
+                        'http://httpbin.org/ip',
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    stdout, _ = await result.communicate()
+
+                    if result.returncode == 0:
+                        import json
+                        response = json.loads(stdout.decode())
+                        return response.get('origin', '').split(',')[0].strip()
+                except Exception as e:
+                    logger.warning(f"Failed to get external IP via USB interface: {e}")
+
+            # Fallback: попробуем через ADB
+            device_id = device.get('adb_id')
+            if device_id:
+                result = await asyncio.create_subprocess_exec(
+                    'adb', '-s', device_id, 'shell', 'ip', 'route', 'get', '8.8.8.8',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, _ = await result.communicate()
+
+                if result.returncode == 0:
+                    output = stdout.decode()
+                    ip_match = re.search(r'src (\d+\.\d+\.\d+\.\d+)', output)
+                    if ip_match:
+                        return ip_match.group(1)
+
+        except Exception as e:
+            logger.error(f"Error getting Android external IP: {e}")
+
+        return None
+
+    async def get_usb_modem_external_ip(self, device: dict) -> Optional[str]:
+        """Получение внешнего IP USB модема"""
+        try:
+            # Поиск PPP интерфейса
+            interfaces = netifaces.interfaces()
+            for interface in interfaces:
+                if interface.startswith('ppp') or interface.startswith('wwan'):
+                    addrs = netifaces.ifaddresses(interface)
+                    if netifaces.AF_INET in addrs:
+                        return addrs[netifaces.AF_INET][0]['addr']
+        except Exception as e:
+            logger.error(f"Error getting USB modem external IP: {e}")
+
+        return None
+
+    async def get_raspberry_external_ip(self, device: dict) -> Optional[str]:
+        """Получение внешнего IP Raspberry Pi"""
+        try:
+            interface = device.get('interface', '')
+            if interface and interface in netifaces.interfaces():
+                addrs = netifaces.ifaddresses(interface)
+                if netifaces.AF_INET in addrs:
+                    return addrs[netifaces.AF_INET][0]['addr']
+        except Exception as e:
+            logger.error(f"Error getting Raspberry Pi external IP: {e}")
+
+        return None
+
     async def rotate_device_ip(self, device_id: str) -> bool:
         """Ротация IP устройства"""
         device = self.devices.get(device_id)

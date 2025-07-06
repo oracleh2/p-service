@@ -501,6 +501,10 @@ class ProxyServer:
             logger.error(f"Error selecting device: {e}")
             return None
 
+    def is_running(self) -> bool:
+        """Проверка состояния сервера"""
+        return self.running
+
     async def get_stats(self) -> Dict[str, Any]:
         """Получение статистики прокси-сервера"""
         try:
