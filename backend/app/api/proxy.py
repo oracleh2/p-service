@@ -83,14 +83,14 @@ async def get_proxy_status(
                 online_modems += 1
 
         proxy_info = ProxyInfo(
-            host=settings.PROXY_HOST,
-            port=settings.PROXY_PORT,
+            host=settings.proxy_host,
+            port=settings.proxy_port,
             protocol="http",
             status="running" if proxy_server.is_running() else "stopped",
             total_modems=len(modems),
             online_modems=online_modems,
-            max_connections=settings.MAX_CONCURRENT_CONNECTIONS,
-            timeout_seconds=settings.REQUEST_TIMEOUT_SECONDS
+            max_connections=settings.max_concurrent_connections,
+            timeout_seconds=settings.request_timeout_seconds
         )
 
         # Информация о модемах
@@ -152,22 +152,22 @@ async def get_proxy_list(
                     "type": modem_data['type'],
                     "interface": modem_data['interface'],
                     "external_ip": external_ip,
-                    "proxy_url": f"http://{settings.PROXY_HOST}:{settings.PROXY_PORT}",
+                    "proxy_url": f"http://{settings.proxy_host}:{settings.proxy_port}",
                     "usage_header": "X-Proxy-Modem-ID",
-                    "example_curl": f"curl -x http://{settings.PROXY_HOST}:{settings.PROXY_PORT} -H 'X-Proxy-Modem-ID: {modem_id}' https://httpbin.org/ip"
+                    "example_curl": f"curl -x http://{settings.proxy_host}:{settings.proxy_port} -H 'X-Proxy-Modem-ID: {modem_id}' https://httpbin.org/ip"
                 })
 
         return {
             "total_proxies": len(proxy_list),
             "available_proxies": proxy_list,
             "proxy_server": {
-                "host": settings.PROXY_HOST,
-                "port": settings.PROXY_PORT,
+                "host": settings.proxy_host,
+                "port": settings.proxy_port,
                 "protocol": "http"
             },
             "usage_instructions": {
-                "random_proxy": f"curl -x http://{settings.PROXY_HOST}:{settings.PROXY_PORT} https://httpbin.org/ip",
-                "specific_modem": f"curl -x http://{settings.PROXY_HOST}:{settings.PROXY_PORT} -H 'X-Proxy-Modem-ID: MODEM_ID' https://httpbin.org/ip"
+                "random_proxy": f"curl -x http://{settings.proxy_host}:{settings.proxy_port} https://httpbin.org/ip",
+                "specific_modem": f"curl -x http://{settings.proxy_host}:{settings.proxy_port} -H 'X-Proxy-Modem-ID: MODEM_ID' https://httpbin.org/ip"
             }
         }
 
@@ -217,12 +217,12 @@ async def get_random_proxy(
 
         return {
             "modem": selected_modem,
-            "proxy_url": f"http://{settings.PROXY_HOST}:{settings.PROXY_PORT}",
+            "proxy_url": f"http://{settings.proxy_host}:{settings.proxy_port}",
             "usage_header": {
                 "name": "X-Proxy-Modem-ID",
                 "value": selected_modem["modem_id"]
             },
-            "example_curl": f"curl -x http://{settings.PROXY_HOST}:{settings.PROXY_PORT} -H 'X-Proxy-Modem-ID: {selected_modem['modem_id']}' https://httpbin.org/ip"
+            "example_curl": f"curl -x http://{settings.proxy_host}:{settings.proxy_port} -H 'X-Proxy-Modem-ID: {selected_modem['modem_id']}' https://httpbin.org/ip"
         }
 
     except HTTPException:
@@ -368,27 +368,27 @@ async def get_proxy_config(
     try:
         return {
             "proxy_server": {
-                "host": settings.PROXY_HOST,
-                "port": settings.PROXY_PORT,
+                "host": settings.proxy_host,
+                "port": settings.proxy_port,
                 "protocol": "http",
-                "max_connections": settings.MAX_CONCURRENT_CONNECTIONS,
-                "timeout_seconds": settings.REQUEST_TIMEOUT_SECONDS,
+                "max_connections": settings.max_concurrent_connections,
+                "timeout_seconds": settings.request_timeout_seconds,
                 "buffer_size": settings.BUFFER_SIZE
             },
             "rotation": {
-                "default_interval": settings.DEFAULT_ROTATION_INTERVAL,
-                "max_attempts": settings.MAX_ROTATION_ATTEMPTS,
-                "timeout_seconds": settings.ROTATION_TIMEOUT_SECONDS,
-                "retry_delay_seconds": settings.ROTATION_RETRY_DELAY_SECONDS
+                "default_interval": settings.default_rotation_interval,
+                "max_attempts": settings.max_rotation_attempts,
+                "timeout_seconds": settings.rotation_timeout_seconds,
+                "retry_delay_seconds": settings.rotation_retry_delay_seconds
             },
             "limits": {
-                "max_devices": settings.MAX_DEVICES,
-                "max_requests_per_minute": settings.MAX_REQUESTS_PER_MINUTE
+                "max_devices": settings.max_devices,
+                "max_requests_per_minute": settings.max_requests_per_minute
             },
             "monitoring": {
-                "health_check_interval": settings.HEALTH_CHECK_INTERVAL,
-                "heartbeat_timeout": settings.HEARTBEAT_TIMEOUT,
-                "log_retention_days": settings.LOG_RETENTION_DAYS
+                "health_check_interval": settings.health_check_interval,
+                "heartbeat_timeout": settings.heartbeat_timeout,
+                "log_retention_days": settings.log_retention_days
             }
         }
 
@@ -410,7 +410,7 @@ async def test_proxy(
         import aiohttp
         import time
 
-        proxy_url = f"http://{settings.PROXY_HOST}:{settings.PROXY_PORT}"
+        proxy_url = f"http://{settings.proxy_host}:{settings.proxy_port}"
 
         # Проверка доступности прокси-сервера
         proxy_server = get_proxy_server()
@@ -519,8 +519,8 @@ async def get_proxy_metrics(
             "proxy_server": {
                 "status": "running" if proxy_server.is_running() else "stopped",
                 "uptime": "N/A",  # Можно добавить реальный uptime
-                "host": settings.PROXY_HOST,
-                "port": settings.PROXY_PORT
+                "host": settings.proxy_host,
+                "port": settings.proxy_port
             },
             "modems": {
                 "total": len(modems),
@@ -596,7 +596,7 @@ async def get_usage_examples(
 ):
     """Получение примеров использования прокси"""
     try:
-        proxy_url = f"http://{settings.PROXY_HOST}:{settings.PROXY_PORT}"
+        proxy_url = f"http://{settings.proxy_host}:{settings.proxy_port}"
 
         return {
             "basic_usage": {
@@ -671,8 +671,8 @@ fetch('https://httpbin.org/ip', {{
             "configuration": {
                 "description": "Настройка клиентов",
                 "proxy_settings": {
-                    "host": settings.PROXY_HOST,
-                    "port": settings.PROXY_PORT,
+                    "host": settings.proxy_host,
+                    "port": settings.proxy_port,
                     "protocol": "http",
                     "authentication": "not_required"
                 }
