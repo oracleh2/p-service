@@ -91,7 +91,7 @@ class ModemManager:
         return modems
 
     async def discover_android_devices(self) -> Dict[str, dict]:
-        """Обнаружение Android устройств через ADB - РЕАЛЬНАЯ РЕАЛИЗАЦИЯ"""
+        """Обнаружение Android устройств через ADB - ИСПРАВЛЕННАЯ РЕАЛИЗАЦИЯ"""
         modems = {}
 
         try:
@@ -130,14 +130,16 @@ class ModemManager:
                     logger.info(f"Line {i} is empty, skipping")
                     continue
 
-                # Парсим строку формата: "AH3SCP4B11207250	device usb:1-1.2 transport_id:1"
-                parts = line.split('\t')
+                # ИСПРАВЛЕННЫЙ ПАРСИНГ: используем регулярное выражение или разбиение по пробелам
+                # Формат: "AH3SCP4B11207250       device usb:1-1.2 product:JDY-LX1 model:JDY_LX1 device:HNJDY-M1 transport_id:1"
+
+                # Вариант 1: Простое разбиение по пробелам
+                parts = line.split()
                 logger.info(f"Line {i} split into {len(parts)} parts: {parts}")
 
                 if len(parts) >= 2:
                     device_id = parts[0]
-                    status_part = parts[1]
-                    status = status_part.split()[0]  # Берем только первое слово статуса
+                    status = parts[1]
 
                     logger.info(f"Found Android device: {device_id}, status: {status}")
 
@@ -177,6 +179,108 @@ class ModemManager:
                         logger.warning(f"Device {device_id} has status '{status}', not 'device'")
                 else:
                     logger.warning(f"Line {i} doesn't have enough parts: {parts}")
+
+            logger.info(f"Total Android devices found: {len(modems)}")
+
+        except FileNotFoundError:
+            logger.error("ADB not found - install android-tools-adb")
+        except Exception as e:
+            logger.error("Error discovering Android devices", error=str(e))
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+
+        return modems
+
+    # АЛЬТЕРНАТИВНЫЙ БОЛЕЕ ПРОДВИНУТЫЙ ПАРСЕР
+    async def discover_android_devices_advanced(self) -> Dict[str, dict]:
+        """Обнаружение Android устройств через ADB - ПРОДВИНУТАЯ РЕАЛИЗАЦИЯ"""
+        modems = {}
+
+        try:
+            logger.info("Scanning for Android devices via ADB...")
+
+            # Проверка доступности ADB
+            result = await asyncio.create_subprocess_exec(
+                'adb', 'devices', '-l',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await result.communicate()
+
+            if result.returncode != 0:
+                logger.error(f"ADB command failed with code {result.returncode}: {stderr.decode()}")
+                return modems
+
+            devices_output = stdout.decode().strip()
+            lines = devices_output.split('\n')
+
+            # Пропускаем заголовок "List of devices attached"
+            device_lines = lines[1:]
+
+            import re
+
+            for i, line in enumerate(device_lines):
+                line = line.strip()
+
+                if not line:
+                    continue
+
+                # Используем регулярное выражение для более точного парсинга
+                # Паттерн: device_id + пробелы + status + остальная информация
+                match = re.match(r'^(\w+)\s+(device|offline|unauthorized)\s*(.*)', line)
+
+                if match:
+                    device_id = match.group(1)
+                    status = match.group(2)
+                    extra_info = match.group(3)
+
+                    logger.info(f"Parsed device: {device_id}, status: {status}, extra: {extra_info}")
+
+                    if status == 'device':
+                        # Парсим дополнительную информацию из extra_info
+                        device_info = {}
+
+                        # Извлекаем модель из строки типа "product:JDY-LX1 model:JDY_LX1"
+                        model_match = re.search(r'model:(\S+)', extra_info)
+                        if model_match:
+                            device_info['model_from_adb'] = model_match.group(1)
+
+                        product_match = re.search(r'product:(\S+)', extra_info)
+                        if product_match:
+                            device_info['product_from_adb'] = product_match.group(1)
+
+                        # Получаем детальную информацию об устройстве
+                        device_details = await self.get_android_device_details(device_id)
+                        device_details.update(device_info)
+
+                        modem_id = f"android_{device_id}"
+                        modems[modem_id] = {
+                            'id': modem_id,
+                            'type': 'android',
+                            'interface': device_id,
+                            'adb_id': device_id,
+                            'device_info': device_details.get('friendly_name',
+                                                              f"Android {device_details.get('model', device_id)}"),
+                            'status': 'online',
+                            'manufacturer': device_details.get('manufacturer', 'Unknown'),
+                            'model': device_details.get('model', device_details.get('model_from_adb', 'Unknown')),
+                            'android_version': device_details.get('android_version', 'Unknown'),
+                            'battery_level': device_details.get('battery_level', 0),
+                            'usb_tethering': device_details.get('usb_tethering', False),
+                            'rotation_methods': ['data_toggle', 'airplane_mode'],
+                            'last_seen': datetime.now().isoformat()
+                        }
+
+                        logger.info(
+                            f"Android device discovered: {device_id} ({device_details.get('model', 'Unknown')})")
+
+                    elif status == 'unauthorized':
+                        logger.warning(
+                            f"Device {device_id} is unauthorized - enable USB debugging and accept the prompt")
+                    elif status == 'offline':
+                        logger.warning(f"Device {device_id} is offline")
+                else:
+                    logger.warning(f"Could not parse line: '{line}'")
 
             logger.info(f"Total Android devices found: {len(modems)}")
 
