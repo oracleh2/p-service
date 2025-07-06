@@ -557,7 +557,7 @@ const fetchLogs = async () => {
 
 const fetchModems = async () => {
     try {
-        const response = await api.get('/admin/modems')
+        const response = await api.get('/admin/devices')
         availableModems.value = response.data.map(modem => ({
             id: modem.modem_id,
             name: modem.modem_id

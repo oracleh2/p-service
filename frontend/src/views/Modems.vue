@@ -427,7 +427,7 @@ const uniqueIPs = computed(() => {
 const fetchModems = async () => {
     try {
         isLoading.value = true
-        const response = await api.get('/admin/modems')
+        const response = await api.get('/admin/devices')
         modems.value = response.data
     } catch (error) {
         console.error('Failed to fetch modems:', error)
@@ -444,7 +444,7 @@ const refreshModems = () => {
 const rotateAllModems = async () => {
     try {
         isRotating.value = true
-        const response = await api.post('/admin/modems/rotate-all')
+        const response = await api.post('/admin/devices/rotate-all')
         toast.success(response.data.message)
 
         // Refresh modems after rotation
@@ -461,7 +461,7 @@ const rotateAllModems = async () => {
 const rotateModem = async (modemId) => {
     try {
         rotatingModems.value.push(modemId)
-        await api.post(`/admin/modems/${modemId}/rotate`)
+        await api.post(`/admin/devices/${modemId}/rotate`)
         toast.success('IP rotation initiated')
 
         // Refresh modems after rotation
@@ -477,7 +477,7 @@ const rotateModem = async (modemId) => {
 
 const toggleAutoRotation = async (modemId, enabled) => {
     try {
-        await api.put(`/admin/modems/${modemId}/auto-rotation`, null, {
+        await api.put(`/admin/devices/${modemId}/auto-rotation`, null, {
             params: {enabled}
         })
         toast.success(`Auto rotation ${enabled ? 'enabled' : 'disabled'}`)
@@ -489,7 +489,7 @@ const toggleAutoRotation = async (modemId, enabled) => {
 
 const updateRotationInterval = async () => {
     try {
-        await api.put(`/admin/modems/${selectedModemId.value}/rotation-interval`, null, {
+        await api.put(`/admin/devices/${selectedModemId.value}/rotation-interval`, null, {
             params: {interval: rotationInterval.value}
         })
         toast.success('Rotation interval updated')

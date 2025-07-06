@@ -279,7 +279,7 @@ const performSearch = () => {
 const rotateAllModems = async () => {
     try {
         isRotating.value = true
-        const response = await api.post('/admin/modems/rotate-all')
+        const response = await api.post('/admin/devices/rotate-all')
 
         toast.success(response.data.message || 'All modems rotation initiated')
 
