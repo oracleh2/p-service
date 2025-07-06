@@ -175,14 +175,16 @@ class ProxyServer:
 
             device_id = device.get('id', 'unknown')
             device_type = device.get('type', 'unknown')
-            interface = device.get('interface', 'unknown')
+            # interface = device.get('interface', 'unknown')
+            interface = device.get('interface') or device.get('usb_interface', 'unknown')
 
             logger.info(f"✅ SELECTED DEVICE: {device_id}")
             logger.info(f"   Type: {device_type}")
             logger.info(f"   Interface: {interface}")
 
             # Проверяем что это Android устройство с правильным интерфейсом
-            if device_type == 'android' and interface == 'enx566cf3eaaf4b':
+            # if device_type == 'android' and interface == 'enx566cf3eaaf4b':
+            if device_type == 'android' and interface != 'unknown':
                 logger.info(f"🚀 USING ANDROID INTERFACE: {interface}")
 
                 # Используем исправленный curl
