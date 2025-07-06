@@ -9,7 +9,7 @@ import uuid
 from ..models.database import get_db
 from ..models.base import ProxyDevice, RequestLog, IpHistory, UsageStats
 from ..api.auth import get_current_active_user
-from ..core.managers import get_modem_manager, get_proxy_server, get_rotation_manager
+from ..core.managers import get_device_manager, get_proxy_server, get_rotation_manager
 
 router = APIRouter()
 
@@ -86,19 +86,19 @@ async def get_overview_stats(
 ):
     """Получение общей статистики системы"""
     try:
-        modem_manager = get_modem_manager()
-        if not modem_manager:
+        device_manager = get_device_manager()
+        if not device_manager:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Modem manager not available"
             )
 
         # Получение информации о модемах
-        modems = await modem_manager.get_all_modems()
+        modems = await device_manager.get_all_devices()
         online_modems = 0
 
         for modem_id in modems.keys():
-            if await modem_manager.is_modem_online(modem_id):
+            if await device_manager.is_device_online(modem_id):
                 online_modems += 1
 
         # Общая статистика запросов
@@ -153,14 +153,14 @@ async def get_modems_stats(
 ):
     """Получение статистики по модемам"""
     try:
-        modem_manager = get_modem_manager()
-        if not modem_manager:
+        device_manager = get_device_manager()
+        if not device_manager:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Modem manager not available"
             )
 
-        modems = await modem_manager.get_all_modems()
+        modems = await device_manager.get_all_devices()
         modem_stats = []
 
         for modem_id, modem_info in modems.items():
@@ -193,8 +193,8 @@ async def get_modems_stats(
                 unique_ips = result.scalar() or 0
 
                 # Статус и внешний IP
-                is_online = await modem_manager.is_modem_online(modem_id)
-                external_ip = await modem_manager.get_modem_external_ip(modem_id)
+                is_online = await device_manager.is_device_online(modem_id)
+                external_ip = await device_manager.get_device_external_ip(modem_id)
 
                 modem_stats.append(ModemStats(
                     modem_id=modem_id,
@@ -518,8 +518,8 @@ async def get_realtime_stats(
 ):
     """Получение статистики в реальном времени"""
     try:
-        modem_manager = get_modem_manager()
-        if not modem_manager:
+        device_manager = get_device_manager()
+        if not device_manager:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Modem manager not available"
@@ -543,11 +543,11 @@ async def get_realtime_stats(
         recent_failed = recent_total - recent_successful
 
         # Статус модемов
-        modems = await modem_manager.get_all_modems()
+        modems = await device_manager.get_all_devices()
         online_modems = 0
 
         for modem_id in modems.keys():
-            if await modem_manager.is_modem_online(modem_id):
+            if await device_manager.is_device_online(modem_id):
                 online_modems += 1
 
         return {
