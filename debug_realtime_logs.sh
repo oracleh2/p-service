@@ -85,7 +85,7 @@ echo "============================"
 echo "6. Диагностика:"
 
 # Проверяем ключевые моменты в логах
-LOG_FILE="/var/www/p-service/logs/backend.log"
+LOG_FILE="/var/www/p-service/logs/backend-0.log"
 
 if tail -50 "$LOG_FILE" | grep -q "PROXY REQUEST"; then
     echo "✅ Прокси получает запросы"
