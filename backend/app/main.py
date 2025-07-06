@@ -172,17 +172,17 @@ async def get_devices():
     }
 
 
-@app.get("/api/v1/stats/overview")
-async def get_stats_overview():
-    """Общая статистика (заглушка)"""
-    return {
-        "total_devices": 0,
-        "online_devices": 0,
-        "offline_devices": 0,
-        "total_requests": 0,
-        "success_rate": 0,
-        "uptime": time.time()
-    }
+# @app.get("/api/v1/stats/overview")
+# async def get_stats_overview():
+#     """Общая статистика (заглушка)"""
+#     return {
+#         "total_devices": 0,
+#         "online_devices": 0,
+#         "offline_devices": 0,
+#         "total_requests": 0,
+#         "success_rate": 0,
+#         "uptime": time.time()
+#     }
 
 
 # Admin endpoints
@@ -469,22 +469,22 @@ async def scan_modems():
         logger.error(f"Error scanning devices: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/stats/overview")
-async def stats_overview():
-    """Общая статистика (заглушка)"""
-    return {
-        "total_modems": 3,
-        "online_modems": 2,
-        "offline_modems": 1,
-        "total_requests": 3093,
-        "successful_requests": 2876,
-        "failed_requests": 217,
-        "success_rate": 93,
-        "avg_response_time": 245,
-        "unique_ips": 15,
-        "total_data_transferred": 2.4,
-        "uptime": time.time()
-    }
+# @app.get("/stats/overview")
+# async def stats_overview():
+#     """Общая статистика (заглушка)"""
+#     return {
+#         "total_modems": 3,
+#         "online_modems": 2,
+#         "offline_modems": 1,
+#         "total_requests": 3093,
+#         "successful_requests": 2876,
+#         "failed_requests": 217,
+#         "success_rate": 93,
+#         "avg_response_time": 245,
+#         "unique_ips": 15,
+#         "total_data_transferred": 2.4,
+#         "uptime": time.time()
+#     }
 
 
 @app.get("/api/v1/admin/devices")
