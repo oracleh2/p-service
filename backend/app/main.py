@@ -71,6 +71,12 @@ app.include_router(admin.router, prefix="/api/v1/admin", tags=["admin"])
 app.include_router(stats.router, prefix="/api/v1/stats", tags=["stats"])
 app.include_router(devices.router, prefix="/api/v1/devices", tags=["devices"])
 
+app.include_router(auth.router, prefix="auth", tags=["auth-legacy"])
+app.include_router(proxy.router, prefix="proxy", tags=["proxy-legacy"])
+app.include_router(admin.router, prefix="admin", tags=["admin-legacy"])
+app.include_router(stats.router, prefix="stats", tags=["stats-legacy"])
+app.include_router(devices.router, prefix="devices", tags=["devices-legacy"])
+
 # Middleware для логирования запросов
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
