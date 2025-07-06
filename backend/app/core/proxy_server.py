@@ -154,7 +154,7 @@ class ProxyServer:
             return web.json_response({"error": str(e)}, status=500)
 
     async def universal_handler(self, request: web.Request) -> web.Response:
-        """Универсальный обработчик для всех запросов"""
+        """Универсальный обработчик для всех запросов - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
         start_time = time.time()
         client_ip = self.get_client_ip(request)
 
@@ -167,26 +167,53 @@ class ProxyServer:
                     status=400
                 )
 
-            logger.info(f"Request: {request.method} {target_url} from {client_ip}")
+            logger.info(f"📡 Proxy request: {request.method} {target_url} from {client_ip}")
 
             # Выбор устройства
             device = await self.select_device(request)
             if not device:
-                logger.warning("No devices available")
+                logger.warning("❌ No devices available for proxying")
                 return web.Response(text="No devices available", status=503)
 
-            logger.info(f"Selected device: {device['id']} ({device['type']})")
+            device_id = device.get('id', 'unknown')
+            device_type = device.get('type', 'unknown')
+            interface = device.get('interface', 'unknown')
 
-            # Выполнение запроса через интерфейс устройства
-            response = await self.forward_request_via_device_interface(request, target_url, device)
+            logger.info(f"✅ Selected device: {device_id} (type: {device_type}, interface: {interface})")
+
+            # КРИТИЧЕСКАЯ ПРОВЕРКА: если интерфейс определен и это Android
+            if device_type == 'android' and interface != 'unknown':
+                logger.info(f"🔄 Routing via Android interface: {interface}")
+
+                # Выполнение запроса через интерфейс устройства
+                response = await self.execute_request_via_curl(request, target_url, interface)
+
+                if response:
+                    response_time = int((time.time() - start_time) * 1000)
+                    logger.info(f"✅ Request completed via {interface}: {response.status} in {response_time}ms")
+
+                    # Добавляем дополнительные заголовки
+                    response.headers['X-Proxy-Device-ID'] = device_id
+                    response.headers['X-Proxy-Device-Type'] = device_type
+                    response.headers['X-Proxy-Response-Time'] = str(response_time)
+
+                    return response
+                else:
+                    logger.warning(f"⚠️ Curl request failed via {interface}, trying fallback")
+            else:
+                logger.warning(f"⚠️ Device has no proper interface: {device_id} (interface: {interface})")
+
+            # Fallback: выполнение запроса через обычный HTTP клиент
+            logger.info("🔄 Using fallback routing (direct connection)")
+            response = await self.forward_request_default(request, target_url, device)
 
             response_time = int((time.time() - start_time) * 1000)
-            logger.info(f"Request completed: {response.status} in {response_time}ms")
+            logger.info(f"✅ Fallback request completed: {response.status} in {response_time}ms")
 
             return response
 
         except Exception as e:
-            logger.error(f"Error in universal handler: {e}")
+            logger.error(f"❌ Error in universal handler: {e}")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
             return web.Response(text=f"Internal Server Error: {str(e)}", status=500)
@@ -340,7 +367,7 @@ class ProxyServer:
         target_url: str,
         interface: str
     ) -> Optional[web.Response]:
-        """Выполнение запроса через curl с привязкой к интерфейсу - УЛУЧШЕННАЯ ВЕРСИЯ"""
+        """Выполнение запроса через curl с привязкой к интерфейсу - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
         try:
             # Проверяем, что интерфейс доступен
             if interface not in netifaces.interfaces():
@@ -352,38 +379,50 @@ class ProxyServer:
                 logger.error(f"No IP on interface {interface}")
                 return None
 
-            # Подготовка команды curl
+            interface_ip = addrs[netifaces.AF_INET][0]['addr']
+            logger.info(f"Using interface {interface} with IP {interface_ip} for request to {target_url}")
+
+            # Подготовка команды curl с правильными параметрами
             curl_cmd = [
                 'curl',
-                '--interface', interface,
+                '--interface', interface,  # Привязка к интерфейсу
                 '--silent',
-                '--show-error',
-                '--max-time', '30',
                 '--location',  # Следовать редиректам
-                '--write-out', 'HTTPSTATUS:%{http_code}',
+                '--max-time', '30',
+                '--connect-timeout', '10',
+                '--retry', '1',
+                '--write-out', 'HTTPSTATUS:%{http_code}\\nCONTENT-TYPE:%{content_type}\\n',
                 '--header', f"User-Agent: {request.headers.get('User-Agent', 'Mobile-Proxy/2.0')}",
             ]
 
-            # Добавление заголовков (исключаем некоторые)
-            excluded_headers = ['host', 'content-length', 'connection', 'x-proxy-device-id']
+            # Добавление заголовков (исключаем системные)
+            excluded_headers = {
+                'host', 'content-length', 'connection', 'x-proxy-device-id',
+                'x-proxy-operator', 'x-proxy-region', 'transfer-encoding',
+                'proxy-connection', 'proxy-authorization'
+            }
+
             for header_name, header_value in request.headers.items():
                 if header_name.lower() not in excluded_headers:
                     curl_cmd.extend(['--header', f"{header_name}: {header_value}"])
 
-            # Обработка POST/PUT данных
+            # Обработка тела запроса для POST/PUT/PATCH
             request_body = None
             if request.method in ['POST', 'PUT', 'PATCH']:
                 request_body = await request.read()
                 if request_body:
                     curl_cmd.extend(['--data-binary', '@-'])
+
+            # Указание HTTP метода
+            if request.method != 'GET':
                 curl_cmd.extend(['-X', request.method])
 
             # Добавление URL
             curl_cmd.append(target_url)
 
-            logger.info(f"Executing curl via {interface}: {request.method} {target_url}")
+            logger.info(f"Executing curl command: {' '.join(curl_cmd[:8])}... via {interface}")
 
-            # Выполнение curl
+            # Выполнение curl с передачей тела запроса через stdin
             if request_body:
                 process = await asyncio.create_subprocess_exec(
                     *curl_cmd,
@@ -404,37 +443,54 @@ class ProxyServer:
                 # Парсинг ответа curl
                 output = stdout.decode('utf-8', errors='ignore')
 
-                # Извлечение HTTP статуса
-                if 'HTTPSTATUS:' in output:
-                    status_pos = output.rfind('HTTPSTATUS:')
-                    try:
-                        status_code = int(output[status_pos + 11:].strip())
-                        response_body = output[:status_pos].encode('utf-8')
-                    except ValueError:
-                        status_code = 200
-                        response_body = stdout
-                else:
-                    status_code = 200
-                    response_body = stdout
+                # Извлечение метаданных
+                status_code = 200
+                content_type = 'text/html'
+
+                lines = output.split('\n')
+                response_body = output
+
+                for line in lines:
+                    if line.startswith('HTTPSTATUS:'):
+                        try:
+                            status_code = int(line.split(':')[1].strip())
+                            # Удаляем эту строку из body
+                            response_body = response_body.replace(line + '\n', '')
+                        except (ValueError, IndexError):
+                            pass
+                    elif line.startswith('CONTENT-TYPE:'):
+                        content_type = line.split(':', 1)[1].strip()
+                        response_body = response_body.replace(line + '\n', '')
+
+                response_body_bytes = response_body.encode('utf-8')
 
                 logger.info(
-                    f"Curl request successful via {interface}: status {status_code}, body size {len(response_body)}")
+                    f"Curl request successful via {interface}: status {status_code}, size {len(response_body_bytes)} bytes")
+
+                # Создание ответа с правильными заголовками
+                response_headers = {
+                    'X-Proxy-Via': f"interface-{interface}",
+                    'X-Proxy-Method': 'curl-interface-binding',
+                    'X-Proxy-Interface-IP': interface_ip
+                }
+
+                if content_type:
+                    response_headers['Content-Type'] = content_type
 
                 return web.Response(
-                    body=response_body,
+                    body=response_body_bytes,
                     status=status_code,
-                    headers={
-                        'X-Proxy-Via': f"interface-{interface}",
-                        'X-Proxy-Method': 'curl-interface-binding'
-                    }
+                    headers=response_headers
                 )
             else:
                 error_msg = stderr.decode('utf-8', errors='ignore')
-                logger.error(f"Curl request failed via {interface}: {error_msg}")
+                logger.error(f"Curl request failed via {interface}: returncode={process.returncode}, error={error_msg}")
                 return None
 
         except Exception as e:
             logger.error(f"Error executing curl request via {interface}: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return None
 
     async def forward_request_default(
@@ -733,3 +789,48 @@ class ProxyServer:
         except Exception as e:
             logger.error(f"Error handling request: {e}")
             return web.Response(text="Internal server error", status=500)
+
+    async def test_interface_routing(self, interface: str) -> bool:
+        """Тестирование маршрутизации через интерфейс"""
+        try:
+            logger.info(f"🧪 Testing interface routing for {interface}")
+
+            if interface not in netifaces.interfaces():
+                logger.error(f"Interface {interface} not found")
+                return False
+
+            addrs = netifaces.ifaddresses(interface)
+            if netifaces.AF_INET not in addrs:
+                logger.error(f"No IP on interface {interface}")
+                return False
+
+            interface_ip = addrs[netifaces.AF_INET][0]['addr']
+            logger.info(f"Interface {interface} has IP: {interface_ip}")
+
+            # Тестовый запрос
+            process = await asyncio.create_subprocess_exec(
+                'curl', '--interface', interface, '-s', '--connect-timeout', '5',
+                'http://httpbin.org/ip',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+
+            if process.returncode == 0:
+                try:
+                    import json
+                    response = json.loads(stdout.decode())
+                    external_ip = response.get('origin', '')
+                    logger.info(f"✅ Test successful: interface {interface} -> external IP {external_ip}")
+                    return True
+                except json.JSONDecodeError:
+                    logger.error("Failed to parse test response")
+                    return False
+            else:
+                error_msg = stderr.decode()
+                logger.error(f"❌ Test failed for interface {interface}: {error_msg}")
+                return False
+
+        except Exception as e:
+            logger.error(f"❌ Error testing interface {interface}: {e}")
+            return False
