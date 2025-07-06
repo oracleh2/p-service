@@ -18,6 +18,17 @@ from .api import auth, proxy, admin, stats
 # Добавить эту строку:
 modem_manager = ModemManager()
 
+def get_modem_manager():
+    return modem_manager
+
+def get_proxy_server():
+    # Заглушка - позже можно подключить реальный прокси сервер
+    return None
+
+def get_rotation_manager():
+    # Заглушка - позже можно подключить менеджер ротации
+    return None
+
 created_users = []
 
 # Настройка логирования
