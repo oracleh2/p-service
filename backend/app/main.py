@@ -407,6 +407,13 @@ async def startup_event():
 async def shutdown_event():
     logger.info("🛑 Mobile Proxy Service shutting down...")
 
+    # Добавить остановку ModemManager:
+    try:
+        await modem_manager.stop()
+        logger.info("✅ ModemManager stopped")
+    except Exception as e:
+        logger.error(f"❌ Error stopping ModemManager: {e}")
+
 
 if __name__ == "__main__":
     uvicorn.run(

@@ -105,31 +105,48 @@ class ModemManager:
             )
             stdout, stderr = await result.communicate()
 
+            logger.info(f"ADB command return code: {result.returncode}")
+            logger.info(f"ADB stdout: {stdout.decode()}")
+            logger.info(f"ADB stderr: {stderr.decode()}")
+
             if result.returncode != 0:
-                logger.error(f"ADB command failed: {stderr.decode()}")
+                logger.error(f"ADB command failed with code {result.returncode}: {stderr.decode()}")
                 return modems
 
             devices_output = stdout.decode().strip()
-            logger.info(f"ADB devices output: {devices_output}")
+            logger.info(f"ADB devices output: '{devices_output}'")
 
-            lines = devices_output.split('\n')[1:]  # Пропускаем заголовок "List of devices attached"
+            lines = devices_output.split('\n')
+            logger.info(f"Split into {len(lines)} lines: {lines}")
 
-            for line in lines:
+            # Пропускаем заголовок "List of devices attached"
+            device_lines = lines[1:]
+
+            for i, line in enumerate(device_lines):
                 line = line.strip()
+                logger.info(f"Processing line {i}: '{line}' (length: {len(line)})")
+
                 if not line:
+                    logger.info(f"Line {i} is empty, skipping")
                     continue
 
                 # Парсим строку формата: "AH3SCP4B11207250	device usb:1-1.2 transport_id:1"
                 parts = line.split('\t')
+                logger.info(f"Line {i} split into {len(parts)} parts: {parts}")
+
                 if len(parts) >= 2:
                     device_id = parts[0]
-                    status = parts[1].split()[0]  # Берем только первое слово статуса
+                    status_part = parts[1]
+                    status = status_part.split()[0]  # Берем только первое слово статуса
 
                     logger.info(f"Found Android device: {device_id}, status: {status}")
 
                     if status == 'device':  # Только полностью подключенные устройства
+                        logger.info(f"Device {device_id} is fully connected, getting details...")
+
                         # Получаем детальную информацию об устройстве
                         device_details = await self.get_android_device_details(device_id)
+                        logger.info(f"Device details for {device_id}: {device_details}")
 
                         modem_id = f"android_{device_id}"
                         modems[modem_id] = {
@@ -149,17 +166,26 @@ class ModemManager:
                         }
 
                         logger.info(
-                            "Android device discovered",
+                            "Android device discovered successfully",
                             device_id=device_id,
+                            modem_id=modem_id,
                             manufacturer=device_details.get('manufacturer'),
                             model=device_details.get('model'),
                             battery=device_details.get('battery_level')
                         )
+                    else:
+                        logger.warning(f"Device {device_id} has status '{status}', not 'device'")
+                else:
+                    logger.warning(f"Line {i} doesn't have enough parts: {parts}")
+
+            logger.info(f"Total Android devices found: {len(modems)}")
 
         except FileNotFoundError:
             logger.error("ADB not found - install android-tools-adb")
         except Exception as e:
             logger.error("Error discovering Android devices", error=str(e))
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
 
         return modems
 
