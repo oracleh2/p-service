@@ -57,3 +57,23 @@ echo ""
 echo "4. Check if the issue is in get_target_url function:"
 echo "Let's see recent error logs:"
 tail -50 /var/www/p-service/logs/backend-error*.log | grep -A 5 -B 5 "proxy_handler\|get_target_url\|select_device"
+
+
+echo "🧪 Testing current proxy functionality..."
+
+echo ""
+echo "1. Test HTTP (not HTTPS) through proxy:"
+curl -x http://192.168.1.50:8080 http://httpbin.org/ip
+
+echo ""
+echo "2. Test direct API call:"
+curl -X POST "http://192.168.1.50:8000/proxy/test?modem_id=android_AH3SCP4B11207250"
+
+echo ""
+echo "3. Test proxy status endpoint:"
+curl http://192.168.1.50:8080/status
+
+echo ""
+echo "4. Check if proxy routes are set correctly:"
+echo "Testing with various paths:"
+curl -s http://192.168.1.50:8080/test123 | head -100

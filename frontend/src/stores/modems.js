@@ -196,7 +196,7 @@ export const useModemsStore = defineStore('modems', () => {
         }
     }
 
-    const testModem = async (modemId) => {
+    const testModem2 = async (modemId) => {
         try {
             const response = await api.post(`/proxy/test`, null, {
                 params: {modem_id: modemId}
@@ -207,6 +207,29 @@ export const useModemsStore = defineStore('modems', () => {
             throw err
         }
     }
+
+    const testModem = async (modemId) => {
+    try {
+        // ВРЕМЕННО используем простой тест вместо proxy/test
+        const response = await api.post(`/admin/modems/${modemId}/test`)
+
+        // Адаптируем ответ под ожидаемый формат
+        const data = response.data
+
+        return {
+            success: data.overall_success || false,
+            message: data.message || 'Test completed',
+            response_time_ms: data.test_details?.direct_http_test?.response_time_ms || 0,
+            external_ip: data.external_ip || 'Unknown',
+            device_type: data.device_type || 'Unknown',
+            test_details: data.test_details || {},
+            timestamp: data.test_timestamp || Date.now()
+        }
+    } catch (err) {
+        console.error('Failed to test modem:', err)
+        throw err
+    }
+}
 
     const getModemsByStatus = (status) => {
         return modems.value.filter(modem => modem.status === status)
