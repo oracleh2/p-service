@@ -1,26 +1,35 @@
 #!/bin/bash
-# fix-missing-configs.sh - Исправление отсутствующих конфигураций
+# fix-missing-configs.sh - Создание недостающих конфигурационных файлов
 
-echo "🔧 Создание отсутствующих конфигурационных файлов..."
+set -e
 
-# Остановка контейнеров
-docker-compose down
+echo "📁 Создание недостающих конфигурационных файлов..."
+echo ""
 
-# Создание директорий
-mkdir -p monitoring/grafana/dashboards
-mkdir -p monitoring/grafana/datasources
-mkdir -p nginx/ssl
-mkdir -p logs
+# Определение доступной команды Docker Compose
+DOCKER_COMPOSE_CMD=""
 
-# Создание конфигурации Prometheus
+if command -v docker-compose >/dev/null 2>&1; then
+    DOCKER_COMPOSE_CMD="docker-compose"
+    echo "📦 Используется: docker-compose"
+elif docker compose version >/dev/null 2>&1; then
+    DOCKER_COMPOSE_CMD="docker compose"
+    echo "📦 Используется: docker compose"
+else
+    echo "❌ Ошибка: Не найдена команда docker-compose или docker compose"
+    echo "   Установите Docker Compose перед продолжением"
+    exit 1
+fi
+
+echo ""
+
+# Создание prometheus.yml
+mkdir -p monitoring
+if [ ! -f monitoring/prometheus.yml ]; then
 cat > monitoring/prometheus.yml << 'EOF'
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
-
-rule_files:
-  # - "first_rules.yml"
-  # - "second_rules.yml"
 
 scrape_configs:
   - job_name: 'prometheus'
@@ -29,18 +38,22 @@ scrape_configs:
 
   - job_name: 'mobile-proxy-backend'
     static_configs:
-      - targets: ['backend:8000']
+      - targets: ['host.docker.internal:8000']
     metrics_path: '/metrics'
     scrape_interval: 30s
 
-  - job_name: 'mobile-proxy-nginx'
+  - job_name: 'mobile-proxy-frontend'
     static_configs:
-      - targets: ['nginx:80']
+      - targets: ['host.docker.internal:3000']
     metrics_path: '/metrics'
     scrape_interval: 30s
 EOF
+echo "✅ monitoring/prometheus.yml создан"
+fi
 
-# Создание конфигурации источника данных Grafana
+# Создание Grafana datasource
+mkdir -p monitoring/grafana/datasources
+if [ ! -f monitoring/grafana/datasources/prometheus.yml ]; then
 cat > monitoring/grafana/datasources/prometheus.yml << 'EOF'
 apiVersion: 1
 
@@ -52,8 +65,12 @@ datasources:
     isDefault: true
     editable: true
 EOF
+echo "✅ monitoring/grafana/datasources/prometheus.yml создан"
+fi
 
-# Создание базового дашборда Grafana
+# Создание Grafana dashboard provider
+mkdir -p monitoring/grafana/dashboards
+if [ ! -f monitoring/grafana/dashboards/dashboard.yml ]; then
 cat > monitoring/grafana/dashboards/dashboard.yml << 'EOF'
 apiVersion: 1
 
@@ -67,8 +84,11 @@ providers:
     options:
       path: /etc/grafana/provisioning/dashboards
 EOF
+echo "✅ monitoring/grafana/dashboards/dashboard.yml создан"
+fi
 
-# Создание основной конфигурации nginx если её нет
+# Создание nginx.conf если его нет
+mkdir -p nginx
 if [ ! -f nginx/nginx.conf ]; then
 cat > nginx/nginx.conf << 'EOF'
 events {
@@ -140,8 +160,10 @@ http {
     }
 }
 EOF
+echo "✅ nginx/nginx.conf создан"
 fi
 
+echo ""
 echo "✅ Конфигурационные файлы созданы!"
 echo ""
 echo "📁 Созданные файлы:"
@@ -151,4 +173,6 @@ echo "  - monitoring/grafana/dashboards/dashboard.yml"
 echo "  - nginx/nginx.conf (если не существовал)"
 echo ""
 echo "🚀 Теперь можно запустить Docker Compose:"
-echo "  docker-compose up -d"
+echo "  $DOCKER_COMPOSE_CMD up -d"
+echo ""
+echo "💡 Используемая команда Docker Compose: $DOCKER_COMPOSE_CMD"

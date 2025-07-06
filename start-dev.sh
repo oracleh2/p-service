@@ -1,9 +1,28 @@
 #!/bin/bash
-# start-dev.sh - Скрипт для запуска в режиме разработки
+# start-dev.sh - Универсальный скрипт для запуска в режиме разработки
 
 set -e
 
 echo "🚀 Запуск Mobile Proxy Service в режиме разработки"
+echo ""
+
+# Определение доступной команды Docker Compose
+DOCKER_COMPOSE_CMD=""
+
+if command -v docker-compose >/dev/null 2>&1; then
+    DOCKER_COMPOSE_CMD="docker-compose"
+    echo "📦 Используется: docker-compose"
+elif docker compose version >/dev/null 2>&1; then
+    DOCKER_COMPOSE_CMD="docker compose"
+    echo "📦 Используется: docker compose"
+else
+    echo "❌ Ошибка: Не найдена команда docker-compose или docker compose"
+    echo "   Установите Docker Compose:"
+    echo "   - Для docker-compose: sudo apt install docker-compose"
+    echo "   - Для docker compose: уже включен в Docker v20.10+"
+    exit 1
+fi
+
 echo ""
 
 # Функция для проверки доступности порта
@@ -49,7 +68,7 @@ wait_for_postgres() {
     echo "⏳ Ожидание готовности PostgreSQL..."
 
     while [ $attempt -le $max_attempts ]; do
-        if docker-compose -f docker-compose.yml exec -T postgres pg_isready -U proxy_user -d mobile_proxy > /dev/null 2>&1; then
+        if $DOCKER_COMPOSE_CMD -f docker-compose.yml exec -T postgres pg_isready -U proxy_user -d mobile_proxy > /dev/null 2>&1; then
             echo "✅ PostgreSQL готов"
             return 0
         fi
@@ -71,7 +90,7 @@ wait_for_redis() {
     echo "⏳ Ожидание готовности Redis..."
 
     while [ $attempt -le $max_attempts ]; do
-        if docker-compose -f docker-compose.yml exec -T redis redis-cli ping | grep -q "PONG" 2>/dev/null; then
+        if $DOCKER_COMPOSE_CMD -f docker-compose.yml exec -T redis redis-cli ping | grep -q "PONG" 2>/dev/null; then
             echo "✅ Redis готов"
             return 0
         fi
@@ -221,7 +240,7 @@ fi
 # Запуск инфраструктурных сервисов
 echo ""
 echo "🐳 Запуск инфраструктурных сервисов..."
-docker-compose -f docker-compose.yml up -d
+$DOCKER_COMPOSE_CMD -f docker-compose.yml up -d
 
 # Ожидание готовности сервисов
 echo ""
@@ -266,7 +285,7 @@ fi
 
 echo ""
 echo "📊 Статус контейнеров:"
-docker-compose -f docker-compose.yml ps
+$DOCKER_COMPOSE_CMD -f docker-compose.yml ps
 
 echo ""
 echo "🔧 Инструкции для запуска Backend и Frontend:"
@@ -302,24 +321,26 @@ echo "   Grafana:     http://localhost:3001 (admin/admin123)"
 echo ""
 
 echo "🛠️  Дополнительные инструменты (опционально):"
-echo "   docker-compose -f docker-compose.yml --profile tools up -d"
+echo "   $DOCKER_COMPOSE_CMD -f docker-compose.yml --profile tools up -d"
 echo "   Adminer:           http://localhost:8080 (для управления БД)"
 echo "   Redis Commander:   http://localhost:8081 (для управления Redis)"
 echo ""
 
 echo "🛑 Для остановки сервисов:"
-echo "   docker-compose -f docker-compose.yml down"
+echo "   $DOCKER_COMPOSE_CMD -f docker-compose.yml down"
 echo ""
 
 echo "📋 Полезные команды:"
-echo "   docker-compose -f docker-compose.yml logs -f        # Логи всех сервисов"
-echo "   docker-compose -f docker-compose.yml logs postgres  # Логи PostgreSQL"
-echo "   docker-compose -f docker-compose.yml restart        # Перезапуск сервисов"
+echo "   $DOCKER_COMPOSE_CMD -f docker-compose.yml logs -f        # Логи всех сервисов"
+echo "   $DOCKER_COMPOSE_CMD -f docker-compose.yml logs postgres  # Логи PostgreSQL"
+echo "   $DOCKER_COMPOSE_CMD -f docker-compose.yml restart        # Перезапуск сервисов"
 echo ""
 
 echo "🔧 Проверка готовности сервисов:"
-echo "   docker-compose -f docker-compose.yml exec postgres pg_isready -U proxy_user"
-echo "   docker-compose -f docker-compose.yml exec redis redis-cli ping"
+echo "   $DOCKER_COMPOSE_CMD -f docker-compose.yml exec postgres pg_isready -U proxy_user"
+echo "   $DOCKER_COMPOSE_CMD -f docker-compose.yml exec redis redis-cli ping"
 echo ""
 
 echo "✅ Инфраструктурные сервисы запущены! Теперь запустите Backend и Frontend вручную."
+echo ""
+echo "💡 Используемая команда Docker Compose: $DOCKER_COMPOSE_CMD"
