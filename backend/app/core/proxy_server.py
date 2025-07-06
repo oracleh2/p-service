@@ -154,7 +154,7 @@ class ProxyServer:
             return web.json_response({"error": str(e)}, status=500)
 
     async def universal_handler(self, request: web.Request) -> web.Response:
-        """Универсальный обработчик для всех запросов - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
+        """Упрощенный обработчик для отладки"""
         start_time = time.time()
         client_ip = self.get_client_ip(request)
 
@@ -167,53 +167,60 @@ class ProxyServer:
                     status=400
                 )
 
-            logger.info(f"📡 Proxy request: {request.method} {target_url} from {client_ip}")
+            logger.info(f"📡 PROXY REQUEST: {request.method} {target_url} from {client_ip}")
 
-            # Выбор устройства
-            device = await self.select_device(request)
+            # Отладочная проверка заголовков
+            device_header = request.headers.get('X-Proxy-Device-ID')
+            logger.info(f"Device header: {device_header}")
+
+            # Выбор устройства с отладкой
+            device = await self.debug_device_selection(request)
             if not device:
-                logger.warning("❌ No devices available for proxying")
+                logger.error("❌ NO DEVICES AVAILABLE")
                 return web.Response(text="No devices available", status=503)
 
             device_id = device.get('id', 'unknown')
             device_type = device.get('type', 'unknown')
             interface = device.get('interface', 'unknown')
 
-            logger.info(f"✅ Selected device: {device_id} (type: {device_type}, interface: {interface})")
+            logger.info(f"✅ SELECTED DEVICE: {device_id}")
+            logger.info(f"   Type: {device_type}")
+            logger.info(f"   Interface: {interface}")
 
-            # КРИТИЧЕСКАЯ ПРОВЕРКА: если интерфейс определен и это Android
-            if device_type == 'android' and interface != 'unknown':
-                logger.info(f"🔄 Routing via Android interface: {interface}")
+            # Проверяем что это Android устройство с правильным интерфейсом
+            if device_type == 'android' and interface == 'enx566cf3eaaf4b':
+                logger.info(f"🚀 USING ANDROID INTERFACE: {interface}")
 
-                # Выполнение запроса через интерфейс устройства
-                response = await self.execute_request_via_curl(request, target_url, interface)
+                # Прямой вызов curl с интерфейсом
+                response = await self.force_curl_via_interface(request, target_url, interface)
 
                 if response:
                     response_time = int((time.time() - start_time) * 1000)
-                    logger.info(f"✅ Request completed via {interface}: {response.status} in {response_time}ms")
+                    logger.info(f"✅ SUCCESS via {interface}: {response.status} in {response_time}ms")
 
-                    # Добавляем дополнительные заголовки
-                    response.headers['X-Proxy-Device-ID'] = device_id
-                    response.headers['X-Proxy-Device-Type'] = device_type
-                    response.headers['X-Proxy-Response-Time'] = str(response_time)
+                    # Добавляем отладочные заголовки
+                    response.headers['X-Debug-Via-Interface'] = interface
+                    response.headers['X-Debug-Device-ID'] = device_id
+                    response.headers['X-Debug-Success'] = 'true'
 
                     return response
                 else:
-                    logger.warning(f"⚠️ Curl request failed via {interface}, trying fallback")
+                    logger.error(f"❌ CURL FAILED via {interface}")
             else:
-                logger.warning(f"⚠️ Device has no proper interface: {device_id} (interface: {interface})")
+                logger.warning(f"⚠️ WRONG DEVICE TYPE OR INTERFACE: type={device_type}, interface={interface}")
 
-            # Fallback: выполнение запроса через обычный HTTP клиент
-            logger.info("🔄 Using fallback routing (direct connection)")
+            # Fallback
+            logger.info("🔄 USING FALLBACK (this will use server's main interface)")
             response = await self.forward_request_default(request, target_url, device)
 
             response_time = int((time.time() - start_time) * 1000)
-            logger.info(f"✅ Fallback request completed: {response.status} in {response_time}ms")
+            logger.info(f"✅ Fallback completed: {response.status} in {response_time}ms")
 
+            response.headers['X-Debug-Via-Fallback'] = 'true'
             return response
 
         except Exception as e:
-            logger.error(f"❌ Error in universal handler: {e}")
+            logger.error(f"❌ ERROR in universal_handler: {e}")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
             return web.Response(text=f"Internal Server Error: {str(e)}", status=500)
@@ -834,3 +841,105 @@ class ProxyServer:
         except Exception as e:
             logger.error(f"❌ Error testing interface {interface}: {e}")
             return False
+
+    async def debug_device_selection(self, request: web.Request):
+        """Отладочная функция для проверки выбора устройства"""
+        try:
+            if not self.device_manager:
+                logger.error("Device manager not available")
+                return None
+
+            all_devices = await self.device_manager.get_all_devices()
+            logger.info(f"Total devices available: {len(all_devices)}")
+
+            for device_id, device in all_devices.items():
+                logger.info(
+                    f"Device: {device_id}, type: {device.get('type')}, "
+                    f"interface: {device.get('interface')}, status: {device.get('status')}"
+                )
+
+            # Проверка заголовка для выбора конкретного устройства
+            device_id = request.headers.get('X-Proxy-Device-ID')
+            if device_id:
+                logger.info(f"Requested specific device: {device_id}")
+                device = await self.device_manager.get_device_by_id(device_id)
+                if device:
+                    logger.info(f"Found requested device: {device}")
+                    return device
+                else:
+                    logger.warning(f"Requested device {device_id} not found")
+
+            # Выбор первого доступного устройства
+            online_devices = [d for d in all_devices.values() if d.get('status') == 'online']
+            logger.info(f"Online devices: {len(online_devices)}")
+
+            if online_devices:
+                selected = online_devices[0]
+                logger.info(f"Selected first online device: {selected}")
+                return selected
+            else:
+                logger.warning("No online devices found")
+                return None
+
+        except Exception as e:
+            logger.error(f"Error in debug_device_selection: {e}")
+            return None
+
+    async def force_curl_via_interface(self, request: web.Request, target_url: str, interface: str) -> Optional[
+        web.Response]:
+        """Принудительное выполнение запроса через curl с интерфейсом"""
+        try:
+            logger.info(f"🔧 FORCING CURL via interface: {interface}")
+
+            # Простая команда curl
+            curl_cmd = [
+                'curl',
+                '--interface', interface,
+                '--silent',
+                '--max-time', '30',
+                '--write-out', 'HTTPSTATUS:%{http_code}',
+                target_url
+            ]
+
+            logger.info(f"Executing: {' '.join(curl_cmd)}")
+
+            process = await asyncio.create_subprocess_exec(
+                *curl_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+
+            if process.returncode == 0:
+                output = stdout.decode('utf-8', errors='ignore')
+
+                # Парсинг статуса
+                status_code = 200
+                if 'HTTPSTATUS:' in output:
+                    try:
+                        status_pos = output.rfind('HTTPSTATUS:')
+                        status_code = int(output[status_pos + 11:].strip())
+                        response_body = output[:status_pos]
+                    except (ValueError, IndexError):
+                        response_body = output
+                else:
+                    response_body = output
+
+                logger.info(f"✅ CURL SUCCESS: status {status_code}, body length {len(response_body)}")
+
+                return web.Response(
+                    body=response_body.encode('utf-8'),
+                    status=status_code,
+                    headers={
+                        'X-Forced-Via': interface,
+                        'Content-Type': 'application/json'
+                    }
+                )
+            else:
+                error_msg = stderr.decode('utf-8', errors='ignore')
+                logger.error(f"❌ CURL ERROR: {error_msg}")
+                return None
+
+        except Exception as e:
+            logger.error(f"❌ Exception in force_curl_via_interface: {e}")
+            return None
