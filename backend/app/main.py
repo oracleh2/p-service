@@ -68,6 +68,7 @@ app.add_middleware(
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
 app.include_router(auth.router, prefix="/auth", tags=["auth-legacy"])  # Для совместимости с фронтендом
 app.include_router(proxy.router, prefix="/api/v1/proxy", tags=["proxy"])
+app.include_router(proxy.router, prefix="/proxy", tags=["proxy-legacy"])  # Для совместимости с фронтендом
 app.include_router(admin.router, prefix="/api/v1/admin", tags=["admin"])
 app.include_router(admin.router, prefix="/admin", tags=["admin-legacy"])  # Для совместимости с фронтендом
 app.include_router(stats.router, prefix="/api/v1/stats", tags=["stats"])
