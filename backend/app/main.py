@@ -76,6 +76,9 @@ app.add_middleware(
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
 app.include_router(auth.router, prefix="/auth", tags=["auth-legacy"])
 
+app.include_router(proxy.router, prefix="/proxy", tags=["proxy"])
+app.include_router(admin.router, prefix="/admin", tags=["admin"])
+app.include_router(stats.router, prefix="/stats", tags=["stats"])
 
 # Middleware для логирования запросов
 @app.middleware("http")
