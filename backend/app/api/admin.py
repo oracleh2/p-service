@@ -12,6 +12,7 @@ import netifaces
 import asyncio
 import time
 
+from ..main import logger
 from ..models.database import get_db, get_system_config, update_system_config
 from ..models.base import ProxyDevice, RotationConfig, SystemConfig, RequestLog, IpHistory
 from ..api.auth import get_admin_user
@@ -19,8 +20,8 @@ from ..core.managers import get_device_manager, get_proxy_server, get_rotation_m
 from ..config import DEFAULT_SYSTEM_CONFIG
 
 router = APIRouter()
-logger = None  # Будет импортирован из main
-from ..main import logger
+# logger = None  # Будет импортирован из main
+
 
 class SystemConfigUpdate(BaseModel):
     key: str
