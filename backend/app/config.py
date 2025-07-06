@@ -90,8 +90,18 @@ settings = Settings()
 # Константы для совместимости
 PROXY_HOST = settings.proxy_host
 PROXY_PORT = settings.proxy_port
-REQUEST_TIMEOUT_SECONDS = settings.request_timeout_seconds
 MAX_CONCURRENT_CONNECTIONS = settings.max_concurrent_connections
+REQUEST_TIMEOUT_SECONDS = settings.request_timeout_seconds
+BUFFER_SIZE = settings.buffer_size
+DEFAULT_ROTATION_INTERVAL = settings.default_rotation_interval
+MAX_ROTATION_ATTEMPTS = settings.max_rotation_attempts
+ROTATION_TIMEOUT_SECONDS = settings.rotation_timeout_seconds
+ROTATION_RETRY_DELAY_SECONDS = settings.rotation_retry_delay_seconds
+MAX_DEVICES = settings.max_devices
+MAX_REQUESTS_PER_MINUTE = settings.max_requests_per_minute
+HEALTH_CHECK_INTERVAL = settings.health_check_interval
+HEARTBEAT_TIMEOUT = settings.heartbeat_timeout
+LOG_RETENTION_DAYS = settings.log_retention_days
 
 DEFAULT_SYSTEM_CONFIG = {
     "rotation_interval": {
