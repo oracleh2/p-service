@@ -13,6 +13,8 @@ from .models.config import settings
 from .core.modem_manager import ModemManager  # Добавить эту строку
 from .api import auth, proxy, admin, stats
 from .core.managers import init_managers
+from .core.managers import get_modem_manager
+
 
 init_managers()
 
@@ -198,6 +200,9 @@ async def admin_system_health():
 @app.get("/admin/modems")
 async def admin_get_modems():
     """Список реальных модемов"""
+    modem_manager = get_modem_manager()
+    if not modem_manager:
+        return []
     try:
         # Обновляем список модемов
         await modem_manager.discover_modems()
@@ -249,6 +254,9 @@ async def admin_get_modems():
 @app.get("/admin/modems/{modem_id}")
 async def admin_get_modem_by_id(modem_id: str):
     """Получение информации о конкретном модеме"""
+    modem_manager = get_modem_manager()
+    if not modem_manager:
+        return []
     try:
         # Получаем все модемы
         all_modems = await modem_manager.get_all_modems()
@@ -322,6 +330,9 @@ async def admin_get_modem_by_id(modem_id: str):
 @app.get("/admin/modems/{modem_id}/stats")
 async def admin_get_modem_stats(modem_id: str):
     """Получение статистики конкретного модема"""
+    modem_manager = get_modem_manager()
+    if not modem_manager:
+        return []
     try:
         all_modems = await modem_manager.get_all_modems()
 
@@ -364,6 +375,9 @@ async def admin_get_modem_stats(modem_id: str):
 @app.put("/admin/modems/{modem_id}")
 async def admin_update_modem(modem_id: str, update_data: dict):
     """Обновление настроек модема"""
+    modem_manager = get_modem_manager()
+    if not modem_manager:
+        return []
     try:
         all_modems = await modem_manager.get_all_modems()
 
@@ -391,6 +405,9 @@ async def admin_update_modem(modem_id: str, update_data: dict):
 @app.delete("/admin/modems/{modem_id}")
 async def admin_delete_modem(modem_id: str):
     """Удаление модема из системы"""
+    modem_manager = get_modem_manager()
+    if not modem_manager:
+        return []
     try:
         all_modems = await modem_manager.get_all_modems()
 
@@ -411,6 +428,9 @@ async def admin_delete_modem(modem_id: str):
 @app.post("/admin/modems/scan")
 async def scan_modems():
     """Принудительное сканирование модемов"""
+    modem_manager = get_modem_manager()
+    if not modem_manager:
+        return []
     try:
         logger.info("Manual modem scan initiated")
         await modem_manager.discover_modems()
@@ -484,6 +504,9 @@ async def rotate_all_modems():
 @app.post("/admin/modems/{modem_id}/rotate")
 async def rotate_modem(modem_id: str):
     """Реальная ротация IP конкретного модема"""
+    modem_manager = get_modem_manager()
+    if not modem_manager:
+        return []
     try:
         all_modems = await modem_manager.get_all_modems()
 
@@ -555,6 +578,9 @@ async def startup_event():
         logger.error(f"❌ Failed to initialize database: {e}")
 
     # Запуск ModemManager (добавить этот блок)
+    modem_manager = get_modem_manager()
+    if not modem_manager:
+        return []
     try:
         await modem_manager.start()
         logger.info("✅ ModemManager started successfully")
@@ -572,6 +598,9 @@ async def shutdown_event():
     logger.info("🛑 Mobile Proxy Service shutting down...")
 
     # Добавить остановку ModemManager:
+    modem_manager = get_modem_manager()
+    if not modem_manager:
+        return []
     try:
         await modem_manager.stop()
         logger.info("✅ ModemManager stopped")
