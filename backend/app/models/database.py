@@ -13,8 +13,8 @@ logger = structlog.get_logger()
 # Асинхронный движок базы данных
 async_engine = create_async_engine(
     settings.database_url.replace("postgresql://", "postgresql+asyncpg://"),
-    pool_size=settings.DATABASE_POOL_SIZE,
-    max_overflow=settings.DATABASE_MAX_OVERFLOW,
+    pool_size=settings.database_pool_size,
+    max_overflow=settings.database_max_overflow,
     echo=settings.DEBUG,
     pool_pre_ping=True,
     pool_recycle=3600,  # 1 час
