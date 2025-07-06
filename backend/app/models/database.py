@@ -12,7 +12,7 @@ logger = structlog.get_logger()
 
 # Асинхронный движок базы данных
 async_engine = create_async_engine(
-    settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://"),
+    settings.database_url.replace("postgresql://", "postgresql+asyncpg://"),
     pool_size=settings.DATABASE_POOL_SIZE,
     max_overflow=settings.DATABASE_MAX_OVERFLOW,
     echo=settings.DEBUG,
@@ -22,7 +22,7 @@ async_engine = create_async_engine(
 
 # Синхронный движок для миграций
 sync_engine = create_engine(
-    settings.DATABASE_URL.replace("postgresql://", "postgresql://"),
+    settings.database_url.replace("postgresql://", "postgresql://"),
     pool_size=10,
     max_overflow=20,
     echo=settings.DEBUG,
@@ -60,10 +60,10 @@ async def get_redis() -> Redis:
     global redis_client
     if redis_client is None:
         redis_client = Redis.from_url(
-            settings.REDIS_URL,
+            settings.redis_url,
             encoding="utf8",
             decode_responses=True,
-            max_connections=settings.REDIS_POOL_SIZE
+            max_connections=settings.redis_pool_size
         )
     return redis_client
 
