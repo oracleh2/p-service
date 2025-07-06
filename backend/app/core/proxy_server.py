@@ -9,7 +9,7 @@ import structlog
 import socket
 
 from ..config import settings
-from ..database import AsyncSessionLocal
+from ..models.database import AsyncSessionLocal
 from ..models.base import RequestLog
 from datetime import datetime, timezone
 import uuid
