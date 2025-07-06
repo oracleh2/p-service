@@ -79,9 +79,9 @@ app.include_router(admin.router, prefix="/admin", tags=["admin"])
 app.include_router(stats.router, prefix="/stats", tags=["stats"])
 
 # Также можно добавить API v1 версии:
-app.include_router(proxy.router, prefix="/api/v1/proxy", tags=["proxy-v1"])
-app.include_router(admin.router, prefix="/api/v1/admin", tags=["admin-v1"])
-app.include_router(stats.router, prefix="/api/v1/stats", tags=["stats-v1"])
+# app.include_router(proxy.router, prefix="/api/v1/proxy", tags=["proxy-v1"])
+# app.include_router(admin.router, prefix="/api/v1/admin", tags=["admin-v1"])
+# app.include_router(stats.router, prefix="/api/v1/stats", tags=["stats-v1"])
 
 # Middleware для логирования запросов
 @app.middleware("http")
