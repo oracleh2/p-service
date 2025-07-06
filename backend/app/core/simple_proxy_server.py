@@ -144,29 +144,116 @@ class SimpleProxyServer:
         return None
 
     async def get_android_route(self, modem_id: str) -> Optional[dict]:
-        """Получение маршрута для Android устройства"""
+        """Получение маршрута для Android устройства - ОБНОВЛЕННАЯ ВЕРСИЯ"""
         try:
-            # Android может создать USB tethering интерфейс
-            # Обычно это usb0, rndis0 или похожие
-            import netifaces
+            # Получаем информацию об устройстве из device_manager
+            device_route = await self.device_manager.get_device_proxy_route(modem_id)
 
+            if device_route and device_route.get('type') == 'android_usb':
+                interface = device_route.get('interface')
+
+                if interface:
+                    # Проверяем что интерфейс активен
+                    import netifaces
+                    if interface in netifaces.interfaces():
+                        addresses = netifaces.ifaddresses(interface)
+                        if netifaces.AF_INET in addresses:
+                            logger.info(f"Using Android USB interface: {interface}")
+                            return {
+                                'type': 'android_usb',
+                                'interface': interface,
+                                'method': 'interface_binding',
+                                'device_id': device_route.get('device_id')
+                            }
+                        else:
+                            logger.warning(f"Android interface {interface} has no IP address")
+                    else:
+                        logger.warning(f"Android interface {interface} is not available")
+
+            # Fallback: старый метод поиска
+            logger.info("Falling back to interface discovery for Android")
+            import netifaces
             android_interfaces = ['usb0', 'rndis0', 'enp0s20u1']
 
-            for interface in android_interfaces:
-                if interface in netifaces.interfaces():
-                    return {
-                        'type': 'android_tethering',
-                        'interface': interface,
-                        'method': 'interface_binding'
-                    }
+            # Расширенный поиск интерфейсов
+            all_interfaces = netifaces.interfaces()
+            potential_interfaces = []
 
-            # Если USB tethering не найден, можно попробовать WiFi hotspot
-            # Но это сложнее, так как нужно знать IP Android устройства
+            # Поиск по известным паттернам
+            for interface in all_interfaces:
+                if (interface.startswith('usb') or
+                    interface.startswith('rndis') or
+                    interface.startswith('enx') or
+                    re.match(r'enp\d+s\d+u\d+', interface)):
+
+                    addresses = netifaces.ifaddresses(interface)
+                    if netifaces.AF_INET in addresses:
+                        potential_interfaces.append(interface)
+
+            if potential_interfaces:
+                # Берем первый найденный интерфейс
+                interface = potential_interfaces[0]
+                logger.info(f"Found Android interface via fallback: {interface}")
+                return {
+                    'type': 'android_tethering',
+                    'interface': interface,
+                    'method': 'interface_binding'
+                }
+
+            logger.warning("No Android USB interface found")
+            return None
 
         except Exception as e:
             logger.error("Error getting Android route", modem_id=modem_id, error=str(e))
+            return None
 
-        return None
+    async def make_request_via_interface(self, session: aiohttp.ClientSession,
+                                         method: str, url: str, interface: str,
+                                         headers: dict = None, data: bytes = None) -> aiohttp.ClientResponse:
+        """Выполнение HTTP запроса через конкретный сетевой интерфейс"""
+
+        try:
+            # Получаем IP адрес интерфейса
+            import netifaces
+
+            if interface not in netifaces.interfaces():
+                raise Exception(f"Interface {interface} not found")
+
+            addresses = netifaces.ifaddresses(interface)
+            if netifaces.AF_INET not in addresses:
+                raise Exception(f"No IPv4 address on interface {interface}")
+
+            local_ip = addresses[netifaces.AF_INET][0]['addr']
+
+            # Создаем connector с привязкой к локальному IP
+            connector = aiohttp.TCPConnector(
+                local_addr=(local_ip, 0),  # Привязываемся к IP интерфейса
+                limit=100,
+                limit_per_host=10,
+                ttl_dns_cache=300,
+                use_dns_cache=True,
+            )
+
+            # Создаем новую сессию с этим connector
+            async with aiohttp.ClientSession(
+                connector=connector,
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as bound_session:
+
+                logger.debug(f"Making request via interface {interface} (IP: {local_ip})")
+
+                async with bound_session.request(
+                    method=method,
+                    url=url,
+                    headers=headers,
+                    data=data,
+                    allow_redirects=True
+                ) as response:
+                    return response
+
+        except Exception as e:
+            logger.error(f"Error making request via interface {interface}: {e}")
+            raise
 
     async def get_network_route(self, modem_id: str) -> Optional[dict]:
         """Получение маршрута для сетевого модема"""
@@ -634,3 +721,100 @@ class SimpleProxyServer:
                 {"status": "error", "message": str(e)},
                 status=500
             )
+
+
+async def handle_request(self, request: web.Request) -> web.Response:
+    """Обработка HTTP запроса - ОБНОВЛЕННАЯ ВЕРСИЯ"""
+
+    try:
+        # Выбираем устройство для запроса
+        selected_modem = await self.select_modem()
+        if not selected_modem:
+            return web.Response(text="No modems available", status=503)
+
+        modem_id = selected_modem['id']
+
+        # Получаем маршрут для устройства
+        route = await self.get_route_for_modem(modem_id)
+        if not route:
+            logger.warning(f"No route available for modem {modem_id}")
+            return web.Response(text="No route available", status=503)
+
+        # Подготавливаем URL и заголовки
+        target_url = str(request.url).replace(str(request.url.with_path('/').with_query('')), '')
+        if not target_url.startswith('http'):
+            target_url = f"http://{target_url}"
+
+        # Копируем заголовки, исключая hop-by-hop заголовки
+        headers = {}
+        for name, value in request.headers.items():
+            if name.lower() not in ['connection', 'upgrade', 'proxy-authenticate', 'proxy-authorization', 'te',
+                                    'trailers', 'transfer-encoding']:
+                headers[name] = value
+
+        # Читаем тело запроса
+        body = await request.read()
+
+        start_time = time.time()
+
+        try:
+            # Выполняем запрос в зависимости от типа маршрута
+            async with aiohttp.ClientSession() as session:
+
+                if route.get('method') == 'interface_binding':
+                    # Запрос через конкретный интерфейс
+                    interface = route.get('interface')
+                    logger.debug(f"Making request via interface {interface}")
+
+                    response = await self.make_request_via_interface(
+                        session, request.method, target_url, interface, headers, body
+                    )
+                else:
+                    # Обычный запрос
+                    async with session.request(
+                        method=request.method,
+                        url=target_url,
+                        headers=headers,
+                        data=body
+                    ) as response:
+                        pass
+
+                # Читаем ответ
+                response_body = await response.read()
+                response_headers = {}
+
+                for name, value in response.headers.items():
+                    if name.lower() not in ['connection', 'transfer-encoding']:
+                        response_headers[name] = value
+
+                # Логируем статистику
+                elapsed = time.time() - start_time
+                logger.info(
+                    f"Request completed via {modem_id}",
+                    method=request.method,
+                    url=target_url,
+                    status=response.status,
+                    elapsed=f"{elapsed:.2f}s",
+                    interface=route.get('interface', 'unknown')
+                )
+
+                return web.Response(
+                    body=response_body,
+                    status=response.status,
+                    headers=response_headers
+                )
+
+        except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(
+                f"Request failed via {modem_id}",
+                method=request.method,
+                url=target_url,
+                error=str(e),
+                elapsed=f"{elapsed:.2f}s"
+            )
+            return web.Response(text=f"Request failed: {str(e)}", status=502)
+
+    except Exception as e:
+        logger.error(f"Error handling request: {e}")
+        return web.Response(text="Internal server error", status=500)

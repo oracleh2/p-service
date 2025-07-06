@@ -7,9 +7,16 @@ import time
 import socket
 import netifaces
 from typing import Optional, Dict, Any, List
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 import structlog
 import subprocess
+import re
+import json
+from datetime import datetime, timezone
+import psutil
+import random
+
 
 from ..config import settings
 
@@ -203,32 +210,50 @@ class ProxyServer:
         return None
 
     async def get_android_interface_info(self, device: Dict[str, Any]) -> Optional[Dict[str, str]]:
-        """Получение информации об интерфейсе Android устройства"""
+        """Получение информации об интерфейсе Android устройства - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
         try:
-            # Поиск USB tethering интерфейса
-            android_interfaces = ['enx566cf3eaaf4b', 'usb0', 'rndis0', 'enp0s20u1']
+            # Получаем интерфейс из устройства (теперь он должен быть реальным)
+            interface = device.get('interface')
+            adb_id = device.get('adb_id')
 
-            for interface in android_interfaces:
-                if interface in netifaces.interfaces():
-                    addrs = netifaces.ifaddresses(interface)
-                    if netifaces.AF_INET in addrs:
-                        ip = addrs[netifaces.AF_INET][0]['addr']
+            if not interface or interface == "unknown":
+                logger.warning(f"No interface found for Android device {adb_id}")
+                return None
 
-                        # Проверяем, что интерфейс UP
-                        result = subprocess.run(['ip', 'link', 'show', interface],
-                                                capture_output=True, text=True)
-                        if result.returncode == 0 and 'UP' in result.stdout:
-                            return {
-                                'interface': interface,
-                                'ip': ip,
-                                'routing_method': 'curl_interface_binding',
-                                'type': 'android_usb_tethering'
-                            }
+            # Проверяем, что интерфейс существует и активен
+            if interface not in netifaces.interfaces():
+                logger.warning(f"Interface {interface} not found in system for device {adb_id}")
+                return None
+
+            addrs = netifaces.ifaddresses(interface)
+            if netifaces.AF_INET not in addrs:
+                logger.warning(f"No IP address on interface {interface} for device {adb_id}")
+                return None
+
+            ip = addrs[netifaces.AF_INET][0]['addr']
+
+            # Проверяем, что интерфейс UP
+            try:
+                result = subprocess.run(['ip', 'link', 'show', interface],
+                                        capture_output=True, text=True, timeout=5)
+                if result.returncode == 0 and 'UP' in result.stdout:
+                    logger.info(f"Android interface {interface} is UP for device {adb_id}")
+                    return {
+                        'interface': interface,
+                        'ip': ip,
+                        'routing_method': 'curl_interface_binding',
+                        'type': 'android_usb_tethering'
+                    }
+                else:
+                    logger.warning(f"Interface {interface} is DOWN for device {adb_id}")
+                    return None
+            except subprocess.TimeoutExpired:
+                logger.warning(f"Timeout checking interface {interface} status")
+                return None
 
         except Exception as e:
-            logger.error(f"Error getting Android interface info: {e}")
-
-        return None
+            logger.error(f"Error getting Android interface info for {device.get('adb_id')}: {e}")
+            return None
 
     async def get_usb_modem_interface_info(self, device: Dict[str, Any]) -> Optional[Dict[str, str]]:
         """Получение информации об интерфейсе USB модема"""
@@ -276,7 +301,7 @@ class ProxyServer:
         target_url: str,
         device: Dict[str, Any]
     ) -> web.Response:
-        """Выполнение запроса через интерфейс устройства"""
+        """Выполнение запроса через интерфейс устройства - УЛУЧШЕННАЯ ВЕРСИЯ"""
         try:
             # Получение информации об интерфейсе устройства
             interface_info = await self.get_device_interface_info(device)
@@ -286,15 +311,23 @@ class ProxyServer:
                 return await self.forward_request_default(request, target_url, device)
 
             interface = interface_info['interface']
-            logger.info(f"Routing request via interface {interface} for device {device['id']}")
+            device_type = device.get('type', 'unknown')
+
+            logger.info(f"Routing {request.method} request to {target_url} via {device_type} interface {interface}")
 
             # Использование curl для привязки к интерфейсу
             response = await self.execute_request_via_curl(request, target_url, interface)
 
             if response:
+                # Добавляем информацию об устройстве в заголовки
+                response.headers['X-Proxy-Device-Type'] = device_type
+                response.headers['X-Proxy-Device-ID'] = device.get('id', 'unknown')
+                if device_type == 'android':
+                    response.headers[
+                        'X-Proxy-Android-Model'] = f"{device.get('manufacturer', 'Unknown')} {device.get('model', 'Unknown')}"
                 return response
             else:
-                logger.warning(f"Curl request failed, fallback to default routing")
+                logger.warning(f"Curl request failed for interface {interface}, fallback to default routing")
                 return await self.forward_request_default(request, target_url, device)
 
         except Exception as e:
@@ -307,8 +340,18 @@ class ProxyServer:
         target_url: str,
         interface: str
     ) -> Optional[web.Response]:
-        """Выполнение запроса через curl с привязкой к интерфейсу"""
+        """Выполнение запроса через curl с привязкой к интерфейсу - УЛУЧШЕННАЯ ВЕРСИЯ"""
         try:
+            # Проверяем, что интерфейс доступен
+            if interface not in netifaces.interfaces():
+                logger.error(f"Interface {interface} not found")
+                return None
+
+            addrs = netifaces.ifaddresses(interface)
+            if netifaces.AF_INET not in addrs:
+                logger.error(f"No IP on interface {interface}")
+                return None
+
             # Подготовка команды curl
             curl_cmd = [
                 'curl',
@@ -321,33 +364,34 @@ class ProxyServer:
                 '--header', f"User-Agent: {request.headers.get('User-Agent', 'Mobile-Proxy/2.0')}",
             ]
 
-            # Добавление заголовков
+            # Добавление заголовков (исключаем некоторые)
+            excluded_headers = ['host', 'content-length', 'connection', 'x-proxy-device-id']
             for header_name, header_value in request.headers.items():
-                if header_name.lower() not in ['host', 'content-length', 'connection']:
+                if header_name.lower() not in excluded_headers:
                     curl_cmd.extend(['--header', f"{header_name}: {header_value}"])
 
             # Обработка POST/PUT данных
+            request_body = None
             if request.method in ['POST', 'PUT', 'PATCH']:
-                body = await request.read()
-                if body:
+                request_body = await request.read()
+                if request_body:
                     curl_cmd.extend(['--data-binary', '@-'])
                 curl_cmd.extend(['-X', request.method])
 
             # Добавление URL
             curl_cmd.append(target_url)
 
-            logger.info(f"Executing curl via {interface}: {' '.join(curl_cmd[:8])}...")
+            logger.info(f"Executing curl via {interface}: {request.method} {target_url}")
 
             # Выполнение curl
-            if request.method in ['POST', 'PUT', 'PATCH']:
-                body = await request.read()
+            if request_body:
                 process = await asyncio.create_subprocess_exec(
                     *curl_cmd,
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
-                stdout, stderr = await process.communicate(input=body)
+                stdout, stderr = await process.communicate(input=request_body)
             else:
                 process = await asyncio.create_subprocess_exec(
                     *curl_cmd,
@@ -363,18 +407,26 @@ class ProxyServer:
                 # Извлечение HTTP статуса
                 if 'HTTPSTATUS:' in output:
                     status_pos = output.rfind('HTTPSTATUS:')
-                    status_code = int(output[status_pos + 11:].strip())
-                    response_body = output[:status_pos].encode('utf-8')
+                    try:
+                        status_code = int(output[status_pos + 11:].strip())
+                        response_body = output[:status_pos].encode('utf-8')
+                    except ValueError:
+                        status_code = 200
+                        response_body = stdout
                 else:
                     status_code = 200
                     response_body = stdout
 
-                logger.info(f"Curl request successful via {interface}: status {status_code}")
+                logger.info(
+                    f"Curl request successful via {interface}: status {status_code}, body size {len(response_body)}")
 
                 return web.Response(
                     body=response_body,
                     status=status_code,
-                    headers={'X-Proxy-Via': f"interface-{interface}"}
+                    headers={
+                        'X-Proxy-Via': f"interface-{interface}",
+                        'X-Proxy-Method': 'curl-interface-binding'
+                    }
                 )
             else:
                 error_msg = stderr.decode('utf-8', errors='ignore')
@@ -481,10 +533,59 @@ class ProxyServer:
             logger.error(f"Error getting target URL: {e}")
             return None
 
+    async def make_request_via_interface(self, session: aiohttp.ClientSession,
+                                         method: str, url: str, interface: str,
+                                         headers: dict = None, data: bytes = None) -> aiohttp.ClientResponse:
+        """Выполнение HTTP запроса через конкретный сетевой интерфейс"""
+
+        try:
+            # Получаем IP адрес интерфейса
+            import netifaces
+
+            if interface not in netifaces.interfaces():
+                raise Exception(f"Interface {interface} not found")
+
+            addresses = netifaces.ifaddresses(interface)
+            if netifaces.AF_INET not in addresses:
+                raise Exception(f"No IPv4 address on interface {interface}")
+
+            local_ip = addresses[netifaces.AF_INET][0]['addr']
+
+            # Создаем connector с привязкой к локальному IP
+            connector = aiohttp.TCPConnector(
+                local_addr=(local_ip, 0),  # Привязываемся к IP интерфейса
+                limit=100,
+                limit_per_host=10,
+                ttl_dns_cache=300,
+                use_dns_cache=True,
+            )
+
+            # Создаем новую сессию с этим connector
+            async with aiohttp.ClientSession(
+                connector=connector,
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as bound_session:
+
+                logger.debug(f"Making request via interface {interface} (IP: {local_ip})")
+
+                async with bound_session.request(
+                    method=method,
+                    url=url,
+                    headers=headers,
+                    data=data,
+                    allow_redirects=True
+                ) as response:
+                    return response
+
+        except Exception as e:
+            logger.error(f"Error making request via interface {interface}: {e}")
+            raise
+
     async def select_device(self, request: web.Request) -> Optional[Dict[str, Any]]:
-        """Выбор устройства для проксирования"""
+        """Выбор устройства для проксирования - УЛУЧШЕННАЯ ВЕРСИЯ"""
         try:
             if not self.device_manager:
+                logger.warning("Device manager not available")
                 return None
 
             # Проверка заголовка для выбора конкретного устройства
@@ -492,10 +593,19 @@ class ProxyServer:
             if device_id:
                 device = await self.device_manager.get_device_by_id(device_id)
                 if device and device.get('status') == 'online':
+                    logger.info(f"Using specific device requested: {device_id}")
                     return device
+                else:
+                    logger.warning(f"Requested device {device_id} not available")
 
             # Выбор случайного доступного устройства
-            return await self.device_manager.get_random_device()
+            device = await self.device_manager.get_random_device()
+            if device:
+                logger.info(f"Selected random device: {device.get('id')} ({device.get('type')})")
+            else:
+                logger.warning("No online devices available")
+
+            return device
 
         except Exception as e:
             logger.error(f"Error selecting device: {e}")
@@ -527,3 +637,99 @@ class ProxyServer:
         except Exception as e:
             logger.error(f"Error getting proxy stats: {e}")
             return {"error": str(e)}
+
+    async def handle_request(self, request: web.Request) -> web.Response:
+        """Обработка HTTP запроса - ОБНОВЛЕННАЯ ВЕРСИЯ"""
+
+        try:
+            # Выбираем устройство для запроса
+            selected_modem = await self.select_modem()
+            if not selected_modem:
+                return web.Response(text="No modems available", status=503)
+
+            modem_id = selected_modem['id']
+
+            # Получаем маршрут для устройства
+            route = await self.get_route_for_modem(modem_id)
+            if not route:
+                logger.warning(f"No route available for modem {modem_id}")
+                return web.Response(text="No route available", status=503)
+
+            # Подготавливаем URL и заголовки
+            target_url = str(request.url).replace(str(request.url.with_path('/').with_query('')), '')
+            if not target_url.startswith('http'):
+                target_url = f"http://{target_url}"
+
+            # Копируем заголовки, исключая hop-by-hop заголовки
+            headers = {}
+            for name, value in request.headers.items():
+                if name.lower() not in ['connection', 'upgrade', 'proxy-authenticate', 'proxy-authorization', 'te',
+                                        'trailers', 'transfer-encoding']:
+                    headers[name] = value
+
+            # Читаем тело запроса
+            body = await request.read()
+
+            start_time = time.time()
+
+            try:
+                # Выполняем запрос в зависимости от типа маршрута
+                async with aiohttp.ClientSession() as session:
+
+                    if route.get('method') == 'interface_binding':
+                        # Запрос через конкретный интерфейс
+                        interface = route.get('interface')
+                        logger.debug(f"Making request via interface {interface}")
+
+                        response = await self.make_request_via_interface(
+                            session, request.method, target_url, interface, headers, body
+                        )
+                    else:
+                        # Обычный запрос
+                        async with session.request(
+                            method=request.method,
+                            url=target_url,
+                            headers=headers,
+                            data=body
+                        ) as response:
+                            pass
+
+                    # Читаем ответ
+                    response_body = await response.read()
+                    response_headers = {}
+
+                    for name, value in response.headers.items():
+                        if name.lower() not in ['connection', 'transfer-encoding']:
+                            response_headers[name] = value
+
+                    # Логируем статистику
+                    elapsed = time.time() - start_time
+                    logger.info(
+                        f"Request completed via {modem_id}",
+                        method=request.method,
+                        url=target_url,
+                        status=response.status,
+                        elapsed=f"{elapsed:.2f}s",
+                        interface=route.get('interface', 'unknown')
+                    )
+
+                    return web.Response(
+                        body=response_body,
+                        status=response.status,
+                        headers=response_headers
+                    )
+
+            except Exception as e:
+                elapsed = time.time() - start_time
+                logger.error(
+                    f"Request failed via {modem_id}",
+                    method=request.method,
+                    url=target_url,
+                    error=str(e),
+                    elapsed=f"{elapsed:.2f}s"
+                )
+                return web.Response(text=f"Request failed: {str(e)}", status=502)
+
+        except Exception as e:
+            logger.error(f"Error handling request: {e}")
+            return web.Response(text="Internal server error", status=500)

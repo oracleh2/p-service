@@ -7,7 +7,7 @@ import time
 import re
 import json
 import netifaces
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime, timezone
 import structlog
 import psutil
@@ -474,11 +474,11 @@ class DeviceManager:
         return details
 
     # Остальные методы остаются без изменений
-    async def get_all_devices(self) -> Dict[str, dict]:
+    async def get_all_devices(self) -> Dict[str, Dict[str, Any]]:
         """Получение всех устройств"""
         return self.devices.copy()
 
-    async def get_device_by_id(self, device_id: str) -> Optional[dict]:
+    async def get_device_by_id(self, device_id: str) -> Optional[Dict[str, Any]]:
         """Получение устройства по ID"""
         return self.devices.get(device_id)
 
@@ -486,10 +486,18 @@ class DeviceManager:
         """Получение доступных (онлайн) устройств"""
         return [device for device in self.devices.values() if device.get('status') == 'online']
 
-    async def get_random_device(self) -> Optional[dict]:
-        """Получение случайного доступного устройства"""
-        available = await self.get_available_devices()
-        return random.choice(available) if available else None
+    async def get_random_device(self) -> Optional[Dict[str, Any]]:
+        """Получение случайного онлайн устройства"""
+        online_devices = [
+            device for device in self.devices.values()
+            if device.get('status') == 'online'
+        ]
+
+        if not online_devices:
+            return None
+
+        import random
+        return random.choice(online_devices)
 
     async def get_device_by_operator(self, operator: str) -> Optional[dict]:
         """Получение устройства по оператору"""
@@ -518,58 +526,167 @@ class DeviceManager:
 
         device_type = device.get('type')
 
-        if device_type == 'android':
-            return await self.get_android_external_ip(device)
-        elif device_type == 'usb_modem':
-            return await self.get_usb_modem_external_ip(device)
-        elif device_type == 'raspberry_pi':
-            return await self.get_raspberry_external_ip(device)
-
-        return None
-
-    async def get_android_external_ip(self, device: dict) -> Optional[str]:
-        """Получение внешнего IP Android устройства"""
         try:
-            # Попробуем через USB интерфейс если есть
-            usb_interface = device.get('usb_interface')
-            if usb_interface:
-                try:
-                    # Используем curl через интерфейс для получения внешнего IP
-                    result = await asyncio.create_subprocess_exec(
-                        'curl', '--interface', usb_interface, '-s', '--connect-timeout', '10',
-                        'http://httpbin.org/ip',
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE
-                    )
-                    stdout, _ = await result.communicate()
+            if device_type == 'android':
+                return await self.get_android_external_ip(device)
+            elif device_type == 'usb_modem':
+                return await self.get_usb_modem_external_ip(device)
+            elif device_type == 'raspberry_pi':
+                return await self.get_raspberry_external_ip(device)
+            else:
+                logger.warning(f"Unknown device type: {device_type}")
+                return None
 
-                    if result.returncode == 0:
-                        import json
-                        response = json.loads(stdout.decode())
-                        return response.get('origin', '').split(',')[0].strip()
-                except Exception as e:
-                    logger.warning(f"Failed to get external IP via USB interface: {e}")
+        except Exception as e:
+            logger.error(f"Error getting external IP for {device_id}: {e}")
+            return None
 
-            # Fallback: попробуем через ADB
-            device_id = device.get('adb_id')
-            if device_id:
+    async def get_android_external_ip_via_interface(self, device: dict) -> Optional[str]:
+        """Получение внешнего IP Android устройства через USB интерфейс"""
+        try:
+            interface = device.get('interface')
+            adb_id = device.get('adb_id')
+
+            if not interface:
+                logger.warning(f"No USB interface found for Android device {adb_id}")
+                # Пытаемся найти интерфейс заново
+                interface = await self.find_android_usb_interface(adb_id)
+                if interface:
+                    # Обновляем устройство с найденным интерфейсом
+                    device['interface'] = interface
+                    logger.info(f"Found and updated interface for {adb_id}: {interface}")
+                else:
+                    return None
+
+            # Метод 1: Через curl с привязкой к интерфейсу (наиболее надежный)
+            try:
                 result = await asyncio.create_subprocess_exec(
-                    'adb', '-s', device_id, 'shell', 'ip', 'route', 'get', '8.8.8.8',
+                    'curl', '--interface', interface, '-s', '--connect-timeout', '10',
+                    'httpbin.org/ip',
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
-                stdout, _ = await result.communicate()
+                stdout, stderr = await result.communicate()
+
+                if result.returncode == 0:
+                    try:
+                        import json
+                        response = json.loads(stdout.decode())
+                        external_ip = response.get('origin')
+                        if external_ip:
+                            logger.debug(f"Got external IP for {adb_id} via interface {interface}: {external_ip}")
+                            return external_ip
+                    except json.JSONDecodeError:
+                        # Пробуем найти IP в тексте
+                        ip_match = re.search(r'(\d+\.\d+\.\d+\.\d+)', stdout.decode())
+                        if ip_match:
+                            return ip_match.group(1)
+            except Exception as e:
+                logger.debug(f"Method 1 failed for {adb_id}: {e}")
+
+            # Метод 2: Через ADB (резервный)
+            try:
+                result = await asyncio.create_subprocess_exec(
+                    'adb', '-s', adb_id, 'shell', 'curl', '-s', '--connect-timeout', '5', 'httpbin.org/ip',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await result.communicate()
+
+                if result.returncode == 0:
+                    try:
+                        import json
+                        response = json.loads(stdout.decode())
+                        external_ip = response.get('origin')
+                        if external_ip:
+                            logger.debug(f"Got external IP for {adb_id} via ADB: {external_ip}")
+                            return external_ip
+                    except json.JSONDecodeError:
+                        pass
+            except Exception as e:
+                logger.debug(f"Method 2 failed for {adb_id}: {e}")
+
+            # Метод 3: Через ip route на устройстве (самый надежный для получения реального IP)
+            try:
+                result = await asyncio.create_subprocess_exec(
+                    'adb', '-s', adb_id, 'shell', 'ip', 'route', 'get', '8.8.8.8',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await result.communicate()
 
                 if result.returncode == 0:
                     output = stdout.decode()
+                    # Ищем внешний IP в выводе
                     ip_match = re.search(r'src (\d+\.\d+\.\d+\.\d+)', output)
                     if ip_match:
-                        return ip_match.group(1)
+                        local_ip = ip_match.group(1)
+                        # Это локальный IP, нужно получить внешний
+                        # Используем простой HTTP запрос
+                        ext_result = await asyncio.create_subprocess_exec(
+                            'adb', '-s', adb_id, 'shell', 'wget', '-qO-', 'ipinfo.io/ip',
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE
+                        )
+                        ext_stdout, _ = await ext_result.communicate()
+                        if ext_result.returncode == 0:
+                            external_ip = ext_stdout.decode().strip()
+                            if re.match(r'^\d+\.\d+\.\d+\.\d+$', external_ip):
+                                logger.debug(f"Got external IP for {adb_id} via ip route: {external_ip}")
+                                return external_ip
+            except Exception as e:
+                logger.debug(f"Method 3 failed for {adb_id}: {e}")
+
+            logger.warning(f"All methods failed to get external IP for Android device {adb_id}")
+            return None
 
         except Exception as e:
             logger.error(f"Error getting Android external IP: {e}")
+            return None
 
-        return None
+    # async def get_android_external_ip(self, device: dict) -> Optional[str]:
+    #     """Получение внешнего IP Android устройства"""
+    #     try:
+    #         # Попробуем через USB интерфейс если есть
+    #         usb_interface = device.get('usb_interface')
+    #         if usb_interface:
+    #             try:
+    #                 # Используем curl через интерфейс для получения внешнего IP
+    #                 result = await asyncio.create_subprocess_exec(
+    #                     'curl', '--interface', usb_interface, '-s', '--connect-timeout', '10',
+    #                     'http://httpbin.org/ip',
+    #                     stdout=asyncio.subprocess.PIPE,
+    #                     stderr=asyncio.subprocess.PIPE
+    #                 )
+    #                 stdout, _ = await result.communicate()
+    #
+    #                 if result.returncode == 0:
+    #                     import json
+    #                     response = json.loads(stdout.decode())
+    #                     return response.get('origin', '').split(',')[0].strip()
+    #             except Exception as e:
+    #                 logger.warning(f"Failed to get external IP via USB interface: {e}")
+    #
+    #         # Fallback: попробуем через ADB
+    #         device_id = device.get('adb_id')
+    #         if device_id:
+    #             result = await asyncio.create_subprocess_exec(
+    #                 'adb', '-s', device_id, 'shell', 'ip', 'route', 'get', '8.8.8.8',
+    #                 stdout=asyncio.subprocess.PIPE,
+    #                 stderr=asyncio.subprocess.PIPE
+    #             )
+    #             stdout, _ = await result.communicate()
+    #
+    #             if result.returncode == 0:
+    #                 output = stdout.decode()
+    #                 ip_match = re.search(r'src (\d+\.\d+\.\d+\.\d+)', output)
+    #                 if ip_match:
+    #                     return ip_match.group(1)
+    #
+    #     except Exception as e:
+    #         logger.error(f"Error getting Android external IP: {e}")
+    #
+    #     return None
 
     async def get_usb_modem_external_ip(self, device: dict) -> Optional[str]:
         """Получение внешнего IP USB модема"""
@@ -715,3 +832,307 @@ class DeviceManager:
             'devices_by_type': by_type,
             'last_discovery': datetime.now().isoformat()
         }
+
+    async def find_android_usb_interface(self, device_id: str) -> Optional[str]:
+        """
+        Автоматическое определение USB интерфейса для Android устройства
+        """
+        logger.info(f"Searching USB interface for Android device {device_id}")
+
+        try:
+            # 1. Получаем список всех сетевых интерфейсов
+            all_interfaces = netifaces.interfaces()
+            logger.debug(f"All network interfaces: {all_interfaces}")
+
+            # 2. Возможные шаблоны имен USB интерфейсов для Android
+            android_patterns = [
+                r'^usb\d+$',  # usb0, usb1, etc.
+                r'^rndis\d+$',  # rndis0, rndis1, etc.
+                r'^enx[0-9a-f]{12}$',  # enx + MAC address (как ваш enx566cf3eaaf4b)
+                r'^enp\d+s\d+u\d+$',  # enp0s20u1, etc.
+            ]
+
+            # 3. Находим кандидатов среди интерфейсов
+            candidate_interfaces = []
+
+            for interface in all_interfaces:
+                for pattern in android_patterns:
+                    if re.match(pattern, interface):
+                        # Проверяем, что интерфейс активен и имеет IP
+                        if self._interface_has_ip(interface):
+                            candidate_interfaces.append(interface)
+                            logger.debug(f"Found candidate interface: {interface}")
+
+            if not candidate_interfaces:
+                logger.warning(f"No active USB interfaces found for device {device_id}")
+                return None
+
+            # 4. Если есть несколько кандидатов, выбираем лучший
+            if len(candidate_interfaces) == 1:
+                interface = candidate_interfaces[0]
+                logger.info(f"Found USB interface for {device_id}: {interface}")
+                return interface
+
+            # 5. Если несколько интерфейсов, проверяем какой подключен к нашему устройству
+            for interface in candidate_interfaces:
+                if await self._verify_interface_belongs_to_device(interface, device_id):
+                    logger.info(f"Verified USB interface for {device_id}: {interface}")
+                    return interface
+
+            # 6. Если не удалось определить однозначно, берем первый
+            interface = candidate_interfaces[0]
+            logger.warning(f"Using first candidate interface for {device_id}: {interface}")
+            return interface
+
+        except Exception as e:
+            logger.error(f"Error finding USB interface for {device_id}: {e}")
+            return None
+
+    def _interface_has_ip(self, interface: str) -> bool:
+        """Проверка наличия IP адреса на интерфейсе"""
+        try:
+            addresses = netifaces.ifaddresses(interface)
+            return netifaces.AF_INET in addresses and len(addresses[netifaces.AF_INET]) > 0
+        except Exception:
+            return False
+
+    async def _verify_interface_belongs_to_device(self, interface: str, device_id: str) -> bool:
+        """
+        Проверка принадлежности интерфейса к конкретному Android устройству
+        Метод: проверяем можем ли мы получить одинаковый внешний IP
+        """
+        try:
+            # Получаем внешний IP через ADB
+            adb_result = await asyncio.create_subprocess_exec(
+                'adb', '-s', device_id, 'shell', 'curl', '-s', '--connect-timeout', '5', 'httpbin.org/ip',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            adb_stdout, _ = await adb_result.communicate()
+
+            if adb_result.returncode != 0:
+                return False
+
+            # Получаем внешний IP через интерфейс
+            interface_result = await asyncio.create_subprocess_exec(
+                'curl', '--interface', interface, '-s', '--connect-timeout', '5', 'httpbin.org/ip',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            interface_stdout, _ = await interface_result.communicate()
+
+            if interface_result.returncode != 0:
+                return False
+
+            # Сравниваем IP адреса
+            try:
+                import json
+                adb_data = json.loads(adb_stdout.decode())
+                interface_data = json.loads(interface_stdout.decode())
+
+                adb_ip = adb_data.get('origin', '')
+                interface_ip = interface_data.get('origin', '')
+
+                return adb_ip == interface_ip and adb_ip != ''
+            except (json.JSONDecodeError, KeyError):
+                return False
+
+        except Exception as e:
+            logger.debug(f"Error verifying interface {interface} for device {device_id}: {e}")
+            return False
+
+    async def discover_android_devices(self) -> Dict[str, dict]:
+        """Обнаружение Android устройств с автоматическим определением USB интерфейса"""
+        devices = {}
+
+        try:
+            logger.info("Scanning for Android devices via ADB...")
+
+            result = await asyncio.create_subprocess_exec(
+                'adb', 'devices', '-l',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await result.communicate()
+
+            if result.returncode != 0:
+                logger.error(f"ADB command failed: {stderr.decode()}")
+                return devices
+
+            devices_output = stdout.decode().strip()
+            lines = devices_output.split('\n')[1:]  # Пропускаем заголовок
+
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+
+                # Парсинг строки ADB
+                parts = line.split()
+                if len(parts) >= 2:
+                    device_id = parts[0]
+                    status = parts[1]
+
+                    if status == 'device':
+                        logger.info(f"Found Android device: {device_id}")
+
+                        # Получаем детальную информацию
+                        device_details = await self.get_android_device_details(device_id)
+
+                        # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Ищем реальный USB интерфейс
+                        usb_interface = await self.find_android_usb_interface(device_id)
+
+                        if not usb_interface:
+                            logger.warning(f"No USB interface found for Android device {device_id}")
+                            # Все равно добавляем устройство, но с предупреждением
+                            usb_interface = "unknown"
+
+                        android_device_id = f"android_{device_id}"
+                        devices[android_device_id] = {
+                            'id': android_device_id,
+                            'type': 'android',
+                            'interface': usb_interface,  # ТЕПЕРЬ РЕАЛЬНЫЙ USB ИНТЕРФЕЙС
+                            'adb_id': device_id,
+                            'device_info': device_details.get('friendly_name', f"Android device {device_id}"),
+                            'status': 'online' if usb_interface != "unknown" else 'interface_missing',
+                            'manufacturer': device_details.get('manufacturer', 'Unknown'),
+                            'model': device_details.get('model', 'Unknown'),
+                            'android_version': device_details.get('android_version', 'Unknown'),
+                            'battery_level': device_details.get('battery_level', 0),
+                            'usb_tethering': True if usb_interface != "unknown" else False,
+                            'rotation_methods': ['data_toggle', 'airplane_mode'],
+                            'last_seen': datetime.now().isoformat()
+                        }
+
+                        if usb_interface != "unknown":
+                            logger.info(
+                                f"Android device discovered: {device_id} -> {usb_interface} "
+                                f"({device_details.get('manufacturer')} {device_details.get('model')})"
+                            )
+                        else:
+                            logger.warning(
+                                f"Android device discovered without USB interface: {device_id} "
+                                f"({device_details.get('manufacturer')} {device_details.get('model')})"
+                            )
+                    else:
+                        logger.warning(f"Device {device_id} has status '{status}', skipping")
+
+        except FileNotFoundError:
+            logger.error("ADB not found - install android-tools-adb")
+        except Exception as e:
+            logger.error(f"Error discovering Android devices: {e}")
+
+        return devices
+
+    async def get_android_external_ip(self, device: Dict[str, Any]) -> Optional[str]:
+        """Получение внешнего IP Android устройства через USB интерфейс"""
+        try:
+            interface = device.get('interface')
+            adb_id = device.get('adb_id')
+
+            if not interface or interface == "unknown":
+                logger.warning(f"No USB interface for Android device {adb_id}")
+                # Пытаемся найти интерфейс заново
+                interface = await self.find_android_usb_interface(adb_id)
+                if interface:
+                    # Обновляем устройство с найденным интерфейсом
+                    device['interface'] = interface
+                    device['status'] = 'online'
+                    device['usb_tethering'] = True
+                    logger.info(f"Found and updated interface for {adb_id}: {interface}")
+                else:
+                    return None
+
+            # Метод 1: Через curl с привязкой к интерфейсу (наиболее надежный)
+            try:
+                result = await asyncio.create_subprocess_exec(
+                    'curl', '--interface', interface, '-s', '--connect-timeout', '10',
+                    'httpbin.org/ip',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await result.communicate()
+
+                if result.returncode == 0:
+                    try:
+                        import json
+                        response = json.loads(stdout.decode())
+                        external_ip = response.get('origin')
+                        if external_ip:
+                            logger.debug(f"Got external IP for {adb_id} via interface {interface}: {external_ip}")
+                            return external_ip
+                    except json.JSONDecodeError:
+                        # Пробуем найти IP в тексте
+                        ip_match = re.search(r'(\d+\.\d+\.\d+\.\d+)', stdout.decode())
+                        if ip_match:
+                            return ip_match.group(1)
+            except Exception as e:
+                logger.debug(f"Method 1 failed for {adb_id}: {e}")
+
+            # Метод 2: Через ADB (резервный)
+            try:
+                result = await asyncio.create_subprocess_exec(
+                    'adb', '-s', adb_id, 'shell', 'curl', '-s', '--connect-timeout', '5', 'httpbin.org/ip',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await result.communicate()
+
+                if result.returncode == 0:
+                    try:
+                        import json
+                        response = json.loads(stdout.decode())
+                        external_ip = response.get('origin')
+                        if external_ip:
+                            logger.debug(f"Got external IP for {adb_id} via ADB: {external_ip}")
+                            return external_ip
+                    except json.JSONDecodeError:
+                        pass
+            except Exception as e:
+                logger.debug(f"Method 2 failed for {adb_id}: {e}")
+
+            logger.warning(f"All methods failed to get external IP for Android device {adb_id}")
+            return None
+
+        except Exception as e:
+            logger.error(f"Error getting Android external IP: {e}")
+            return None
+
+    async def get_device_proxy_route(self, device_id: str) -> Optional[dict]:
+        """Получение маршрута для проксирования через устройство"""
+
+        all_devices = await self.get_all_devices()
+        device = all_devices.get(device_id)
+
+        if not device:
+            return None
+
+        device_type = device.get('type')
+
+        if device_type == 'android':
+            interface = device.get('interface')
+            if interface:
+                return {
+                    'type': 'android_usb',
+                    'interface': interface,
+                    'method': 'interface_binding',
+                    'device_id': device.get('adb_id')
+                }
+        elif device_type == 'usb_modem':
+            interface = device.get('interface')
+            if interface:
+                return {
+                    'type': 'usb_modem',
+                    'interface': interface,
+                    'method': 'ppp_interface'
+                }
+        elif device_type == 'raspberry_pi':
+            interface = device.get('interface')
+            if interface:
+                return {
+                    'type': 'raspberry_pi',
+                    'interface': interface,
+                    'method': 'network_interface'
+                }
+
+        return None
