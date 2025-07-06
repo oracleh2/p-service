@@ -11,8 +11,9 @@ import subprocess
 import netifaces
 import asyncio
 import time
+import structlog
 
-from ..main import logger
+# from ..main import logger
 from ..models.database import get_db, get_system_config, update_system_config
 from ..models.base import ProxyDevice, RotationConfig, SystemConfig, RequestLog, IpHistory
 from ..api.auth import get_admin_user
@@ -21,7 +22,7 @@ from ..config import DEFAULT_SYSTEM_CONFIG
 
 router = APIRouter()
 # logger = None  # Будет импортирован из main
-
+logger = structlog.get_logger()
 
 class SystemConfigUpdate(BaseModel):
     key: str
