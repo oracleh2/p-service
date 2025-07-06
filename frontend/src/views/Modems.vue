@@ -415,11 +415,21 @@ const filteredModems = computed(() => {
     return filtered
 })
 
-const totalModems = computed(() => modems.value.length)
-const onlineModems = computed(() => modems.value.filter(m => m.status === 'online').length)
-const offlineModems = computed(() => modems.value.filter(m => m.status === 'offline').length)
+const totalModems = computed(() => {
+    const modemsArray = Array.isArray(modems.value) ? modems.value : []
+    return modemsArray.length
+})
+const onlineModems = computed(() => {
+    const modemsArray = Array.isArray(modems.value) ? modems.value : []
+    return modemsArray.filter(m => m.status === 'online').length
+})
+const offlineModems = computed(() => {
+    const modemsArray = Array.isArray(modems.value) ? modems.value : []
+    return modemsArray.filter(m => m.status === 'offline').length
+})
 const uniqueIPs = computed(() => {
-    const ips = new Set(modems.value.map(m => m.external_ip).filter(ip => ip))
+    const modemsArray = Array.isArray(modems.value) ? modems.value : []
+    const ips = new Set(modemsArray.map(m => m.external_ip).filter(ip => ip))
     return ips.size
 })
 
@@ -428,10 +438,15 @@ const fetchModems = async () => {
     try {
         isLoading.value = true
         const response = await api.get('/admin/devices')
-        modems.value = response.data
+
+        // Убеждаемся, что получаем массив
+        const data = response.data
+        modems.value = Array.isArray(data) ? data : (data.devices || [])
+
     } catch (error) {
         console.error('Failed to fetch modems:', error)
         toast.error('Failed to fetch modems')
+        modems.value = [] // Устанавливаем пустой массив при ошибке
     } finally {
         isLoading.value = false
     }
