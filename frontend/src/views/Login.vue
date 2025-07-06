@@ -228,9 +228,9 @@ const fillDemoCredentials = () => {
 }
 
 // Initialize with demo credentials for development
-if (import.meta.env.MODE === 'development') {
+// if (import.meta.env.MODE === 'development') {
     fillDemoCredentials()
-}
+// }
 </script>
 
 <style scoped>
