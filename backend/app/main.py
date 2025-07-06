@@ -10,7 +10,7 @@ import logging
 import time
 import random
 from datetime import datetime, timezone
-from .models.database import init_db
+# from .models.database import init_db
 from .models.config import settings
 # from .core.device_manager import ModemManager  # Добавить эту строку
 from .api import auth, proxy, admin, stats
