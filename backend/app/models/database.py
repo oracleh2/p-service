@@ -15,7 +15,7 @@ async_engine = create_async_engine(
     settings.database_url.replace("postgresql://", "postgresql+asyncpg://"),
     pool_size=settings.database_pool_size,
     max_overflow=settings.database_max_overflow,
-    echo=settings.DEBUG,
+    echo=settings.debug,
     pool_pre_ping=True,
     pool_recycle=3600,  # 1 час
 )
@@ -25,7 +25,7 @@ sync_engine = create_engine(
     settings.database_url.replace("postgresql://", "postgresql://"),
     pool_size=10,
     max_overflow=20,
-    echo=settings.DEBUG,
+    echo=settings.debug,
     pool_pre_ping=True,
     pool_recycle=3600,
 )
