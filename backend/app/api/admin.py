@@ -6,10 +6,13 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone, timedelta
 import uuid
 
-from ..database import get_db, get_system_config, update_system_config
+# from ..database import get_db, get_system_config, update_system_config
+from ..models.database import get_db, get_system_config, update_system_config
+
 from ..models.base import ProxyDevice, RotationConfig, SystemConfig, RequestLog, IpHistory
 from ..api.auth import get_admin_user
-from ..main import get_modem_manager, get_rotation_manager, get_proxy_server
+# from ..main import get_modem_manager, get_rotation_manager, get_proxy_server
+from ..core.managers import get_modem_manager, get_proxy_server, get_rotation_manager
 from ..config import DEFAULT_SYSTEM_CONFIG
 
 router = APIRouter()

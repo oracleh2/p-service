@@ -92,3 +92,57 @@ PROXY_HOST = settings.proxy_host
 PROXY_PORT = settings.proxy_port
 REQUEST_TIMEOUT_SECONDS = settings.request_timeout_seconds
 MAX_CONCURRENT_CONNECTIONS = settings.max_concurrent_connections
+
+DEFAULT_SYSTEM_CONFIG = {
+    "rotation_interval": {
+        "value": "600",
+        "description": "Интервал автоматической ротации IP в секундах",
+        "config_type": "integer"
+    },
+    "auto_rotation_enabled": {
+        "value": "true",
+        "description": "Включить автоматическую ротацию IP",
+        "config_type": "boolean"
+    },
+    "max_devices": {
+        "value": "50",
+        "description": "Максимальное количество устройств",
+        "config_type": "integer"
+    },
+    "requests_per_minute_limit": {
+        "value": "100",
+        "description": "Лимит запросов в минуту на устройство",
+        "config_type": "integer"
+    },
+    "heartbeat_timeout": {
+        "value": "60",
+        "description": "Таймаут heartbeat в секундах",
+        "config_type": "integer"
+    },
+    "rotation_timeout": {
+        "value": "60",
+        "description": "Таймаут ротации IP в секундах",
+        "config_type": "integer"
+    },
+    "log_retention_days": {
+        "value": "30",
+        "description": "Количество дней хранения логов",
+        "config_type": "integer"
+    },
+    "enable_alerts": {
+        "value": "true",
+        "description": "Включить уведомления об ошибках",
+        "config_type": "boolean"
+    },
+    "alert_success_rate_threshold": {
+        "value": "85",
+        "description": "Порог успешности запросов для алертов (%)",
+        "config_type": "integer"
+    },
+    "device_offline_alert_minutes": {
+        "value": "5",
+        "description": "Время офлайн устройства для алерта (минуты)",
+        "config_type": "integer"
+    }
+}
+

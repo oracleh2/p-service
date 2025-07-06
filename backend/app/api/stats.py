@@ -6,10 +6,10 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone, timedelta
 import uuid
 
-from ..database import get_db
+from ..models.database import get_db
 from ..models.base import ProxyDevice, RequestLog, IpHistory, UsageStats
 from ..api.auth import get_current_active_user
-from ..main import get_modem_manager
+from ..core.managers import get_modem_manager, get_proxy_server, get_rotation_manager
 
 router = APIRouter()
 
