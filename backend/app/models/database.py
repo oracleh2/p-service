@@ -4,7 +4,7 @@ from sqlalchemy import create_engine
 from redis.asyncio import Redis
 import redis
 from typing import AsyncGenerator
-from .config import settings
+from ..config import settings
 from .base import Base
 import structlog
 
