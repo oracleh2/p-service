@@ -77,3 +77,5 @@ echo ""
 echo "4. Check if proxy routes are set correctly:"
 echo "Testing with various paths:"
 curl -s http://192.168.1.50:8080/test123 | head -100
+
+
