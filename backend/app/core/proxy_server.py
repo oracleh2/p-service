@@ -154,12 +154,11 @@ class ProxyServer:
             return web.json_response({"error": str(e)}, status=500)
 
     async def universal_handler(self, request: web.Request) -> web.Response:
-        """Упрощенный обработчик для отладки"""
+        """ИСПРАВЛЕННЫЙ универсальный обработчик"""
         start_time = time.time()
         client_ip = self.get_client_ip(request)
 
         try:
-            # Получение целевого URL
             target_url = self.get_target_url(request)
             if not target_url:
                 return web.Response(
@@ -169,11 +168,6 @@ class ProxyServer:
 
             logger.info(f"📡 PROXY REQUEST: {request.method} {target_url} from {client_ip}")
 
-            # Отладочная проверка заголовков
-            device_header = request.headers.get('X-Proxy-Device-ID')
-            logger.info(f"Device header: {device_header}")
-
-            # Выбор устройства с отладкой
             device = await self.debug_device_selection(request)
             if not device:
                 logger.error("❌ NO DEVICES AVAILABLE")
@@ -191,21 +185,28 @@ class ProxyServer:
             if device_type == 'android' and interface == 'enx566cf3eaaf4b':
                 logger.info(f"🚀 USING ANDROID INTERFACE: {interface}")
 
-                # Прямой вызов curl с интерфейсом
+                # Тестируем подключение (опционально)
+                connectivity_ok = await self.test_interface_connectivity(interface)
+                if connectivity_ok:
+                    logger.info(f"✅ Interface {interface} connectivity test passed")
+                else:
+                    logger.warning(f"⚠️ Interface {interface} connectivity test failed, but trying anyway")
+
+                # Используем исправленный curl
                 response = await self.force_curl_via_interface(request, target_url, interface)
 
                 if response:
                     response_time = int((time.time() - start_time) * 1000)
-                    logger.info(f"✅ SUCCESS via {interface}: {response.status} in {response_time}ms")
+                    logger.info(f"🎉 SUCCESS via {interface}: {response.status} in {response_time}ms")
 
                     # Добавляем отладочные заголовки
-                    response.headers['X-Debug-Via-Interface'] = interface
                     response.headers['X-Debug-Device-ID'] = device_id
                     response.headers['X-Debug-Success'] = 'true'
+                    response.headers['X-Response-Time-Ms'] = str(response_time)
 
                     return response
                 else:
-                    logger.error(f"❌ CURL FAILED via {interface}")
+                    logger.error(f"❌ IMPROVED CURL STILL FAILED via {interface}")
             else:
                 logger.warning(f"⚠️ WRONG DEVICE TYPE OR INTERFACE: type={device_type}, interface={interface}")
 
@@ -885,59 +886,158 @@ class ProxyServer:
 
     async def force_curl_via_interface(self, request: web.Request, target_url: str, interface: str) -> Optional[
         web.Response]:
-        """Принудительное выполнение запроса через curl с интерфейсом"""
+        """ИСПРАВЛЕННОЕ принудительное выполнение запроса через curl с интерфейсом"""
         try:
             logger.info(f"🔧 FORCING CURL via interface: {interface}")
+            logger.info(f"Target URL: {target_url}")
 
-            # Простая команда curl
+            # Проверяем интерфейс
+            if interface not in netifaces.interfaces():
+                logger.error(f"❌ Interface {interface} not found")
+                return None
+
+            addrs = netifaces.ifaddresses(interface)
+            if netifaces.AF_INET not in addrs:
+                logger.error(f"❌ No IP on interface {interface}")
+                return None
+
+            interface_ip = addrs[netifaces.AF_INET][0]['addr']
+            logger.info(f"✅ Interface {interface} IP: {interface_ip}")
+
+            # ИСПРАВЛЕННАЯ команда curl с правильными параметрами
             curl_cmd = [
                 'curl',
                 '--interface', interface,
                 '--silent',
+                '--show-error',  # Показывать ошибки
+                '--fail-with-body',  # Возвращать тело даже при ошибке
                 '--max-time', '30',
-                '--write-out', 'HTTPSTATUS:%{http_code}',
+                '--connect-timeout', '10',
+                '--location',  # Следовать редиректам
+                '--compressed',  # Поддержка сжатия
+                '--header', 'Accept: application/json, text/plain, */*',
+                '--header', 'User-Agent: Mobile-Proxy-Interface/1.0',
+                '--write-out', '\\nHTTPSTATUS:%{http_code}\\nTIME:%{time_total}\\n',
                 target_url
             ]
 
-            logger.info(f"Executing: {' '.join(curl_cmd)}")
+            logger.info(f"🔧 Executing curl with improved parameters:")
+            logger.info(f"   Command: {' '.join(curl_cmd[:8])}...")
 
+            # Выполнение с улучшенной обработкой ошибок
             process = await asyncio.create_subprocess_exec(
                 *curl_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            stdout, stderr = await process.communicate()
+
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(),
+                    timeout=35  # Чуть больше чем max-time curl
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"❌ Curl timeout after 35 seconds")
+                process.kill()
+                return None
+
+            logger.info(f"📊 Curl exit code: {process.returncode}")
+
+            if stderr:
+                stderr_text = stderr.decode('utf-8', errors='ignore')
+                logger.info(f"📝 Curl stderr: {stderr_text}")
 
             if process.returncode == 0:
                 output = stdout.decode('utf-8', errors='ignore')
+                logger.info(f"📦 Curl output length: {len(output)} bytes")
 
-                # Парсинг статуса
+                # Улучшенный парсинг ответа
                 status_code = 200
-                if 'HTTPSTATUS:' in output:
-                    try:
-                        status_pos = output.rfind('HTTPSTATUS:')
-                        status_code = int(output[status_pos + 11:].strip())
-                        response_body = output[:status_pos]
-                    except (ValueError, IndexError):
-                        response_body = output
-                else:
-                    response_body = output
+                response_body = output
+                time_total = "0"
 
-                logger.info(f"✅ CURL SUCCESS: status {status_code}, body length {len(response_body)}")
+                # Извлекаем метаданные из write-out
+                lines = output.split('\n')
+                body_lines = []
+
+                for line in lines:
+                    if line.startswith('HTTPSTATUS:'):
+                        try:
+                            status_code = int(line.split(':')[1].strip())
+                            logger.info(f"✅ Parsed HTTP status: {status_code}")
+                        except (ValueError, IndexError) as e:
+                            logger.warning(f"Failed to parse status: {e}")
+                    elif line.startswith('TIME:'):
+                        try:
+                            time_total = line.split(':')[1].strip()
+                            logger.info(f"⏱️ Request time: {time_total}s")
+                        except (ValueError, IndexError):
+                            pass
+                    elif line.strip():  # Непустые строки идут в тело ответа
+                        body_lines.append(line)
+
+                # Собираем тело ответа
+                if body_lines:
+                    response_body = '\n'.join(body_lines)
+                else:
+                    response_body = output.split('HTTPSTATUS:')[0] if 'HTTPSTATUS:' in output else output
+
+                logger.info(f"🎉 SUCCESS! Interface {interface} -> Status {status_code}, Body: {response_body[:100]}...")
 
                 return web.Response(
                     body=response_body.encode('utf-8'),
                     status=status_code,
                     headers={
-                        'X-Forced-Via': interface,
-                        'Content-Type': 'application/json'
+                        'X-Proxy-Via': f'interface-{interface}',
+                        'X-Interface-IP': interface_ip,
+                        'X-Request-Time': time_total,
+                        'X-Method': 'curl-interface-binding',
+                        'Content-Type': 'application/json' if response_body.strip().startswith('{') else 'text/plain'
                     }
                 )
             else:
-                error_msg = stderr.decode('utf-8', errors='ignore')
-                logger.error(f"❌ CURL ERROR: {error_msg}")
+                error_msg = stderr.decode('utf-8', errors='ignore') if stderr else 'Unknown error'
+                logger.error(f"❌ Curl failed with code {process.returncode}: {error_msg}")
+
+                # Попытка диагностики проблемы
+                if 'Network is unreachable' in error_msg:
+                    logger.error("🚨 Network unreachable - check interface routing")
+                elif 'Could not resolve host' in error_msg:
+                    logger.error("🚨 DNS resolution failed - check interface DNS")
+                elif 'Connection timed out' in error_msg:
+                    logger.error("🚨 Connection timeout - check interface connectivity")
+
                 return None
 
         except Exception as e:
             logger.error(f"❌ Exception in force_curl_via_interface: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return None
+
+    async def test_interface_connectivity(self, interface: str) -> bool:
+        """Тестирование подключения через интерфейс"""
+        try:
+            logger.info(f"🧪 Testing connectivity for interface: {interface}")
+
+            # Простой ping через интерфейс
+            ping_cmd = ['ping', '-I', interface, '-c', '1', '-W', '5', '8.8.8.8']
+
+            process = await asyncio.create_subprocess_exec(
+                *ping_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+
+            stdout, stderr = await process.communicate()
+
+            if process.returncode == 0:
+                logger.info(f"✅ Ping test successful for {interface}")
+                return True
+            else:
+                logger.warning(f"❌ Ping test failed for {interface}: {stderr.decode()}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error testing interface {interface}: {e}")
+            return False
