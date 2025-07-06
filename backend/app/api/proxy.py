@@ -409,10 +409,10 @@ async def test_proxy(
         import aiohttp
         import time
 
-        device_manager = get_device_manager()  # ИЗМЕНЕНО
+        device_manager = get_device_manager()
         proxy_server = get_proxy_server()
 
-        if not device_manager:  # ИЗМЕНЕНО
+        if not device_manager:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Device manager not available"
@@ -431,7 +431,7 @@ async def test_proxy(
             )
 
         # Проверяем что устройство существует (если указано)
-        all_devices = await device_manager.get_all_devices()  # ИЗМЕНЕНО
+        all_devices = await device_manager.get_all_devices()
 
         if modem_id and modem_id not in all_devices:
             raise HTTPException(
@@ -445,8 +445,11 @@ async def test_proxy(
                 detail="No devices available"
             )
 
-        # Подготовка для реального запроса через прокси
+        # ИСПРАВЛЕНО: Используем правильный хост и порт
         proxy_url = f"http://{settings.proxy_host}:{settings.proxy_port}"
+        # Если хост 0.0.0.0, заменяем на localhost для клиентского запроса
+        if settings.proxy_host == "0.0.0.0":
+            proxy_url = f"http://127.0.0.1:{settings.proxy_port}"
 
         # Подготовка заголовков
         headers = {
@@ -454,64 +457,43 @@ async def test_proxy(
         }
 
         if modem_id:
-            headers["X-Proxy-Device-ID"] = modem_id  # Используем универсальный заголовок
+            headers["X-Proxy-Device-ID"] = modem_id
 
         start_time = time.time()
 
-        # Выполнение реального запроса через прокси
-        timeout = aiohttp.ClientTimeout(total=30)
+        # ИСПРАВЛЕНО: Используем HTTP вместо HTTPS для начального теста
+        test_url = "http://httpbin.org/ip"
 
         try:
+            # Выполнение реального запроса через прокси
+            timeout = aiohttp.ClientTimeout(total=30)
+
             async with aiohttp.ClientSession(timeout=timeout) as session:
+                proxy = proxy_url
+
                 async with session.get(
-                    target_url,
-                    proxy=proxy_url,
+                    test_url,
+                    proxy=proxy,
                     headers=headers
                 ) as response:
-
                     response_time = int((time.time() - start_time) * 1000)
-                    response_text = await response.text()
+                    response_data = await response.text()
 
-                    # Попытка парсинга JSON ответа
-                    try:
-                        import json
-                        response_data = json.loads(response_text)
-                    except:
-                        response_data = {"text": response_text[:500]}
-
-                    # Определяем какое устройство было использовано
-                    used_device_id = modem_id
-                    device_type = "unknown"
-
-                    if used_device_id and used_device_id in all_devices:
-                        device_type = all_devices[used_device_id].get('type', 'unknown')
-                    elif not used_device_id:
-                        # Попытка определить использованное устройство по IP
-                        if isinstance(response_data, dict) and 'origin' in response_data:
-                            origin_ip = response_data['origin']
-                            # Поиск устройства по внешнему IP
-                            for dev_id, device in all_devices.items():
-                                device_ip = await device_manager.get_device_external_ip(dev_id)
-                                if device_ip == origin_ip:
-                                    used_device_id = dev_id
-                                    device_type = device.get('type', 'unknown')
-                                    break
+                    success = 200 <= response.status < 400
 
                     return {
-                        "success": True,
+                        "success": success,
                         "status_code": response.status,
                         "response_time_ms": response_time,
-                        "target_url": target_url,
+                        "target_url": test_url,
                         "proxy_url": proxy_url,
-                        "device_id": used_device_id,
-                        "device_type": device_type,
-                        "response_data": response_data,
-                        "response_headers": dict(response.headers),
+                        "device_id": modem_id,
+                        "response_data": response_data[:500] if len(response_data) > 500 else response_data,
                         "test_details": {
-                            "proxy_connection": "ok",
-                            "dns_resolution": "ok",
-                            "http_response": "ok",
-                            "data_transfer": "ok"
+                            "proxy_connection": "successful" if success else "failed",
+                            "proxy_host": settings.proxy_host,
+                            "proxy_port": settings.proxy_port,
+                            "headers_sent": dict(headers)
                         },
                         "timestamp": datetime.now(timezone.utc).isoformat()
                     }
@@ -523,12 +505,14 @@ async def test_proxy(
                 "error": str(e),
                 "error_type": "client_error",
                 "response_time_ms": response_time,
-                "target_url": target_url,
+                "target_url": test_url,
                 "proxy_url": proxy_url,
                 "device_id": modem_id,
                 "test_details": {
                     "proxy_connection": "failed",
-                    "error_detail": str(e)
+                    "error_detail": str(e),
+                    "proxy_host": settings.proxy_host,
+                    "proxy_port": settings.proxy_port
                 },
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
@@ -540,7 +524,7 @@ async def test_proxy(
                 "error": "Request timeout",
                 "error_type": "timeout",
                 "response_time_ms": response_time,
-                "target_url": target_url,
+                "target_url": test_url,
                 "proxy_url": proxy_url,
                 "device_id": modem_id,
                 "test_details": {

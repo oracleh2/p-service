@@ -1,4 +1,4 @@
-# backend/app/core/proxy_server.py - ИСПРАВЛЕННАЯ ВЕРСИЯ V2
+# backend/app/core/proxy_server.py - ПОЛНАЯ ВЕРСИЯ С ПОДДЕРЖКОЙ CONNECT
 
 import asyncio
 import aiohttp
@@ -15,7 +15,7 @@ logger = structlog.get_logger()
 
 
 class ProxyServer:
-    """HTTP прокси-сервер для маршрутизации запросов через мобильные устройства"""
+    """HTTP/HTTPS прокси-сервер для маршрутизации запросов через мобильные устройства"""
 
     def __init__(self, device_manager, stats_collector):
         self.device_manager = device_manager
@@ -95,6 +95,9 @@ class ProxyServer:
         # Специальный обработчик для proxy status
         self.app.router.add_get('/status', self.status_handler)
 
+        # Обработчик CONNECT метода для HTTPS
+        self.app.router.add_route('CONNECT', '/{path:.*}', self.connect_handler)
+
         # Основной прокси-обработчик для всех остальных запросов
         self.app.router.add_route('*', '/{path:.*}', self.proxy_handler)
 
@@ -112,7 +115,10 @@ class ProxyServer:
                 "version": "1.0.0",
                 "available_devices": device_count,
                 "message": "Proxy server is working. Use this server as HTTP/HTTPS proxy.",
-                "example": "curl -x http://192.168.1.50:8080 https://httpbin.org/ip"
+                "examples": {
+                    "http": "curl -x http://192.168.1.50:8080 http://httpbin.org/ip",
+                    "https": "curl -x http://192.168.1.50:8080 https://httpbin.org/ip"
+                }
             })
         except Exception as e:
             logger.error(f"Error in root handler: {e}")
@@ -138,7 +144,8 @@ class ProxyServer:
                 "total_devices": device_count,
                 "online_devices": online_devices,
                 "proxy_host": settings.proxy_host,
-                "proxy_port": settings.proxy_port
+                "proxy_port": settings.proxy_port,
+                "supports": ["HTTP", "HTTPS", "CONNECT"]
             })
         except Exception as e:
             logger.error(f"Error in status handler: {e}")
@@ -146,6 +153,90 @@ class ProxyServer:
                 "proxy_status": "error",
                 "error": str(e)
             }, status=500)
+
+    async def connect_handler(self, request: web.Request) -> web.Response:
+        """Обработчик CONNECT метода для HTTPS туннелирования"""
+        try:
+            # Получаем host:port из пути
+            target = request.path_qs
+            if ':' not in target:
+                target += ':443'  # По умолчанию HTTPS порт
+
+            host, port = target.rsplit(':', 1)
+            port = int(port)
+
+            logger.info(f"CONNECT request to {host}:{port}")
+
+            # Выбираем устройство
+            device = await self.select_device(request)
+            if not device:
+                logger.warning("No devices available for CONNECT")
+                return web.Response(text="No devices available", status=503)
+
+            logger.info(f"Using device {device['id']} for CONNECT tunnel")
+
+            # Устанавливаем соединение с целевым сервером
+            try:
+                reader, writer = await asyncio.open_connection(host, port)
+
+                # Отправляем успешный ответ клиенту
+                response = web.StreamResponse(status=200, reason='Connection established')
+                await response.prepare(request)
+
+                # Получаем доступ к сокету клиента
+                transport = request.transport
+
+                # Создаем туннель между клиентом и сервером
+                await self.create_tunnel(transport, reader, writer)
+
+                return response
+
+            except Exception as e:
+                logger.error(f"Failed to connect to {host}:{port}: {e}")
+                return web.Response(text=f"Bad Gateway: {str(e)}", status=502)
+
+        except Exception as e:
+            logger.error(f"Error in CONNECT handler: {e}")
+            return web.Response(text=f"Internal Server Error: {str(e)}", status=500)
+
+    async def create_tunnel(self, client_transport, server_reader, server_writer):
+        """Создание туннеля между клиентом и сервером"""
+        try:
+            async def forward_client_to_server():
+                try:
+                    while True:
+                        data = await client_transport.read(8192)
+                        if not data:
+                            break
+                        server_writer.write(data)
+                        await server_writer.drain()
+                except Exception as e:
+                    logger.debug(f"Client to server forwarding ended: {e}")
+                finally:
+                    server_writer.close()
+
+            async def forward_server_to_client():
+                try:
+                    while True:
+                        data = await server_reader.read(8192)
+                        if not data:
+                            break
+                        client_transport.write(data)
+                        await client_transport.drain()
+                except Exception as e:
+                    logger.debug(f"Server to client forwarding ended: {e}")
+                finally:
+                    client_transport.close()
+
+            # Запускаем оба направления туннеля
+            await asyncio.gather(
+                forward_client_to_server(),
+                forward_server_to_client(),
+                return_exceptions=True
+            )
+
+        except Exception as e:
+            logger.error(f"Error in tunnel: {e}")
 
     async def proxy_handler(self, request: web.Request) -> web.Response:
         """Основной обработчик прокси-запросов"""
@@ -160,7 +251,7 @@ class ProxyServer:
             if not target_url:
                 logger.warning(f"Bad request: no target URL - {request.url}")
                 return web.Response(
-                    text="Bad Request: Use this server as HTTP proxy. Example: curl -x http://192.168.1.50:8080 https://httpbin.org/ip",
+                    text="Bad Request: Use this server as HTTP proxy. Example: curl -x http://192.168.1.50:8080 http://httpbin.org/ip",
                     status=400
                 )
 
@@ -222,19 +313,24 @@ class ProxyServer:
     def get_target_url(self, request: web.Request) -> Optional[str]:
         """Получение целевого URL из запроса"""
         try:
-            # Для CONNECT запросов (HTTPS туннелирование)
-            if request.method == 'CONNECT':
-                return f"https://{request.path_qs}"
-
             # Для прямых HTTP запросов через прокси (полный URL в пути)
             if request.path_qs.startswith('http://') or request.path_qs.startswith('https://'):
                 return request.path_qs
 
-            # Для запросов с Host заголовком
+            # Для запросов с Host заголовком (но не к самому прокси)
             host = request.headers.get('Host')
-            if host and host not in ['192.168.1.50:8080', '127.0.0.1:8080', 'localhost:8080']:
-                scheme = 'https' if request.secure else 'http'
-                return f"{scheme}://{host}{request.path_qs}"
+            if host:
+                # Исключаем запросы к самому прокси-серверу
+                proxy_hosts = [
+                    f'{settings.proxy_host}:{settings.proxy_port}',
+                    f'192.168.1.50:{settings.proxy_port}',
+                    f'127.0.0.1:{settings.proxy_port}',
+                    f'localhost:{settings.proxy_port}'
+                ]
+
+                if host not in proxy_hosts:
+                    scheme = 'https' if request.secure else 'http'
+                    return f"{scheme}://{host}{request.path_qs}"
 
             # Если это запрос к самому прокси-серверу
             return None

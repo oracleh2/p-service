@@ -196,7 +196,7 @@ export const useModemsStore = defineStore('modems', () => {
         }
     }
 
-    const testModem2 = async (modemId) => {
+    const testModem = async (modemId) => {
         try {
             const response = await api.post(`/proxy/test`, null, {
                 params: {modem_id: modemId}
@@ -208,7 +208,7 @@ export const useModemsStore = defineStore('modems', () => {
         }
     }
 
-    const testModem = async (modemId) => {
+    const testModemBak = async (modemId) => {
     try {
         // ВРЕМЕННО используем простой тест вместо proxy/test
         const response = await api.post(`/admin/modems/${modemId}/test`)
