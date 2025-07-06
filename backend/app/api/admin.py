@@ -124,7 +124,7 @@ async def update_system_config_endpoint(
 
 
 # Управление устройствами
-@router.get("/admin/devices")
+@router.get("/devices")
 async def admin_get_devices_legacy():
     """Список устройств (legacy endpoint для фронтенда)"""
     try:
