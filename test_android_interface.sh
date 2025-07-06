@@ -133,7 +133,7 @@ echo ""
 
 # 4. Проверяем список устройств
 echo "4. Проверка списка устройств:"
-curl -s http://192.168.1.50:8000/admin/modems | jq '.[] | {id, type, interface, status}' 2>/dev/null || echo "Ошибка получения списка устройств"
+curl -s http://192.168.1.50:8000/admin/devices | jq '.[] | {id, type, interface, status}' 2>/dev/null || echo "Ошибка получения списка устройств"
 echo ""
 
 # 5. Тестируем прокси с диагностикой
