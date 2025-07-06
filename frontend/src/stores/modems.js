@@ -40,7 +40,7 @@ export const useModemsStore = defineStore('modems', () => {
             isLoading.value = true
             error.value = ''
 
-            const response = await api.get('/admin/modems')
+            const response = await api.get('/admin/devices')
             modems.value = response.data
             lastUpdate.value = new Date()
 
@@ -56,7 +56,7 @@ export const useModemsStore = defineStore('modems', () => {
 
     const getModemById = async (modemId) => {
         try {
-            const response = await api.get(`/admin/modems/${modemId}`)
+            const response = await api.get(`/admin/devices/${modemId}`)
             return response.data
         } catch (err) {
             console.error('Failed to fetch modem details:', err)
@@ -66,7 +66,7 @@ export const useModemsStore = defineStore('modems', () => {
 
     const rotateModemIP = async (modemId) => {
         try {
-            const response = await api.post(`/admin/modems/${modemId}/rotate`)
+            const response = await api.post(`/admin/devices/${modemId}/rotate`)
 
             // Update modem status in store
             const modemIndex = modems.value.findIndex(m => m.modem_id === modemId)
@@ -83,7 +83,7 @@ export const useModemsStore = defineStore('modems', () => {
 
     const rotateAllModems = async () => {
         try {
-            const response = await api.post('/admin/modems/rotate-all')
+            const response = await api.post('/admin/devices/rotate-all')
 
             // Update all modem rotation timestamps
             const now = new Date().toISOString()
@@ -102,7 +102,7 @@ export const useModemsStore = defineStore('modems', () => {
 
     const updateRotationInterval = async (modemId, interval) => {
         try {
-            const response = await api.put(`/admin/modems/${modemId}/rotation-interval`, null, {
+            const response = await api.put(`/admin/devices/${modemId}/rotation-interval`, null, {
                 params: {interval}
             })
 
@@ -121,7 +121,7 @@ export const useModemsStore = defineStore('modems', () => {
 
     const toggleAutoRotation = async (modemId, enabled) => {
         try {
-            const response = await api.put(`/admin/modems/${modemId}/auto-rotation`, null, {
+            const response = await api.put(`/admin/devices/${modemId}/auto-rotation`, null, {
                 params: {enabled}
             })
 
@@ -140,7 +140,7 @@ export const useModemsStore = defineStore('modems', () => {
 
     const addModem = async (modemData) => {
         try {
-            const response = await api.post('/admin/modems', modemData)
+            const response = await api.post('/admin/devices', modemData)
 
             // Add new modem to store
             modems.value.push(response.data)
@@ -154,7 +154,7 @@ export const useModemsStore = defineStore('modems', () => {
 
     const updateModem = async (modemId, modemData) => {
         try {
-            const response = await api.put(`/admin/modems/${modemId}`, modemData)
+            const response = await api.put(`/admin/devices/${modemId}`, modemData)
 
             // Update modem in store
             const modemIndex = modems.value.findIndex(m => m.modem_id === modemId)
@@ -171,7 +171,7 @@ export const useModemsStore = defineStore('modems', () => {
 
     const deleteModem = async (modemId) => {
         try {
-            await api.delete(`/admin/modems/${modemId}`)
+            await api.delete(`/admin/devices/${modemId}`)
 
             // Remove modem from store
             const modemIndex = modems.value.findIndex(m => m.modem_id === modemId)
@@ -188,7 +188,7 @@ export const useModemsStore = defineStore('modems', () => {
 
     const getModemStats = async (modemId) => {
         try {
-            const response = await api.get(`/admin/modems/${modemId}/stats`)
+            const response = await api.get(`/admin/devices/${modemId}/stats`)
             return response.data
         } catch (err) {
             console.error('Failed to fetch modem stats:', err)
@@ -211,7 +211,7 @@ export const useModemsStore = defineStore('modems', () => {
     const testModemBak = async (modemId) => {
     try {
         // ВРЕМЕННО используем простой тест вместо proxy/test
-        const response = await api.post(`/admin/modems/${modemId}/test`)
+        const response = await api.post(`/admin/devices/${modemId}/test`)
 
         // Адаптируем ответ под ожидаемый формат
         const data = response.data
