@@ -154,7 +154,7 @@ class ProxyServer:
             return web.json_response({"error": str(e)}, status=500)
 
     async def universal_handler(self, request: web.Request) -> web.Response:
-        """ИСПРАВЛЕННЫЙ универсальный обработчик"""
+        """ИСПРАВЛЕННЫЙ универсальный обработчик с детальным логированием"""
         start_time = time.time()
         client_ip = self.get_client_ip(request)
 
@@ -185,28 +185,27 @@ class ProxyServer:
             if device_type == 'android' and interface == 'enx566cf3eaaf4b':
                 logger.info(f"🚀 USING ANDROID INTERFACE: {interface}")
 
-                # Тестируем подключение (опционально)
-                connectivity_ok = await self.test_interface_connectivity(interface)
-                if connectivity_ok:
-                    logger.info(f"✅ Interface {interface} connectivity test passed")
-                else:
-                    logger.warning(f"⚠️ Interface {interface} connectivity test failed, but trying anyway")
-
                 # Используем исправленный curl
+                logger.info("🔧 Calling force_curl_via_interface...")
                 response = await self.force_curl_via_interface(request, target_url, interface)
 
                 if response:
                     response_time = int((time.time() - start_time) * 1000)
-                    logger.info(f"🎉 SUCCESS via {interface}: {response.status} in {response_time}ms")
+                    logger.info(f"🎉 SUCCESS via {interface}: status={response.status} in {response_time}ms")
 
                     # Добавляем отладочные заголовки
                     response.headers['X-Debug-Device-ID'] = device_id
                     response.headers['X-Debug-Success'] = 'true'
                     response.headers['X-Response-Time-Ms'] = str(response_time)
 
+                    # Логируем часть тела ответа для проверки
+                    if hasattr(response, 'body') and response.body:
+                        body_preview = response.body.decode('utf-8', errors='ignore')[:100]
+                        logger.info(f"🌐 Response body preview: {body_preview}")
+
                     return response
                 else:
-                    logger.error(f"❌ IMPROVED CURL STILL FAILED via {interface}")
+                    logger.error(f"❌ force_curl_via_interface returned None!")
             else:
                 logger.warning(f"⚠️ WRONG DEVICE TYPE OR INTERFACE: type={device_type}, interface={interface}")
 
@@ -904,109 +903,138 @@ class ProxyServer:
             interface_ip = addrs[netifaces.AF_INET][0]['addr']
             logger.info(f"✅ Interface {interface} IP: {interface_ip}")
 
-            # ИСПРАВЛЕННАЯ команда curl с правильными параметрами
+            # РАБОЧАЯ команда curl (проверенная вручную)
             curl_cmd = [
                 'curl',
                 '--interface', interface,
                 '--silent',
-                '--show-error',  # Показывать ошибки
-                '--fail-with-body',  # Возвращать тело даже при ошибке
+                '--show-error',
+                '--fail-with-body',
                 '--max-time', '30',
                 '--connect-timeout', '10',
-                '--location',  # Следовать редиректам
-                '--compressed',  # Поддержка сжатия
+                '--location',
+                '--compressed',
                 '--header', 'Accept: application/json, text/plain, */*',
                 '--header', 'User-Agent: Mobile-Proxy-Interface/1.0',
-                '--write-out', '\\nHTTPSTATUS:%{http_code}\\nTIME:%{time_total}\\n',
+                '--write-out', '\nHTTPSTATUS:%{http_code}\nTIME:%{time_total}\n',
                 target_url
             ]
 
-            logger.info(f"🔧 Executing curl with improved parameters:")
-            logger.info(f"   Command: {' '.join(curl_cmd[:8])}...")
+            logger.info(f"🔧 Executing curl command: {' '.join(curl_cmd[:8])}...")
 
-            # Выполнение с улучшенной обработкой ошибок
-            process = await asyncio.create_subprocess_exec(
-                *curl_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-
+            # ИСПРАВЛЕННОЕ выполнение subprocess с детальным логированием
             try:
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(),
-                    timeout=35  # Чуть больше чем max-time curl
+                logger.info("📞 Starting subprocess...")
+                process = await asyncio.create_subprocess_exec(
+                    *curl_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
                 )
-            except asyncio.TimeoutError:
-                logger.error(f"❌ Curl timeout after 35 seconds")
-                process.kill()
-                return None
+                logger.info(f"📞 Process created with PID: {process.pid}")
 
-            logger.info(f"📊 Curl exit code: {process.returncode}")
+                # Ожидание завершения с таймаутом
+                logger.info("⏳ Waiting for process to complete...")
+                try:
+                    stdout, stderr = await asyncio.wait_for(
+                        process.communicate(),
+                        timeout=35
+                    )
+                    logger.info("✅ Process completed successfully")
+                except asyncio.TimeoutError:
+                    logger.error("❌ Process timeout after 35 seconds")
+                    try:
+                        process.kill()
+                        await process.wait()
+                    except:
+                        pass
+                    return None
 
-            if stderr:
-                stderr_text = stderr.decode('utf-8', errors='ignore')
-                logger.info(f"📝 Curl stderr: {stderr_text}")
+                # ДЕТАЛЬНОЕ логирование результатов
+                logger.info(f"📊 Process return code: {process.returncode}")
+                logger.info(f"📊 stdout length: {len(stdout) if stdout else 0} bytes")
+                logger.info(f"📊 stderr length: {len(stderr) if stderr else 0} bytes")
 
-            if process.returncode == 0:
-                output = stdout.decode('utf-8', errors='ignore')
-                logger.info(f"📦 Curl output length: {len(output)} bytes")
-
-                # Улучшенный парсинг ответа
-                status_code = 200
-                response_body = output
-                time_total = "0"
-
-                # Извлекаем метаданные из write-out
-                lines = output.split('\n')
-                body_lines = []
-
-                for line in lines:
-                    if line.startswith('HTTPSTATUS:'):
-                        try:
-                            status_code = int(line.split(':')[1].strip())
-                            logger.info(f"✅ Parsed HTTP status: {status_code}")
-                        except (ValueError, IndexError) as e:
-                            logger.warning(f"Failed to parse status: {e}")
-                    elif line.startswith('TIME:'):
-                        try:
-                            time_total = line.split(':')[1].strip()
-                            logger.info(f"⏱️ Request time: {time_total}s")
-                        except (ValueError, IndexError):
-                            pass
-                    elif line.strip():  # Непустые строки идут в тело ответа
-                        body_lines.append(line)
-
-                # Собираем тело ответа
-                if body_lines:
-                    response_body = '\n'.join(body_lines)
+                if stdout:
+                    stdout_text = stdout.decode('utf-8', errors='ignore')
+                    logger.info(f"📦 stdout content (first 200 chars): {stdout_text[:200]}")
                 else:
-                    response_body = output.split('HTTPSTATUS:')[0] if 'HTTPSTATUS:' in output else output
+                    logger.warning("⚠️ stdout is empty!")
 
-                logger.info(f"🎉 SUCCESS! Interface {interface} -> Status {status_code}, Body: {response_body[:100]}...")
+                if stderr:
+                    stderr_text = stderr.decode('utf-8', errors='ignore')
+                    logger.info(f"📝 stderr content: {stderr_text}")
 
-                return web.Response(
-                    body=response_body.encode('utf-8'),
-                    status=status_code,
-                    headers={
-                        'X-Proxy-Via': f'interface-{interface}',
-                        'X-Interface-IP': interface_ip,
-                        'X-Request-Time': time_total,
-                        'X-Method': 'curl-interface-binding',
-                        'Content-Type': 'application/json' if response_body.strip().startswith('{') else 'text/plain'
-                    }
-                )
-            else:
-                error_msg = stderr.decode('utf-8', errors='ignore') if stderr else 'Unknown error'
-                logger.error(f"❌ Curl failed with code {process.returncode}: {error_msg}")
+                if process.returncode == 0 and stdout:
+                    output = stdout.decode('utf-8', errors='ignore')
+                    logger.info(f"🎉 curl SUCCESS! Output length: {len(output)}")
 
-                # Попытка диагностики проблемы
-                if 'Network is unreachable' in error_msg:
-                    logger.error("🚨 Network unreachable - check interface routing")
-                elif 'Could not resolve host' in error_msg:
-                    logger.error("🚨 DNS resolution failed - check interface DNS")
-                elif 'Connection timed out' in error_msg:
-                    logger.error("🚨 Connection timeout - check interface connectivity")
+                    # Парсинг результата (как в ручном тесте)
+                    status_code = 200
+                    response_body = output
+                    time_total = "0"
 
+                    lines = output.split('\n')
+                    body_lines = []
+
+                    logger.info(f"📋 Parsing {len(lines)} lines of output...")
+
+                    for i, line in enumerate(lines):
+                        logger.debug(f"Line {i}: '{line}'")
+                        if line.startswith('HTTPSTATUS:'):
+                            try:
+                                status_code = int(line.split(':')[1].strip())
+                                logger.info(f"✅ Parsed HTTP status: {status_code}")
+                            except (ValueError, IndexError) as e:
+                                logger.warning(f"Failed to parse status from '{line}': {e}")
+                        elif line.startswith('TIME:'):
+                            try:
+                                time_total = line.split(':', 1)[1].strip()
+                                logger.info(f"⏱️ Request time: {time_total}s")
+                            except (ValueError, IndexError) as e:
+                                logger.warning(f"Failed to parse time from '{line}': {e}")
+                        elif line.strip() and not line.startswith('HTTPSTATUS:') and not line.startswith('TIME:'):
+                            body_lines.append(line)
+
+                    # Собираем тело ответа
+                    if body_lines:
+                        response_body = '\n'.join(body_lines)
+                    else:
+                        # Fallback - берем все до первого HTTPSTATUS
+                        response_body = output.split('\nHTTPSTATUS:')[0].strip()
+
+                    logger.info(f"📄 Final response body: {response_body}")
+                    logger.info(f"📄 Final status code: {status_code}")
+
+                    # Проверяем что у нас есть валидный ответ
+                    if not response_body.strip():
+                        logger.error("❌ Empty response body after parsing!")
+                        return None
+
+                    logger.info(f"🎉 SUCCESS! Interface {interface} -> Status {status_code}")
+                    logger.info(f"🌐 Response contains mobile IP: {'176.59.214.25' in response_body}")
+
+                    return web.Response(
+                        body=response_body.encode('utf-8'),
+                        status=status_code,
+                        headers={
+                            'X-Proxy-Via': f'interface-{interface}',
+                            'X-Interface-IP': interface_ip,
+                            'X-Request-Time': time_total,
+                            'X-Method': 'curl-interface-binding',
+                            'X-Success': 'true',
+                            'Content-Type': 'application/json' if response_body.strip().startswith(
+                                '{') else 'text/plain'
+                        }
+                    )
+                else:
+                    error_msg = stderr.decode('utf-8', errors='ignore') if stderr else 'No stdout received'
+                    logger.error(f"❌ curl failed: return_code={process.returncode}, error={error_msg}")
+                    return None
+
+            except Exception as subprocess_error:
+                logger.error(f"❌ Subprocess execution error: {subprocess_error}")
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
                 return None
 
         except Exception as e:
