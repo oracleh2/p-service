@@ -6,6 +6,7 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone, timedelta
 import uuid
 
+from ..main import logger
 # from ..database import get_db, get_system_config, update_system_config
 from ..models.database import get_db, get_system_config, update_system_config
 
@@ -656,3 +657,157 @@ async def get_system_health(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get system health: {str(e)}"
         )
+
+
+# Добавьте в backend/app/api/admin.py
+
+@router.post("/devices/discover")
+async def discover_devices():
+    """Принудительное обнаружение устройств"""
+    try:
+        device_manager = get_device_manager()
+        if not device_manager:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Device manager not available"
+            )
+
+        logger.info("🔍 Manual device discovery triggered")
+
+        # Запускаем обнаружение устройств
+        await device_manager.discover_all_devices()
+
+        # Получаем результат
+        devices = await device_manager.get_all_devices()
+
+        logger.info(f"✅ Manual discovery completed: {len(devices)} devices found")
+
+        return {
+            "message": "Device discovery completed",
+            "devices_found": len(devices),
+            "devices": list(devices.values())
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Error in device discovery: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Discovery failed: {str(e)}"
+        )
+
+
+@router.get("/devices/debug")
+async def debug_devices():
+    """Отладочная информация об устройствах"""
+    try:
+        import subprocess
+        import netifaces
+
+        logger.info("🔍 Debug info requested")
+
+        # Проверяем ADB
+        try:
+            result = subprocess.run(['adb', 'devices', '-l'], capture_output=True, text=True, timeout=10)
+            adb_output = result.stdout
+            adb_success = result.returncode == 0
+        except Exception as e:
+            adb_output = f"ADB error: {str(e)}"
+            adb_success = False
+
+        # Проверяем интерфейсы
+        all_interfaces = netifaces.interfaces()
+        usb_interfaces = []
+
+        for interface in all_interfaces:
+            if interface.startswith(('enx', 'usb', 'rndis')):
+                try:
+                    addrs = netifaces.ifaddresses(interface)
+                    if netifaces.AF_INET in addrs:
+                        ip_info = addrs[netifaces.AF_INET][0]
+                        usb_interfaces.append({
+                            'interface': interface,
+                            'ip': ip_info['addr'],
+                            'netmask': ip_info.get('netmask', '')
+                        })
+                except Exception as e:
+                    usb_interfaces.append({
+                        'interface': interface,
+                        'error': str(e)
+                    })
+
+        # Проверяем DeviceManager
+        device_manager = get_device_manager()
+        dm_status = "Available" if device_manager else "Not available"
+
+        if device_manager:
+            try:
+                devices = await device_manager.get_all_devices()
+                dm_devices_count = len(devices)
+                dm_devices = list(devices.values())
+            except Exception as e:
+                dm_devices_count = f"Error: {str(e)}"
+                dm_devices = []
+        else:
+            dm_devices_count = 0
+            dm_devices = []
+
+        result = {
+            "adb": {
+                "success": adb_success,
+                "output": adb_output
+            },
+            "interfaces": {
+                "all": all_interfaces,
+                "usb": usb_interfaces,
+                "honor_exists": "enx566cf3eaaf4b" in all_interfaces
+            },
+            "device_manager": {
+                "status": dm_status,
+                "devices_count": dm_devices_count,
+                "devices": dm_devices
+            }
+        }
+
+        logger.info(f"📊 Debug result: {result}")
+        return result
+
+    except Exception as e:
+        logger.error(f"❌ Error in debug endpoint: {e}")
+        return {"error": str(e)}
+
+
+@router.get("/devices/test-discovery")
+async def test_discovery():
+    """Тестирование отдельных частей обнаружения"""
+    try:
+        device_manager = get_device_manager()
+        if not device_manager:
+            return {"error": "Device manager not available"}
+
+        logger.info("🧪 Testing discovery components...")
+
+        # Тест 1: ADB устройства
+        adb_devices = await device_manager.get_adb_devices()
+        logger.info(f"ADB devices: {adb_devices}")
+
+        # Тест 2: USB интерфейсы
+        usb_interfaces = await device_manager.detect_usb_tethering_interfaces()
+        logger.info(f"USB interfaces: {usb_interfaces}")
+
+        # Тест 3: Android устройства с интерфейсами
+        android_devices = await device_manager.discover_android_devices_with_interfaces()
+        logger.info(f"Android devices: {android_devices}")
+
+        return {
+            "adb_devices": adb_devices,
+            "usb_interfaces": usb_interfaces,
+            "android_devices": android_devices
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Error in test discovery: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return {"error": str(e), "traceback": traceback.format_exc()}
