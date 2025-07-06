@@ -34,9 +34,9 @@ class ProxyServer:
         try:
             # Создание HTTP сессии
             self.session = ClientSession(
-                timeout=ClientTimeout(total=settings.REQUEST_TIMEOUT_SECONDS),
+                timeout=ClientTimeout(total=settings.request_timeout_seconds),
                 connector=aiohttp.TCPConnector(
-                    limit=settings.MAX_CONCURRENT_CONNECTIONS,
+                    limit=settings.max_concurrent_connections,
                     limit_per_host=50,
                     ttl_dns_cache=300,
                     use_dns_cache=True,
@@ -53,8 +53,8 @@ class ProxyServer:
 
             self.site = web.TCPSite(
                 self.runner,
-                settings.PROXY_HOST,
-                settings.PROXY_PORT
+                settings.proxy_host,
+                settings.proxy_port
             )
 
             await self.site.start()
@@ -62,8 +62,8 @@ class ProxyServer:
 
             logger.info(
                 "Proxy server started",
-                host=settings.PROXY_HOST,
-                port=settings.PROXY_PORT
+                host=settings.proxy_host,
+                port=settings.proxy_port
             )
 
         except Exception as e:
@@ -382,10 +382,10 @@ class ProxyServer:
             status_data = {
                 "proxy_server": {
                     "running": self.running,
-                    "host": settings.PROXY_HOST,
-                    "port": settings.PROXY_PORT,
-                    "max_connections": settings.MAX_CONCURRENT_CONNECTIONS,
-                    "timeout": settings.REQUEST_TIMEOUT_SECONDS
+                    "host": settings.proxy_host,
+                    "port": settings.proxy_port,
+                    "max_connections": settings.max_concurrent_connections,
+                    "timeout": settings.request_timeout_seconds
                 },
                 "devices": device_summary,
                 "timestamp": datetime.now(timezone.utc).isoformat()
@@ -412,10 +412,10 @@ class ProxyServer:
                 "devices": device_summary,
                 "server_info": {
                     "running": self.running,
-                    "host": settings.PROXY_HOST,
-                    "port": settings.PROXY_PORT,
-                    "max_connections": settings.MAX_CONCURRENT_CONNECTIONS,
-                    "timeout": settings.REQUEST_TIMEOUT_SECONDS
+                    "host": settings.proxy_host,
+                    "port": settings.proxy_port,
+                    "max_connections": settings.max_concurrent_connections,
+                    "timeout": settings.request_timeout_seconds
                 }
             }
 
