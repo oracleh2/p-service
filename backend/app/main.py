@@ -7,9 +7,14 @@ import asyncio
 import logging
 import time
 import random
+
 from .api import auth
 from .models.database import init_db
 from .models.config import settings
+from .core.modem_manager import ModemManager  # Добавить эту строку
+
+# Добавить эту строку:
+modem_manager = ModemManager()
 
 created_users = []
 
@@ -192,46 +197,72 @@ async def admin_system_health():
 
 @app.get("/admin/modems")
 async def admin_get_modems():
-    """Список модемов (заглушка)"""
-    return [
-        {
-            "modem_id": "android_ABC123",
-            "modem_type": "android",
-            "status": "online",
-            "external_ip": "192.168.1.100",
-            "operator": "МТС",
-            "interface": "/dev/ttyUSB0",
-            "last_rotation": time.time(),
-            "total_requests": 1250,
-            "success_rate": 94.5,
-            "auto_rotation": True
-        },
-        {
-            "modem_id": "usb_0",
-            "modem_type": "usb_modem",
-            "status": "offline",
-            "external_ip": "10.0.0.50",
-            "operator": "Билайн",
-            "interface": "/dev/ttyUSB1",
-            "last_rotation": time.time() - 3600,
-            "total_requests": 987,
-            "success_rate": 88.2,
-            "auto_rotation": False
-        },
-        {
-            "modem_id": "rpi_001",
-            "modem_type": "raspberry_pi",
-            "status": "online",
-            "external_ip": "172.16.0.25",
-            "operator": "Мегафон",
-            "interface": "ppp0",
-            "last_rotation": time.time() - 1800,
-            "total_requests": 856,
-            "success_rate": 96.1,
-            "auto_rotation": True
-        }
-    ]
+    """Список реальных модемов"""
+    try:
+        # Обновляем список модемов
+        await modem_manager.discover_modems()
 
+        # Получаем все модемы
+        all_modems = await modem_manager.get_all_modems()
+
+        modems_list = []
+        for modem_id, modem_info in all_modems.items():
+            # Получаем внешний IP
+            external_ip = await modem_manager.get_modem_external_ip(modem_id)
+
+            modem_data = {
+                "modem_id": modem_id,
+                "modem_type": modem_info['type'],
+                "status": modem_info['status'],
+                "external_ip": external_ip or "Not connected",
+                "operator": modem_info.get('operator', 'Unknown'),
+                "interface": modem_info['interface'],
+                "device_info": modem_info['device_info'],
+                "last_rotation": time.time(),
+                "total_requests": 0,
+                "success_rate": 100.0,
+                "auto_rotation": True
+            }
+
+            # Добавляем специфичные для Android поля
+            if modem_info['type'] == 'android':
+                modem_data.update({
+                    "manufacturer": modem_info.get('manufacturer', 'Unknown'),
+                    "model": modem_info.get('model', 'Unknown'),
+                    "android_version": modem_info.get('android_version', 'Unknown'),
+                    "battery_level": modem_info.get('battery_level', 0),
+                    "adb_id": modem_info.get('adb_id', ''),
+                })
+
+            modems_list.append(modem_data)
+
+        logger.info(f"Returning {len(modems_list)} real modems")
+        return modems_list
+
+    except Exception as e:
+        logger.error(f"Error getting modems: {e}")
+        return []
+
+
+@app.post("/admin/modems/scan")
+async def scan_modems():
+    """Принудительное сканирование модемов"""
+    try:
+        logger.info("Manual modem scan initiated")
+        await modem_manager.discover_modems()
+
+        all_modems = await modem_manager.get_all_modems()
+
+        return {
+            "message": "Modem scan completed",
+            "found_modems": len(all_modems),
+            "modems": list(all_modems.keys()),
+            "timestamp": time.time()
+        }
+
+    except Exception as e:
+        logger.error(f"Error scanning modems: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/stats/overview")
 async def stats_overview():
@@ -288,12 +319,47 @@ async def rotate_all_modems():
 
 @app.post("/admin/modems/{modem_id}/rotate")
 async def rotate_modem(modem_id: str):
-    """Ротация IP конкретного модема (заглушка)"""
-    return {
-        "message": f"IP rotation initiated for {modem_id}",
-        "modem_id": modem_id,
-        "status": "initiated"
-    }
+    """Реальная ротация IP конкретного модема"""
+    try:
+        all_modems = await modem_manager.get_all_modems()
+
+        if modem_id not in all_modems:
+            raise HTTPException(status_code=404, detail="Modem not found")
+
+        modem = all_modems[modem_id]
+
+        logger.info(f"Starting IP rotation for {modem_id}")
+
+        # Выполняем ротацию в зависимости от типа модема
+        if modem['type'] == 'android':
+            success = await modem_manager.rotate_android_modem(modem)
+        elif modem['type'] == 'usb_modem':
+            success = await modem_manager.rotate_usb_modem(modem)
+        else:
+            success = False
+
+        if success:
+            new_ip = await modem_manager.get_modem_external_ip(modem_id)
+            return {
+                "message": f"IP rotation completed for {modem_id}",
+                "modem_id": modem_id,
+                "status": "success",
+                "new_ip": new_ip,
+                "timestamp": time.time()
+            }
+        else:
+            return {
+                "message": f"IP rotation failed for {modem_id}",
+                "modem_id": modem_id,
+                "status": "failed",
+                "timestamp": time.time()
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error rotating modem {modem_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ... (остальные endpoints остаются без изменений)
@@ -324,8 +390,14 @@ async def startup_event():
     except Exception as e:
         logger.error(f"❌ Failed to initialize database: {e}")
 
-    logger.info(
-        f"📡 API running on http://{getattr(settings, 'api_host', '0.0.0.0')}:{getattr(settings, 'api_port', 8000)}")
+    # Запуск ModemManager (добавить этот блок)
+    try:
+        await modem_manager.start()
+        logger.info("✅ ModemManager started successfully")
+    except Exception as e:
+        logger.error(f"❌ Failed to start ModemManager: {e}")
+
+    logger.info(f"📡 API running on http://{getattr(settings, 'api_host', '0.0.0.0')}:{getattr(settings, 'api_port', 8000)}")
     logger.info("🌐 CORS enabled for 192.168.1.50:3000")
     logger.info("✅ Service ready to handle requests")
 
