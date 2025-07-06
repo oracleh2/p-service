@@ -118,7 +118,7 @@ async def login(
         )
 
     # Создание JWT токена
-    access_token_expires = timedelta(minutes=settings.JWT_EXPIRATION_MINUTES)
+    access_token_expires = timedelta(minutes=settings.jwt_expiration_minutes)
     access_token = create_access_token(
         data={"sub": user.username}, expires_delta=access_token_expires
     )
