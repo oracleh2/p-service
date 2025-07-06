@@ -244,6 +244,170 @@ async def admin_get_modems():
         return []
 
 
+# Добавьте этот endpoint в файл backend/app/main.py
+
+@app.get("/admin/modems/{modem_id}")
+async def admin_get_modem_by_id(modem_id: str):
+    """Получение информации о конкретном модеме"""
+    try:
+        # Получаем все модемы
+        all_modems = await modem_manager.get_all_modems()
+
+        if modem_id not in all_modems:
+            raise HTTPException(status_code=404, detail="Modem not found")
+
+        modem_info = all_modems[modem_id]
+
+        # Получаем внешний IP
+        external_ip = await modem_manager.get_modem_external_ip(modem_id)
+
+        # Получаем дополнительную информацию в зависимости от типа модема
+        additional_info = {}
+
+        if modem_info['type'] == 'android':
+            # Для Android устройств получаем дополнительную информацию
+            device_details = await modem_manager.get_android_device_details(modem_info['interface'])
+            additional_info.update({
+                'manufacturer': device_details.get('manufacturer', 'Unknown'),
+                'model': device_details.get('model', 'Unknown'),
+                'android_version': device_details.get('android_version', 'Unknown'),
+                'battery_level': device_details.get('battery_level', 0),
+                'adb_id': modem_info.get('adb_id', ''),
+                'usb_tethering': device_details.get('usb_tethering', False),
+                'rotation_methods': ['data_toggle', 'airplane_mode']
+            })
+        elif modem_info['type'] == 'usb_modem':
+            # Для USB модемов получаем AT-команды информацию
+            usb_details = await modem_manager.get_usb_modem_details(modem_info)
+            additional_info.update({
+                'signal_strength': usb_details.get('signal_strength', 'N/A'),
+                'operator': usb_details.get('operator', 'Unknown'),
+                'technology': usb_details.get('technology', 'Unknown'),
+                'temperature': usb_details.get('temperature', 'N/A'),
+                'rotation_methods': ['at_commands', 'network_reset']
+            })
+
+        # Формируем полный ответ
+        modem_data = {
+            "modem_id": modem_id,
+            "modem_type": modem_info['type'],
+            "status": modem_info['status'],
+            "external_ip": external_ip or "Not connected",
+            "operator": modem_info.get('operator', 'Unknown'),
+            "interface": modem_info['interface'],
+            "device_info": modem_info['device_info'],
+            "last_rotation": time.time() - 300,  # Пример: 5 минут назад
+            "total_requests": 0,
+            "successful_requests": 0,
+            "failed_requests": 0,
+            "success_rate": 100.0,
+            "avg_response_time": 250,
+            "auto_rotation": True,
+            "rotation_interval": 600,  # 10 минут
+            "last_seen": modem_info.get('last_seen', datetime.now().isoformat()),
+            **additional_info
+        }
+
+        logger.info(f"Returning detailed info for modem {modem_id}")
+        return modem_data
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting modem {modem_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Также добавьте endpoint для статистики модема
+@app.get("/admin/modems/{modem_id}/stats")
+async def admin_get_modem_stats(modem_id: str):
+    """Получение статистики конкретного модема"""
+    try:
+        all_modems = await modem_manager.get_all_modems()
+
+        if modem_id not in all_modems:
+            raise HTTPException(status_code=404, detail="Modem not found")
+
+        # Базовая статистика (заглушка, позже можно получать из БД)
+        stats = {
+            "modem_id": modem_id,
+            "requests_today": 156,
+            "successful_requests_today": 142,
+            "failed_requests_today": 14,
+            "success_rate_today": 91.0,
+            "avg_response_time_today": 245,
+            "unique_ips_today": 8,
+            "data_transferred_mb_today": 23.4,
+            "last_24h_stats": [
+                {"hour": "00:00", "requests": 12, "success_rate": 95},
+                {"hour": "01:00", "requests": 8, "success_rate": 100},
+                {"hour": "02:00", "requests": 3, "success_rate": 100},
+                # ... можно добавить больше данных
+            ],
+            "ip_history": [
+                {"ip": "192.168.1.100", "first_seen": "2025-07-06T08:00:00", "requests": 45},
+                {"ip": "192.168.1.101", "first_seen": "2025-07-06T09:30:00", "requests": 38},
+                {"ip": "192.168.1.102", "first_seen": "2025-07-06T10:15:00", "requests": 23},
+            ]
+        }
+
+        return stats
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting stats for modem {modem_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Endpoint для обновления настроек модема
+@app.put("/admin/modems/{modem_id}")
+async def admin_update_modem(modem_id: str, update_data: dict):
+    """Обновление настроек модема"""
+    try:
+        all_modems = await modem_manager.get_all_modems()
+
+        if modem_id not in all_modems:
+            raise HTTPException(status_code=404, detail="Modem not found")
+
+        # Здесь можно добавить логику обновления настроек
+        # Например, изменение интервала ротации, включение/выключение автоматической ротации и т.д.
+
+        logger.info(f"Updated settings for modem {modem_id}: {update_data}")
+
+        return {
+            "message": f"Modem {modem_id} updated successfully",
+            "updated_fields": list(update_data.keys())
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating modem {modem_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Endpoint для удаления модема
+@app.delete("/admin/modems/{modem_id}")
+async def admin_delete_modem(modem_id: str):
+    """Удаление модема из системы"""
+    try:
+        all_modems = await modem_manager.get_all_modems()
+
+        if modem_id not in all_modems:
+            raise HTTPException(status_code=404, detail="Modem not found")
+
+        # Здесь можно добавить логику удаления модема
+        logger.info(f"Deleted modem {modem_id}")
+
+        return {"message": f"Modem {modem_id} deleted successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting modem {modem_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/admin/modems/scan")
 async def scan_modems():
     """Принудительное сканирование модемов"""

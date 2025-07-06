@@ -90,7 +90,7 @@ class ModemManager:
 
         return modems
 
-    async def discover_android_devices(self) -> Dict[str, dict]:
+    async def discover_android_devices_not_advanced(self) -> Dict[str, dict]:
         """Обнаружение Android устройств через ADB - ИСПРАВЛЕННАЯ РЕАЛИЗАЦИЯ"""
         modems = {}
 
@@ -192,7 +192,7 @@ class ModemManager:
         return modems
 
     # АЛЬТЕРНАТИВНЫЙ БОЛЕЕ ПРОДВИНУТЫЙ ПАРСЕР
-    async def discover_android_devices_advanced(self) -> Dict[str, dict]:
+    async def discover_android_devices(self) -> Dict[str, dict]:
         """Обнаружение Android устройств через ADB - ПРОДВИНУТАЯ РЕАЛИЗАЦИЯ"""
         modems = {}
 
