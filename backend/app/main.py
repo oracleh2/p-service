@@ -8,10 +8,12 @@ import logging
 import time
 import random
 from datetime import datetime, timezone
+from .api import auth
 from .models.database import init_db
 from .models.config import settings
 from .core.modem_manager import ModemManager  # Добавить эту строку
 from .api import auth, proxy, admin, stats
+
 
 # Добавить эту строку:
 modem_manager = ModemManager()
@@ -74,14 +76,6 @@ app.add_middleware(
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
 app.include_router(auth.router, prefix="/auth", tags=["auth-legacy"])
 
-# app.include_router(proxy.router, prefix="/proxy", tags=["proxy"])
-# app.include_router(admin.router, prefix="/admin", tags=["admin"])
-# app.include_router(stats.router, prefix="/stats", tags=["stats"])
-
-# Также можно добавить API v1 версии:
-# app.include_router(proxy.router, prefix="/api/v1/proxy", tags=["proxy-v1"])
-# app.include_router(admin.router, prefix="/api/v1/admin", tags=["admin-v1"])
-# app.include_router(stats.router, prefix="/api/v1/stats", tags=["stats-v1"])
 
 # Middleware для логирования запросов
 @app.middleware("http")
