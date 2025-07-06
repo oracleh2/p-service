@@ -181,16 +181,16 @@ echo ""
 
 # 3. Тестируем API напрямую
 echo "3. Тест API модемов:"
-curl -s http://192.168.1.50:8000/admin/modems
+curl -s http://192.168.1.50:8000/admin/devices
 echo ""
 
 # 4. Проверяем что возвращает device manager
 echo "4. Принудительное сканирование устройств:"
-curl -X POST -s http://192.168.1.50:8000/admin/modems/scan
+curl -X POST -s http://192.168.1.50:8000/admin/devices/scan
 echo ""
 
 # 5. Повторная проверка списка модемов
 echo "5. Список модемов после сканирования:"
-curl -s http://192.168.1.50:8000/admin/modems | jq . 2>/dev/null || curl -s http://192.168.1.50:8000/admin/modems
+curl -s http://192.168.1.50:8000/admin/devices | jq . 2>/dev/null || curl -s http://192.168.1.50:8000/admin/devices
 echo ""
 
