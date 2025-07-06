@@ -145,11 +145,11 @@ DEFAULT_SYSTEM_CONFIG = {
 }
 
 # Константы для совместимости
-PROXY_HOST = settings.PROXY_HOST
-PROXY_PORT = settings.PROXY_PORT
-MAX_CONCURRENT_CONNECTIONS = settings.MAX_CONCURRENT_CONNECTIONS
-REQUEST_TIMEOUT_SECONDS = settings.REQUEST_TIMEOUT_SECONDS
-BUFFER_SIZE = settings.BUFFER_SIZE
+PROXY_HOST = settings.proxy_host
+PROXY_PORT = settings.proxy_port
+MAX_CONCURRENT_CONNECTIONS = settings.max_concurrent_connections
+REQUEST_TIMEOUT_SECONDS = settings.request_timeout_seconds
+BUFFER_SIZE = settings.buffer_size
 DEFAULT_ROTATION_INTERVAL = settings.default_rotation_interval
 MAX_ROTATION_ATTEMPTS = settings.max_rotation_attempts
 ROTATION_TIMEOUT_SECONDS = settings.rotation_timeout_seconds
