@@ -10,6 +10,7 @@ import uuid
 import subprocess
 import netifaces
 import asyncio
+import time
 
 from ..models.database import get_db, get_system_config, update_system_config
 from ..models.base import ProxyDevice, RotationConfig, SystemConfig, RequestLog, IpHistory
@@ -19,7 +20,7 @@ from ..config import DEFAULT_SYSTEM_CONFIG
 
 router = APIRouter()
 logger = None  # Будет импортирован из main
-
+from ..main import logger
 
 class SystemConfigUpdate(BaseModel):
     key: str
@@ -121,55 +122,45 @@ async def update_system_config_endpoint(
 
 
 # Управление устройствами
-@router.get("/devices")
-async def get_devices(current_user=Depends(get_admin_user)):
-    """Получение списка устройств"""
+@app.get("/admin/devices")
+async def admin_get_devices_legacy():
+    """Список устройств (legacy endpoint для фронтенда)"""
     try:
+        from ..core.managers import get_device_manager
         device_manager = get_device_manager()
         if not device_manager:
-            return {
-                "devices": [],
-                "total": 0,
-                "online": 0,
-                "offline": 0,
-                "maintenance": 0
-            }
+            return []
 
-        # Получаем все устройства
+        await device_manager.discover_all_devices()
         all_devices = await device_manager.get_all_devices()
 
         devices_list = []
-        online_count = 0
-
         for device_id, device_info in all_devices.items():
-            # Проверяем статус устройства
-            is_online = await device_manager.is_device_online(device_id)
-            if is_online:
-                online_count += 1
-
-            # Получаем внешний IP
             external_ip = await device_manager.get_device_external_ip(device_id)
 
             device_data = {
+                "modem_id": device_id,
                 "id": device_id,
+                "device_info": device_info.get('device_info', f"Device {device_id}"),
                 "name": device_info.get('device_info', f"Device {device_id}"),
-                "device_type": device_info.get('type', 'unknown'),
-                "status": "online" if is_online else "offline",
-                "interface": device_info.get('interface', 'Unknown'),
-                "usb_interface": device_info.get('usb_interface'),
-                "usb_ip": device_info.get('usb_ip'),
-                "routing_capable": device_info.get('routing_capable', False),
-                "external_ip": external_ip,
+                "modem_type": device_info['type'],
+                "device_type": device_info['type'],
+                "type": device_info['type'],
+                "status": device_info['status'],
+                "external_ip": external_ip or "Not connected",
                 "operator": device_info.get('operator', 'Unknown'),
-                "region": device_info.get('region', 'Unknown'),
-                "last_seen": device_info.get('last_seen'),
-                "rotation_methods": device_info.get('rotation_methods', []),
-                "created_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat()
+                "interface": device_info.get('interface', 'Unknown'),
+                "last_rotation": time.time() * 1000,  # В миллисекундах для JS
+                "total_requests": 0,
+                "successful_requests": 0,
+                "failed_requests": 0,
+                "success_rate": 100.0,  # Всегда float
+                "auto_rotation": True,
+                "avg_response_time": 0
             }
 
-            # Добавляем специфичные для типа поля
-            if device_info.get('type') == 'android':
+            # Добавляем специфичные поля
+            if device_info['type'] == 'android':
                 device_data.update({
                     "manufacturer": device_info.get('manufacturer', 'Unknown'),
                     "model": device_info.get('model', 'Unknown'),
@@ -180,23 +171,11 @@ async def get_devices(current_user=Depends(get_admin_user)):
 
             devices_list.append(device_data)
 
-        return {
-            "devices": devices_list,
-            "total": len(devices_list),
-            "online": online_count,
-            "offline": len(devices_list) - online_count,
-            "maintenance": 0
-        }
+        return devices_list
 
     except Exception as e:
-        # В случае ошибки возвращаем пустой список
-        return {
-            "devices": [],
-            "total": 0,
-            "online": 0,
-            "offline": 0,
-            "maintenance": 0
-        }
+        logger.error(f"Error getting devices: {e}")
+        return []
 
 
 @router.post("/devices/discover")
