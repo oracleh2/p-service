@@ -1,4 +1,4 @@
-# backend/app/core/proxy_server.py - ПОЛНАЯ ВЕРСИЯ С ПОДДЕРЖКОЙ CONNECT
+# backend/app/core/proxy_server.py - СТАБИЛЬНАЯ ВЕРСИЯ
 
 import asyncio
 import aiohttp
@@ -15,7 +15,7 @@ logger = structlog.get_logger()
 
 
 class ProxyServer:
-    """HTTP/HTTPS прокси-сервер для маршрутизации запросов через мобильные устройства"""
+    """HTTP прокси-сервер для маршрутизации запросов через мобильные устройства"""
 
     def __init__(self, device_manager, stats_collector):
         self.device_manager = device_manager
@@ -88,19 +88,15 @@ class ProxyServer:
         return self.running
 
     def setup_routes(self):
-        """Настройка маршрутов"""
+        """Настройка маршрутов - простая и стабильная версия"""
         # Специальный обработчик для корневого пути
         self.app.router.add_get('/', self.root_handler)
 
         # Специальный обработчик для proxy status
         self.app.router.add_get('/status', self.status_handler)
 
-        # ВАЖНО: Обработчик CONNECT должен быть ПЕРЕД общим обработчиком
-        # Используем более специфичный паттерн для CONNECT
-        self.app.router.add_route('CONNECT', '/{host}:{port}', self.connect_handler)
-
-        # Основной прокси-обработчик для всех остальных запросов
-        self.app.router.add_route('*', '/{path:.*}', self.proxy_handler)
+        # Универсальный обработчик для всех остальных запросов (включая CONNECT)
+        self.app.router.add_route('*', '/{path:.*}', self.universal_handler)
 
     async def root_handler(self, request):
         """Обработчик корневого пути"""
@@ -146,7 +142,7 @@ class ProxyServer:
                 "online_devices": online_devices,
                 "proxy_host": settings.proxy_host,
                 "proxy_port": settings.proxy_port,
-                "supports": ["HTTP", "HTTPS", "CONNECT"]
+                "supports": ["HTTP", "CONNECT (limited)"]
             })
         except Exception as e:
             logger.error(f"Error in status handler: {e}")
@@ -155,12 +151,44 @@ class ProxyServer:
                 "error": str(e)
             }, status=500)
 
-    async def connect_handler(self, request: web.Request) -> web.Response:
-        """Упрощенный обработчик CONNECT метода для HTTPS туннелирования"""
+    async def universal_handler(self, request: web.Request) -> web.Response:
+        """Универсальный обработчик для HTTP и CONNECT запросов"""
+        start_time = time.time()
+        client_ip = self.get_client_ip(request)
+
         try:
-            # Получаем host и port из path
-            host = request.match_info.get('host')
-            port = int(request.match_info.get('port', 443))
+            logger.info(f"Request: {request.method} {request.path_qs} from {client_ip}")
+
+            # Обработка CONNECT запросов
+            if request.method == 'CONNECT':
+                return await self.handle_connect(request)
+
+            # Обработка обычных HTTP запросов
+            return await self.handle_http(request, start_time, client_ip)
+
+        except Exception as e:
+            logger.error(f"Error in universal handler: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+
+            return web.Response(
+                text=f"Internal Server Error: {str(e)}",
+                status=500
+            )
+
+    async def handle_connect(self, request: web.Request) -> web.Response:
+        """Обработка CONNECT запросов"""
+        try:
+            # Парсим host:port из пути
+            target = request.path_qs.lstrip('/')
+            if ':' not in target:
+                return web.Response(text="Bad Request: CONNECT requires host:port", status=400)
+
+            host, port = target.rsplit(':', 1)
+            try:
+                port = int(port)
+            except ValueError:
+                return web.Response(text="Bad Request: Invalid port", status=400)
 
             logger.info(f"CONNECT request to {host}:{port}")
 
@@ -172,65 +200,24 @@ class ProxyServer:
 
             logger.info(f"Using device {device['id']} for CONNECT tunnel")
 
-            # Пока просто возвращаем успешный ответ для CONNECT
-            # В полной реализации здесь должно быть туннелирование
-            return web.Response(status=200, text="Connection established")
+            # Пока возвращаем 501 - Not Implemented
+            # В будущем здесь будет полная реализация туннелирования
+            return web.Response(
+                text="CONNECT method partially supported. Use HTTP proxy for now.",
+                status=501
+            )
 
         except Exception as e:
             logger.error(f"Error in CONNECT handler: {e}")
             return web.Response(text=f"Bad Gateway: {str(e)}", status=502)
 
-    async def create_tunnel(self, client_transport, server_reader, server_writer):
-        """Создание туннеля между клиентом и сервером"""
+    async def handle_http(self, request: web.Request, start_time: float, client_ip: str) -> web.Response:
+        """Обработка обычных HTTP запросов"""
         try:
-            async def forward_client_to_server():
-                try:
-                    while True:
-                        data = await client_transport.read(8192)
-                        if not data:
-                            break
-                        server_writer.write(data)
-                        await server_writer.drain()
-                except Exception as e:
-                    logger.debug(f"Client to server forwarding ended: {e}")
-                finally:
-                    server_writer.close()
-
-            async def forward_server_to_client():
-                try:
-                    while True:
-                        data = await server_reader.read(8192)
-                        if not data:
-                            break
-                        client_transport.write(data)
-                        await client_transport.drain()
-                except Exception as e:
-                    logger.debug(f"Server to client forwarding ended: {e}")
-                finally:
-                    client_transport.close()
-
-            # Запускаем оба направления туннеля
-            await asyncio.gather(
-                forward_client_to_server(),
-                forward_server_to_client(),
-                return_exceptions=True
-            )
-
-        except Exception as e:
-            logger.error(f"Error in tunnel: {e}")
-
-    async def proxy_handler(self, request: web.Request) -> web.Response:
-        """Основной обработчик прокси-запросов"""
-        start_time = time.time()
-        client_ip = self.get_client_ip(request)
-
-        try:
-            logger.info(f"Proxy request: {request.method} {request.url} from {client_ip}")
-
             # Получение целевого URL
             target_url = self.get_target_url(request)
             if not target_url:
-                logger.warning(f"Bad request: no target URL - {request.url}")
+                logger.warning(f"Bad request: no target URL - {request.path_qs}")
                 return web.Response(
                     text="Bad Request: Use this server as HTTP proxy. Example: curl -x http://192.168.1.50:8080 http://httpbin.org/ip",
                     status=400
@@ -259,10 +246,7 @@ class ProxyServer:
             return response
 
         except Exception as e:
-            logger.error(f"Error in proxy handler: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-
+            logger.error(f"Error in HTTP handler: {e}")
             return web.Response(
                 text=f"Internal Server Error: {str(e)}",
                 status=500
@@ -298,19 +282,33 @@ class ProxyServer:
             if request.path_qs.startswith('http://') or request.path_qs.startswith('https://'):
                 return request.path_qs
 
-            # Для запросов с Host заголовком (но не к самому прокси)
+            # Для запросов с Host заголовком
             host = request.headers.get('Host')
             if host:
-                # ИСПРАВЛЕНО: более аккуратная проверка хостов прокси
-                if not any(
-                    proxy_host in host for proxy_host in ['192.168.1.50:8080', '127.0.0.1:8080', 'localhost:8080']):
-                    # Не обрабатываем host с двоеточием как URL
-                    if ':' in host and not host.count(':') == 1:
-                        logger.warning(f"Invalid host header: {host}")
-                        return None
+                # Исключаем запросы к самому прокси-серверу
+                proxy_hosts = [
+                    '192.168.1.50:8080',
+                    '127.0.0.1:8080',
+                    'localhost:8080',
+                    f'{settings.proxy_host}:{settings.proxy_port}'
+                ]
 
-                    scheme = 'https' if request.secure else 'http'
-                    return f"{scheme}://{host}{request.path_qs}"
+                if host not in proxy_hosts:
+                    # Проверяем валидность хоста
+                    if ':' in host and host.count(':') == 1:
+                        try:
+                            # Простая проверка формата host:port
+                            h, p = host.split(':')
+                            int(p)  # Проверяем что порт - число
+                            scheme = 'https' if request.secure else 'http'
+                            return f"{scheme}://{host}{request.path_qs}"
+                        except ValueError:
+                            logger.warning(f"Invalid host:port format: {host}")
+                            return None
+                    elif ':' not in host:
+                        # Хост без порта
+                        scheme = 'https' if request.secure else 'http'
+                        return f"{scheme}://{host}{request.path_qs}"
 
             # Если это запрос к самому прокси-серверу
             return None
