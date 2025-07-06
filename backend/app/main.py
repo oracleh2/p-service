@@ -45,17 +45,20 @@ app.add_middleware(
         "http://127.0.0.1:8000",
         "http://127.0.0.1:8080",
         "http://127.0.0.1:5173",
+
         # IP адрес сервера
         "http://192.168.1.50:3000",
         "http://192.168.1.50:8000",
         "http://192.168.1.50:8080",
         "http://192.168.1.50:5173",
+
         # Без порта (на случай nginx)
         "http://192.168.1.50",
         "http://localhost"
     ],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    # allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_methods=["*"],
     allow_headers=[
         "Accept",
         "Accept-Language",
