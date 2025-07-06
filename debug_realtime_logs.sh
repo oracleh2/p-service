@@ -24,11 +24,11 @@ pm2 list | grep mobile-proxy-backend
 # 3. Мониторинг логов PM2 в фоне
 echo ""
 echo "4. Запуск мониторинга логов PM2..."
-pm2 logs mobile-proxy-backend --lines 0 > /tmp/pm2_debug.log 2>&1 &
+pm2 logs mobile-proxy-backend --lines 0 > /tmp/pm2_debug-0.log 2>&1 &
 LOGS_PID=$!
 
 # Также следим за логами в реальном времени
-tail -f /var/www/p-service/logs/backend.log | grep -E "(PROXY|curl|interface|subprocess|SUCCESS|ERROR|FORCING)" &
+tail -f /var/www/p-service/logs/backend-0.log | grep -E "(PROXY|curl|interface|subprocess|SUCCESS|ERROR|FORCING)" &
 TAIL_PID=$!
 
 echo "Мониторинг запущен..."
@@ -78,14 +78,14 @@ pm2 logs mobile-proxy-backend --lines 30 --nostream | tail -20
 
 echo ""
 echo "📋 Последние логи из файла:"
-tail -30 /var/www/p-service/logs/backend.log | grep -E "(PROXY|curl|interface|subprocess|SUCCESS|ERROR|FORCING|android|Device)" | tail -15
+tail -30 /var/www/p-service/logs/backend-0.log | grep -E "(PROXY|curl|interface|subprocess|SUCCESS|ERROR|FORCING|android|Device)" | tail -15
 
 echo ""
 echo "============================"
 echo "6. Диагностика:"
 
 # Проверяем ключевые моменты в логах
-LOG_FILE="/var/www/p-service/logs/backend-0.log"
+LOG_FILE="/var/www/p-service/logs/backend-0-0.log"
 
 if tail -50 "$LOG_FILE" | grep -q "PROXY REQUEST"; then
     echo "✅ Прокси получает запросы"
@@ -132,7 +132,7 @@ echo "7. Полезные команды:"
 echo "   Мониторинг логов: pm2 logs mobile-proxy-backend"
 echo "   Рестарт backend: pm2 restart mobile-proxy-backend"
 echo "   Статус PM2: pm2 status"
-echo "   Логи файл: tail -f /var/www/p-service/logs/backend.log"
+echo "   Логи файл: tail -f /var/www/p-service/logs/backend-0.log"
 
 echo ""
 echo "🔧 Если проблема не решена, попробуйте:"
