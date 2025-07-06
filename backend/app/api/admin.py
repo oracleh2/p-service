@@ -1,3 +1,5 @@
+# backend/app/api/admin.py - ОЧИЩЕННАЯ ВЕРСИЯ БЕЗ МОКОВ
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, delete, func
@@ -5,18 +7,18 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone, timedelta
 import uuid
+import subprocess
+import netifaces
+import asyncio
 
-from ..main import logger
-# from ..database import get_db, get_system_config, update_system_config
 from ..models.database import get_db, get_system_config, update_system_config
-
 from ..models.base import ProxyDevice, RotationConfig, SystemConfig, RequestLog, IpHistory
 from ..api.auth import get_admin_user
-# from ..main import get_device_manager, get_rotation_manager, get_proxy_server
 from ..core.managers import get_device_manager, get_proxy_server, get_rotation_manager
 from ..config import DEFAULT_SYSTEM_CONFIG
 
 router = APIRouter()
+logger = None  # Будет импортирован из main
 
 
 class SystemConfigUpdate(BaseModel):
@@ -35,9 +37,9 @@ class SystemConfigResponse(BaseModel):
 
 
 class SystemStatsResponse(BaseModel):
-    total_modems: int
-    online_modems: int
-    offline_modems: int
+    total_devices: int
+    online_devices: int
+    offline_devices: int
     total_requests_today: int
     successful_requests_today: int
     failed_requests_today: int
@@ -47,9 +49,9 @@ class SystemStatsResponse(BaseModel):
     last_rotation_time: Optional[datetime]
 
 
-class ModemManagementResponse(BaseModel):
-    modem_id: str
-    modem_type: str
+class DeviceManagementResponse(BaseModel):
+    device_id: str
+    device_type: str
     interface: str
     status: str
     external_ip: Optional[str]
@@ -60,10 +62,11 @@ class ModemManagementResponse(BaseModel):
     success_rate: float
 
 
+# Системная конфигурация
 @router.get("/system/config", response_model=List[SystemConfigResponse])
 async def get_system_config_all(
-        current_user=Depends(get_admin_user),
-        db: AsyncSession = Depends(get_db)
+    current_user=Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db)
 ):
     """Получение всех системных настроек"""
     try:
@@ -92,22 +95,15 @@ async def get_system_config_all(
 
 @router.put("/system/config")
 async def update_system_config_endpoint(
-        config_update: SystemConfigUpdate,
-        current_user=Depends(get_admin_user),
-        db: AsyncSession = Depends(get_db)
+    config_update: SystemConfigUpdate,
+    current_user=Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db)
 ):
     """Обновление системной настройки"""
     try:
         success = await update_system_config(config_update.key, config_update.value)
 
         if success:
-            # Если изменился глобальный интервал ротации, обновляем все модемы
-            if config_update.key == "rotation_interval":
-                rotation_manager = get_rotation_manager()
-                if rotation_manager:
-                    # Здесь можно добавить логику обновления интервалов
-                    pass
-
             return {"message": "System config updated successfully"}
         else:
             raise HTTPException(
@@ -124,545 +120,87 @@ async def update_system_config_endpoint(
         )
 
 
-@router.post("/system/config/reset")
-async def reset_system_config(
-        current_user=Depends(get_admin_user),
-        db: AsyncSession = Depends(get_db)
-):
-    """Сброс системных настроек к значениям по умолчанию"""
-    try:
-        # Удаляем все текущие настройки
-        await db.execute(delete(SystemConfig))
-
-        # Создаем настройки по умолчанию
-        for key, config in DEFAULT_SYSTEM_CONFIG.items():
-            system_config = SystemConfig(
-                key=key,
-                value=config["value"],
-                description=config["description"],
-                config_type=config["config_type"]
-            )
-            db.add(system_config)
-
-        await db.commit()
-
-        return {"message": "System config reset to defaults successfully"}
-
-    except Exception as e:
-        await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to reset system config: {str(e)}"
-        )
-
-
-@router.get("/system/stats", response_model=SystemStatsResponse)
-async def get_system_stats(
-        current_user=Depends(get_admin_user),
-        db: AsyncSession = Depends(get_db)
-):
-    """Получение общей статистики системы"""
+# Управление устройствами
+@router.get("/devices")
+async def get_devices(current_user=Depends(get_admin_user)):
+    """Получение списка устройств"""
     try:
         device_manager = get_device_manager()
         if not device_manager:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Modem manager not available"
-            )
+            return {
+                "devices": [],
+                "total": 0,
+                "online": 0,
+                "offline": 0,
+                "maintenance": 0
+            }
 
-        # Получение информации о модемах
-        modems = await device_manager.get_all_devices()
-        online_modems = 0
+        # Получаем все устройства
+        all_devices = await device_manager.get_all_devices()
 
-        for modem_id in modems.keys():
-            if await device_manager.is_device_online(modem_id):
-                online_modems += 1
+        devices_list = []
+        online_count = 0
 
-        # Статистика запросов за сегодня
-        today = datetime.now(timezone.utc).date()
+        for device_id, device_info in all_devices.items():
+            # Проверяем статус устройства
+            is_online = await device_manager.is_device_online(device_id)
+            if is_online:
+                online_count += 1
 
-        # Общее количество запросов
-        stmt = select(func.count(RequestLog.id)).where(
-            func.date(RequestLog.created_at) == today
-        )
-        result = await db.execute(stmt)
-        total_requests_today = result.scalar() or 0
+            # Получаем внешний IP
+            external_ip = await device_manager.get_device_external_ip(device_id)
 
-        # Успешные запросы
-        stmt = select(func.count(RequestLog.id)).where(
-            func.date(RequestLog.created_at) == today,
-            RequestLog.status_code.between(200, 299)
-        )
-        result = await db.execute(stmt)
-        successful_requests_today = result.scalar() or 0
+            device_data = {
+                "id": device_id,
+                "name": device_info.get('device_info', f"Device {device_id}"),
+                "device_type": device_info.get('type', 'unknown'),
+                "status": "online" if is_online else "offline",
+                "interface": device_info.get('interface', 'Unknown'),
+                "usb_interface": device_info.get('usb_interface'),
+                "usb_ip": device_info.get('usb_ip'),
+                "routing_capable": device_info.get('routing_capable', False),
+                "external_ip": external_ip,
+                "operator": device_info.get('operator', 'Unknown'),
+                "region": device_info.get('region', 'Unknown'),
+                "last_seen": device_info.get('last_seen'),
+                "rotation_methods": device_info.get('rotation_methods', []),
+                "created_at": datetime.now().isoformat(),
+                "updated_at": datetime.now().isoformat()
+            }
 
-        # Неуспешные запросы
-        failed_requests_today = total_requests_today - successful_requests_today
+            # Добавляем специфичные для типа поля
+            if device_info.get('type') == 'android':
+                device_data.update({
+                    "manufacturer": device_info.get('manufacturer', 'Unknown'),
+                    "model": device_info.get('model', 'Unknown'),
+                    "android_version": device_info.get('android_version', 'Unknown'),
+                    "battery_level": device_info.get('battery_level', 0),
+                    "adb_id": device_info.get('adb_id', ''),
+                })
 
-        # Уникальные IP за сегодня
-        stmt = select(func.count(func.distinct(RequestLog.external_ip))).where(
-            func.date(RequestLog.created_at) == today,
-            RequestLog.external_ip.isnot(None)
-        )
-        result = await db.execute(stmt)
-        unique_ips_today = result.scalar() or 0
-
-        # Среднее время ответа
-        stmt = select(func.avg(RequestLog.response_time_ms)).where(
-            func.date(RequestLog.created_at) == today,
-            RequestLog.response_time_ms.isnot(None)
-        )
-        result = await db.execute(stmt)
-        avg_response_time = result.scalar() or 0
-
-        # Последняя ротация
-        stmt = select(func.max(ProxyDevice.last_ip_rotation))
-        result = await db.execute(stmt)
-        last_rotation_time = result.scalar()
-
-        return SystemStatsResponse(
-            total_modems=len(modems),
-            online_modems=online_modems,
-            offline_modems=len(modems) - online_modems,
-            total_requests_today=total_requests_today,
-            successful_requests_today=successful_requests_today,
-            failed_requests_today=failed_requests_today,
-            unique_ips_today=unique_ips_today,
-            avg_response_time_ms=int(avg_response_time),
-            system_uptime="N/A",  # Можно добавить реальный uptime
-            last_rotation_time=last_rotation_time
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get system stats: {str(e)}"
-        )
-
-
-@router.get("/modems", response_model=List[ModemManagementResponse])
-async def get_modems_management(
-        current_user=Depends(get_admin_user),
-        db: AsyncSession = Depends(get_db)
-):
-    """Получение списка модемов для управления"""
-    try:
-        device_manager = get_device_manager()
-        if not device_manager:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Modem manager not available"
-            )
-
-        modems = await device_manager.get_all_devices()
-        modem_responses = []
-
-        for modem_id, modem_info in modems.items():
-            # Получение информации о модеме из БД
-            try:
-                device_uuid = uuid.UUID(modem_id)
-                stmt = select(ProxyDevice).where(ProxyDevice.id == device_uuid)
-                result = await db.execute(stmt)
-                device = result.scalar_one_or_none()
-            except:
-                device = None
-
-            # Получение конфигурации ротации
-            rotation_config = None
-            if device:
-                stmt = select(RotationConfig).where(RotationConfig.device_id == device.id)
-                result = await db.execute(stmt)
-                rotation_config = result.scalar_one_or_none()
-
-            # Получение статуса
-            is_online = await device_manager.is_device_online(modem_id)
-            external_ip = await device_manager.get_device_external_ip(modem_id)
-
-            # Расчет success rate
-            success_rate = 0.0
-            if device and device.total_requests > 0:
-                success_rate = (device.successful_requests / device.total_requests) * 100
-
-            modem_responses.append(ModemManagementResponse(
-                modem_id=modem_id,
-                modem_type=modem_info['type'],
-                interface=modem_info['interface'],
-                status="online" if is_online else "offline",
-                external_ip=external_ip,
-                last_rotation=device.last_ip_rotation if device else None,
-                rotation_interval=rotation_config.rotation_interval if rotation_config else 600,
-                auto_rotation=rotation_config.auto_rotation if rotation_config else True,
-                total_requests=device.total_requests if device else 0,
-                success_rate=success_rate
-            ))
-
-        return modem_responses
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get modems: {str(e)}"
-        )
-
-
-@router.post("/modems/{modem_id}/rotate")
-async def rotate_modem_ip(
-        modem_id: str,
-        current_user=Depends(get_admin_user)
-):
-    """Принудительная ротация IP модема"""
-    try:
-        rotation_manager = get_rotation_manager()
-        if not rotation_manager:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Rotation manager not available"
-            )
-
-        success = await rotation_manager.rotate_modem_ip(modem_id)
-
-        if success:
-            return {"message": "IP rotation initiated successfully"}
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Failed to initiate IP rotation"
-            )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to rotate IP: {str(e)}"
-        )
-
-
-@router.post("/modems/rotate-all")
-async def rotate_all_modems(
-        current_user=Depends(get_admin_user)
-):
-    """Принудительная ротация IP всех модемов"""
-    try:
-        rotation_manager = get_rotation_manager()
-        if not rotation_manager:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Rotation manager not available"
-            )
-
-        results = await rotation_manager.rotate_all_modems()
-
-        successful = sum(1 for success in results.values() if success)
-        total = len(results)
+            devices_list.append(device_data)
 
         return {
-            "message": f"Rotation completed: {successful}/{total} modems rotated successfully",
-            "results": results
+            "devices": devices_list,
+            "total": len(devices_list),
+            "online": online_count,
+            "offline": len(devices_list) - online_count,
+            "maintenance": 0
         }
 
-    except HTTPException:
-        raise
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to rotate all modems: {str(e)}"
-        )
-
-
-@router.put("/modems/{modem_id}/rotation-interval")
-async def update_modem_rotation_interval(
-        modem_id: str,
-        interval: int,
-        current_user=Depends(get_admin_user),
-        db: AsyncSession = Depends(get_db)
-):
-    """Обновление интервала ротации модема"""
-    try:
-        if interval < 60:  # Минимум 1 минута
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Rotation interval must be at least 60 seconds"
-            )
-
-        device_uuid = uuid.UUID(modem_id)
-
-        # Обновление в БД
-        stmt = update(RotationConfig).where(
-            RotationConfig.device_id == device_uuid
-        ).values(
-            rotation_interval=interval,
-            updated_at=datetime.now(timezone.utc)
-        )
-
-        result = await db.execute(stmt)
-        if result.rowcount == 0:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Modem not found"
-            )
-
-        await db.commit()
-
-        # Обновление в rotation manager
-        rotation_manager = get_rotation_manager()
-        if rotation_manager:
-            await rotation_manager.update_modem_rotation_interval(modem_id, interval)
-
-        return {"message": "Rotation interval updated successfully"}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to update rotation interval: {str(e)}"
-        )
-
-
-@router.put("/modems/{modem_id}/auto-rotation")
-async def toggle_modem_auto_rotation(
-        modem_id: str,
-        enabled: bool,
-        current_user=Depends(get_admin_user),
-        db: AsyncSession = Depends(get_db)
-):
-    """Включение/выключение автоматической ротации модема"""
-    try:
-        rotation_manager = get_rotation_manager()
-        if not rotation_manager:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Rotation manager not available"
-            )
-
-        if enabled:
-            success = await rotation_manager.enable_auto_rotation(modem_id)
-        else:
-            success = await rotation_manager.disable_auto_rotation(modem_id)
-
-        if success:
-            action = "enabled" if enabled else "disabled"
-            return {"message": f"Auto rotation {action} successfully"}
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Failed to toggle auto rotation"
-            )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to toggle auto rotation: {str(e)}"
-        )
-
-
-@router.get("/logs/requests")
-async def get_request_logs(
-        limit: int = 100,
-        offset: int = 0,
-        modem_id: Optional[str] = None,
-        status_code: Optional[int] = None,
-        current_user=Depends(get_admin_user),
-        db: AsyncSession = Depends(get_db)
-):
-    """Получение логов запросов"""
-    try:
-        query = select(RequestLog)
-
-        if modem_id:
-            query = query.where(RequestLog.device_id == uuid.UUID(modem_id))
-
-        if status_code:
-            query = query.where(RequestLog.status_code == status_code)
-
-        query = query.order_by(RequestLog.created_at.desc()).limit(limit).offset(offset)
-
-        result = await db.execute(query)
-        logs = result.scalars().all()
-
+        # В случае ошибки возвращаем пустой список
         return {
-            "logs": [
-                {
-                    "id": str(log.id),
-                    "modem_id": str(log.device_id) if log.device_id else None,
-                    "client_ip": log.client_ip,
-                    "target_url": log.target_url,
-                    "method": log.method,
-                    "status_code": log.status_code,
-                    "response_time_ms": log.response_time_ms,
-                    "external_ip": log.external_ip,
-                    "created_at": log.created_at,
-                    "error_message": log.error_message
-                }
-                for log in logs
-            ],
-            "total": len(logs),
-            "limit": limit,
-            "offset": offset
+            "devices": [],
+            "total": 0,
+            "online": 0,
+            "offline": 0,
+            "maintenance": 0
         }
 
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get request logs: {str(e)}"
-        )
-
-
-@router.delete("/logs/cleanup")
-async def cleanup_old_logs(
-        days_to_keep: int = 30,
-        current_user=Depends(get_admin_user),
-        db: AsyncSession = Depends(get_db)
-):
-    """Очистка старых логов"""
-    try:
-        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days_to_keep)
-
-        # Удаление старых логов запросов
-        stmt = delete(RequestLog).where(RequestLog.created_at < cutoff_date)
-        result = await db.execute(stmt)
-        deleted_requests = result.rowcount
-
-        # Удаление старой истории IP
-        stmt = delete(IpHistory).where(IpHistory.last_seen < cutoff_date)
-        result = await db.execute(stmt)
-        deleted_ips = result.rowcount
-
-        await db.commit()
-
-        return {
-            "message": "Cleanup completed successfully",
-            "deleted_request_logs": deleted_requests,
-            "deleted_ip_history": deleted_ips,
-            "days_kept": days_to_keep
-        }
-
-    except Exception as e:
-        await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to cleanup logs: {str(e)}"
-        )
-
-
-@router.post("/system/restart")
-async def restart_system(
-        current_user=Depends(get_admin_user)
-):
-    """Перезапуск системы (только компонентов, не контейнера)"""
-    try:
-        # Получение всех менеджеров
-        device_manager = get_device_manager()
-        rotation_manager = get_rotation_manager()
-        proxy_server = get_proxy_server()
-
-        restart_results = {}
-
-        # Перезапуск modem manager
-        if device_manager:
-            await device_manager.stop()
-            await device_manager.start()
-            restart_results["device_manager"] = "restarted"
-
-        # Перезапуск rotation manager
-        if rotation_manager:
-            await rotation_manager.stop()
-            await rotation_manager.start()
-            restart_results["rotation_manager"] = "restarted"
-
-        # Перезапуск proxy server
-        if proxy_server:
-            await proxy_server.stop()
-            await proxy_server.start()
-            restart_results["proxy_server"] = "restarted"
-
-        return {
-            "message": "System components restarted successfully",
-            "results": restart_results
-        }
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to restart system: {str(e)}"
-        )
-
-
-@router.get("/system/health")
-async def get_system_health(
-        current_user=Depends(get_admin_user)
-):
-    """Детальная проверка здоровья системы"""
-    try:
-        health_data = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "components": {}
-        }
-
-        # Проверка modem manager
-        device_manager = get_device_manager()
-        if device_manager:
-            modems = await device_manager.get_all_devices()
-            health_data["components"]["device_manager"] = {
-                "status": "running",
-                "modems_count": len(modems)
-            }
-        else:
-            health_data["components"]["device_manager"] = {
-                "status": "not_running"
-            }
-
-        # Проверка rotation manager
-        rotation_manager = get_rotation_manager()
-        if rotation_manager:
-            health_data["components"]["rotation_manager"] = {
-                "status": "running"
-            }
-        else:
-            health_data["components"]["rotation_manager"] = {
-                "status": "not_running"
-            }
-
-        # Проверка proxy server
-        proxy_server = get_proxy_server()
-        if proxy_server and proxy_server.is_running():
-            health_data["components"]["proxy_server"] = {
-                "status": "running"
-            }
-        else:
-            health_data["components"]["proxy_server"] = {
-                "status": "not_running"
-            }
-
-        # Общий статус
-        all_running = all(
-            comp.get("status") == "running"
-            for comp in health_data["components"].values()
-        )
-
-        health_data["overall_status"] = "healthy" if all_running else "unhealthy"
-
-        return health_data
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get system health: {str(e)}"
-        )
-
-
-# Добавьте в backend/app/api/admin.py
 
 @router.post("/devices/discover")
-async def discover_devices():
+async def discover_devices(current_user=Depends(get_admin_user)):
     """Принудительное обнаружение устройств"""
     try:
         device_manager = get_device_manager()
@@ -672,15 +210,11 @@ async def discover_devices():
                 detail="Device manager not available"
             )
 
-        logger.info("🔍 Manual device discovery triggered")
-
         # Запускаем обнаружение устройств
         await device_manager.discover_all_devices()
 
         # Получаем результат
         devices = await device_manager.get_all_devices()
-
-        logger.info(f"✅ Manual discovery completed: {len(devices)} devices found")
 
         return {
             "message": "Device discovery completed",
@@ -689,9 +223,6 @@ async def discover_devices():
         }
 
     except Exception as e:
-        logger.error(f"❌ Error in device discovery: {e}")
-        import traceback
-        logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Discovery failed: {str(e)}"
@@ -699,14 +230,9 @@ async def discover_devices():
 
 
 @router.get("/devices/debug")
-async def debug_devices():
+async def debug_devices(current_user=Depends(get_admin_user)):
     """Отладочная информация об устройствах"""
     try:
-        import subprocess
-        import netifaces
-
-        logger.info("🔍 Debug info requested")
-
         # Проверяем ADB
         try:
             result = subprocess.run(['adb', 'devices', '-l'], capture_output=True, text=True, timeout=10)
@@ -753,7 +279,7 @@ async def debug_devices():
             dm_devices_count = 0
             dm_devices = []
 
-        result = {
+        return {
             "adb": {
                 "success": adb_success,
                 "output": adb_output
@@ -770,35 +296,26 @@ async def debug_devices():
             }
         }
 
-        logger.info(f"📊 Debug result: {result}")
-        return result
-
     except Exception as e:
-        logger.error(f"❌ Error in debug endpoint: {e}")
         return {"error": str(e)}
 
 
 @router.get("/devices/test-discovery")
-async def test_discovery():
+async def test_discovery(current_user=Depends(get_admin_user)):
     """Тестирование отдельных частей обнаружения"""
     try:
         device_manager = get_device_manager()
         if not device_manager:
             return {"error": "Device manager not available"}
 
-        logger.info("🧪 Testing discovery components...")
-
         # Тест 1: ADB устройства
         adb_devices = await device_manager.get_adb_devices()
-        logger.info(f"ADB devices: {adb_devices}")
 
         # Тест 2: USB интерфейсы
         usb_interfaces = await device_manager.detect_usb_tethering_interfaces()
-        logger.info(f"USB interfaces: {usb_interfaces}")
 
         # Тест 3: Android устройства с интерфейсами
         android_devices = await device_manager.discover_android_devices_with_interfaces()
-        logger.info(f"Android devices: {android_devices}")
 
         return {
             "adb_devices": adb_devices,
@@ -807,7 +324,353 @@ async def test_discovery():
         }
 
     except Exception as e:
-        logger.error(f"❌ Error in test discovery: {e}")
         import traceback
-        logger.error(f"Traceback: {traceback.format_exc()}")
         return {"error": str(e), "traceback": traceback.format_exc()}
+
+
+@router.post("/devices/{device_id}/rotate")
+async def rotate_device_ip(
+    device_id: str,
+    current_user=Depends(get_admin_user)
+):
+    """Принудительная ротация IP устройства"""
+    try:
+        device_manager = get_device_manager()
+        if not device_manager:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Device manager not available"
+            )
+
+        success = await device_manager.rotate_device_ip(device_id)
+
+        if success:
+            return {"message": "IP rotation initiated successfully"}
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Failed to initiate IP rotation"
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to rotate IP: {str(e)}"
+        )
+
+
+# Статистика системы
+@router.get("/system/stats", response_model=SystemStatsResponse)
+async def get_system_stats(
+    current_user=Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Получение общей статистики системы"""
+    try:
+        device_manager = get_device_manager()
+        if not device_manager:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Device manager not available"
+            )
+
+        # Получение информации об устройствах
+        devices = await device_manager.get_all_devices()
+        online_devices = 0
+
+        for device_id in devices.keys():
+            if await device_manager.is_device_online(device_id):
+                online_devices += 1
+
+        # Статистика запросов за сегодня
+        today = datetime.now(timezone.utc).date()
+
+        # Общее количество запросов
+        stmt = select(func.count(RequestLog.id)).where(
+            func.date(RequestLog.created_at) == today
+        )
+        result = await db.execute(stmt)
+        total_requests_today = result.scalar() or 0
+
+        # Успешные запросы
+        stmt = select(func.count(RequestLog.id)).where(
+            func.date(RequestLog.created_at) == today,
+            RequestLog.status_code.between(200, 299)
+        )
+        result = await db.execute(stmt)
+        successful_requests_today = result.scalar() or 0
+
+        # Неуспешные запросы
+        failed_requests_today = total_requests_today - successful_requests_today
+
+        # Уникальные IP за сегодня
+        stmt = select(func.count(func.distinct(RequestLog.external_ip))).where(
+            func.date(RequestLog.created_at) == today,
+            RequestLog.external_ip.isnot(None)
+        )
+        result = await db.execute(stmt)
+        unique_ips_today = result.scalar() or 0
+
+        # Среднее время ответа
+        stmt = select(func.avg(RequestLog.response_time_ms)).where(
+            func.date(RequestLog.created_at) == today,
+            RequestLog.response_time_ms.isnot(None)
+        )
+        result = await db.execute(stmt)
+        avg_response_time = result.scalar() or 0
+
+        # Последняя ротация
+        stmt = select(func.max(ProxyDevice.last_ip_rotation))
+        result = await db.execute(stmt)
+        last_rotation_time = result.scalar()
+
+        return SystemStatsResponse(
+            total_devices=len(devices),
+            online_devices=online_devices,
+            offline_devices=len(devices) - online_devices,
+            total_requests_today=total_requests_today,
+            successful_requests_today=successful_requests_today,
+            failed_requests_today=failed_requests_today,
+            unique_ips_today=unique_ips_today,
+            avg_response_time_ms=int(avg_response_time),
+            system_uptime="N/A",
+            last_rotation_time=last_rotation_time
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get system stats: {str(e)}"
+        )
+
+
+# Здоровье системы
+@router.get("/system/health")
+async def get_system_health(current_user=Depends(get_admin_user)):
+    """Детальная проверка здоровья системы"""
+    try:
+        health_data = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "components": {}
+        }
+
+        # Проверка device manager
+        device_manager = get_device_manager()
+        if device_manager:
+            devices = await device_manager.get_all_devices()
+            health_data["components"]["device_manager"] = {
+                "status": "running",
+                "devices_count": len(devices)
+            }
+        else:
+            health_data["components"]["device_manager"] = {
+                "status": "not_running"
+            }
+
+        # Проверка proxy server
+        proxy_server = get_proxy_server()
+        if proxy_server and proxy_server.is_running():
+            health_data["components"]["proxy_server"] = {
+                "status": "running"
+            }
+        else:
+            health_data["components"]["proxy_server"] = {
+                "status": "not_running"
+            }
+
+        # Общий статус
+        all_running = all(
+            comp.get("status") == "running"
+            for comp in health_data["components"].values()
+        )
+
+        health_data["overall_status"] = "healthy" if all_running else "unhealthy"
+
+        return health_data
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get system health: {str(e)}"
+        )
+
+
+# Логи
+@router.get("/logs/requests")
+async def get_request_logs(
+    limit: int = 100,
+    offset: int = 0,
+    device_id: Optional[str] = None,
+    status_code: Optional[int] = None,
+    current_user=Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Получение логов запросов"""
+    try:
+        query = select(RequestLog)
+
+        if device_id:
+            query = query.where(RequestLog.device_id == uuid.UUID(device_id))
+
+        if status_code:
+            query = query.where(RequestLog.status_code == status_code)
+
+        query = query.order_by(RequestLog.created_at.desc()).limit(limit).offset(offset)
+
+        result = await db.execute(query)
+        logs = result.scalars().all()
+
+        return {
+            "logs": [
+                {
+                    "id": str(log.id),
+                    "device_id": str(log.device_id) if log.device_id else None,
+                    "client_ip": log.client_ip,
+                    "target_url": log.target_url,
+                    "method": log.method,
+                    "status_code": log.status_code,
+                    "response_time_ms": log.response_time_ms,
+                    "external_ip": log.external_ip,
+                    "created_at": log.created_at,
+                    "error_message": log.error_message
+                }
+                for log in logs
+            ],
+            "total": len(logs),
+            "limit": limit,
+            "offset": offset
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get request logs: {str(e)}"
+        )
+
+
+# Диагностика ADB
+@router.get("/debug/adb")
+async def debug_adb(current_user=Depends(get_admin_user)):
+    """Диагностика ADB соединения"""
+    debug_info = {
+        "adb_status": "unknown",
+        "adb_version": None,
+        "adb_devices": [],
+        "raw_output": "",
+        "error_output": "",
+        "return_code": None,
+        "adb_path": None
+    }
+
+    try:
+        # Проверка наличия ADB
+        which_result = subprocess.run(['which', 'adb'], capture_output=True, text=True)
+        debug_info["adb_path"] = which_result.stdout.strip() if which_result.returncode == 0 else "Not found"
+
+        # Получение версии ADB
+        try:
+            version_result = await asyncio.create_subprocess_exec(
+                'adb', 'version',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            version_stdout, version_stderr = await version_result.communicate()
+            debug_info["adb_version"] = version_stdout.decode().strip()
+        except Exception as e:
+            debug_info["adb_version"] = f"Error: {str(e)}"
+
+        # Выполнение adb devices
+        result = await asyncio.create_subprocess_exec(
+            'adb', 'devices', '-l',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await result.communicate()
+
+        debug_info["return_code"] = result.returncode
+        debug_info["raw_output"] = stdout.decode()
+        debug_info["error_output"] = stderr.decode()
+
+        if result.returncode == 0:
+            debug_info["adb_status"] = "working"
+
+            # Парсинг устройств
+            lines = stdout.decode().strip().split('\n')[1:]  # Пропускаем заголовок
+            devices = []
+
+            for line in lines:
+                line = line.strip()
+                if line:
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        devices.append({
+                            "device_id": parts[0],
+                            "status": parts[1],
+                            "full_line": line
+                        })
+
+            debug_info["adb_devices"] = devices
+        else:
+            debug_info["adb_status"] = "error"
+
+    except FileNotFoundError:
+        debug_info["adb_status"] = "not_installed"
+        debug_info["error_output"] = "ADB not found in PATH"
+    except Exception as e:
+        debug_info["adb_status"] = "exception"
+        debug_info["error_output"] = str(e)
+
+    return debug_info
+
+
+@router.post("/debug/restart-adb")
+async def restart_adb(current_user=Depends(get_admin_user)):
+    """Перезапуск ADB сервера"""
+    try:
+        # Остановка ADB сервера
+        kill_result = await asyncio.create_subprocess_exec(
+            'adb', 'kill-server',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        await kill_result.communicate()
+
+        # Ожидание
+        await asyncio.sleep(2)
+
+        # Запуск ADB сервера
+        start_result = await asyncio.create_subprocess_exec(
+            'adb', 'start-server',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        await start_result.communicate()
+
+        # Ожидание
+        await asyncio.sleep(3)
+
+        # Проверка устройств
+        devices_result = await asyncio.create_subprocess_exec(
+            'adb', 'devices',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        devices_stdout, devices_stderr = await devices_result.communicate()
+
+        return {
+            "message": "ADB server restarted",
+            "kill_code": kill_result.returncode,
+            "start_code": start_result.returncode,
+            "devices_output": devices_stdout.decode(),
+            "devices_error": devices_stderr.decode()
+        }
+
+    except Exception as e:
+        return {
+            "error": str(e),
+            "message": "Failed to restart ADB server"
+        }
