@@ -1,4 +1,6 @@
 # backend/app/main.py
+import subprocess
+
 import uvicorn
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -565,6 +567,173 @@ async def rotate_modem(modem_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/admin/debug/adb")
+async def debug_adb():
+    """Диагностика ADB соединения"""
+    import asyncio
+    import subprocess
+
+    debug_info = {
+        "adb_status": "unknown",
+        "adb_version": None,
+        "adb_devices": [],
+        "raw_output": "",
+        "error_output": "",
+        "return_code": None,
+        "adb_path": None
+    }
+
+    try:
+        # Проверка наличия ADB
+        which_result = subprocess.run(['which', 'adb'], capture_output=True, text=True)
+        debug_info["adb_path"] = which_result.stdout.strip() if which_result.returncode == 0 else "Not found"
+
+        # Получение версии ADB
+        try:
+            version_result = await asyncio.create_subprocess_exec(
+                'adb', 'version',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            version_stdout, version_stderr = await version_result.communicate()
+            debug_info["adb_version"] = version_stdout.decode().strip()
+        except Exception as e:
+            debug_info["adb_version"] = f"Error: {str(e)}"
+
+        # Выполнение adb devices
+        result = await asyncio.create_subprocess_exec(
+            'adb', 'devices', '-l',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await result.communicate()
+
+        debug_info["return_code"] = result.returncode
+        debug_info["raw_output"] = stdout.decode()
+        debug_info["error_output"] = stderr.decode()
+
+        if result.returncode == 0:
+            debug_info["adb_status"] = "working"
+
+            # Парсинг устройств
+            lines = stdout.decode().strip().split('\n')[1:]  # Пропускаем заголовок
+            devices = []
+
+            for line in lines:
+                line = line.strip()
+                if line:
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        devices.append({
+                            "device_id": parts[0],
+                            "status": parts[1],
+                            "full_line": line
+                        })
+
+            debug_info["adb_devices"] = devices
+        else:
+            debug_info["adb_status"] = "error"
+
+    except FileNotFoundError:
+        debug_info["adb_status"] = "not_installed"
+        debug_info["error_output"] = "ADB not found in PATH"
+    except Exception as e:
+        debug_info["adb_status"] = "exception"
+        debug_info["error_output"] = str(e)
+
+    return debug_info
+
+
+@app.get("/admin/debug/udev")
+async def debug_udev():
+    """Диагностика USB правил"""
+    import os
+    import glob
+
+    debug_info = {
+        "udev_rules": [],
+        "usb_devices": [],
+        "permissions": {}
+    }
+
+    try:
+        # Проверка правил udev для Android
+        udev_files = glob.glob('/etc/udev/rules.d/*android*')
+        for file in udev_files:
+            try:
+                with open(file, 'r') as f:
+                    debug_info["udev_rules"].append({
+                        "file": file,
+                        "content": f.read()
+                    })
+            except Exception as e:
+                debug_info["udev_rules"].append({
+                    "file": file,
+                    "error": str(e)
+                })
+
+        # Проверка USB устройств
+        try:
+            result = subprocess.run(['lsusb'], capture_output=True, text=True)
+            if result.returncode == 0:
+                debug_info["usb_devices"] = result.stdout.split('\n')
+        except:
+            pass
+
+    except Exception as e:
+        debug_info["error"] = str(e)
+
+    return debug_info
+
+
+@app.post("/admin/debug/restart-adb")
+async def restart_adb():
+    """Перезапуск ADB сервера"""
+    try:
+        # Остановка ADB сервера
+        kill_result = await asyncio.create_subprocess_exec(
+            'adb', 'kill-server',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        await kill_result.communicate()
+
+        # Ожидание
+        await asyncio.sleep(2)
+
+        # Запуск ADB сервера
+        start_result = await asyncio.create_subprocess_exec(
+            'adb', 'start-server',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        await start_result.communicate()
+
+        # Ожидание
+        await asyncio.sleep(3)
+
+        # Проверка устройств
+        devices_result = await asyncio.create_subprocess_exec(
+            'adb', 'devices',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        devices_stdout, devices_stderr = await devices_result.communicate()
+
+        return {
+            "message": "ADB server restarted",
+            "kill_code": kill_result.returncode,
+            "start_code": start_result.returncode,
+            "devices_output": devices_stdout.decode(),
+            "devices_error": devices_stderr.decode()
+        }
+
+    except Exception as e:
+        return {
+            "error": str(e),
+            "message": "Failed to restart ADB server"
+        }
+
 # ... (остальные endpoints остаются без изменений)
 
 # Error handlers
@@ -593,27 +762,29 @@ async def startup_event():
     except Exception as e:
         logger.error(f"❌ Failed to initialize database: {e}")
 
-    # Запуск DeviceManager
-    device_manager = get_device_manager()
-    if device_manager:
-        try:
-            await device_manager.start()
-            logger.info("✅ Device manager started successfully")
-        except Exception as e:
-            logger.error(f"❌ Failed to start device manager: {e}")
+    # Импорт и инициализация менеджеров
+    try:
+        from .core.managers import init_managers
+        await init_managers()
+        logger.info("✅ All managers initialized successfully")
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize managers: {e}")
 
-    # Запуск ProxyServer
-    proxy_server = get_proxy_server()
-    if proxy_server:
-        try:
+    # Запуск ProxyServer отдельно (если нужен)
+    try:
+        from .core.managers import get_proxy_server
+        proxy_server = get_proxy_server()
+        if proxy_server and not proxy_server.is_running():
             await proxy_server.start()
             logger.info("✅ Proxy server started successfully")
-        except Exception as e:
-            logger.error(f"❌ Failed to start proxy server: {e}")
+    except Exception as e:
+        logger.error(f"❌ Failed to start proxy server: {e}")
 
     logger.info(f"📡 API running on http://{getattr(settings, 'api_host', '0.0.0.0')}:{getattr(settings, 'api_port', 8000)}")
     logger.info(f"🌐 Proxy server running on http://{getattr(settings, 'proxy_host', '0.0.0.0')}:{getattr(settings, 'proxy_port', 8080)}")
     logger.info("✅ Service ready to handle requests")
+
+
 
 
 # Shutdown event
@@ -621,23 +792,12 @@ async def startup_event():
 async def shutdown_event():
     logger.info("🛑 Mobile Proxy Service shutting down...")
 
-    # Остановка ProxyServer
-    proxy_server = get_proxy_server()
-    if proxy_server:
-        try:
-            await proxy_server.stop()
-            logger.info("✅ Proxy server stopped")
-        except Exception as e:
-            logger.error(f"❌ Error stopping proxy server: {e}")
-
-    # Остановка DeviceManager
-    device_manager = get_device_manager()
-    if device_manager:
-        try:
-            await device_manager.stop()
-            logger.info("✅ Device manager stopped")
-        except Exception as e:
-            logger.error(f"❌ Error stopping device manager: {e}")
+    try:
+        from .core.managers import cleanup_managers
+        await cleanup_managers()
+        logger.info("✅ All managers stopped successfully")
+    except Exception as e:
+        logger.error(f"❌ Error during cleanup: {e}")
 
 
 if __name__ == "__main__":
