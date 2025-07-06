@@ -154,8 +154,10 @@ lerna-debug.log*
 .pnpm-debug.log*
 
 # Logs
-logs
-*.log
+logs/*
+
+# pm2
+ecosystem.config.js
 
 # Runtime data
 pids
