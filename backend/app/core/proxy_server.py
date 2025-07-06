@@ -1,9 +1,8 @@
-# backend/app/core/proxy_server.py - ИСПРАВЛЕННАЯ ВЕРСИЯ
+# backend/app/core/proxy_server.py - ИСПРАВЛЕННАЯ ВЕРСИЯ V2
 
 import asyncio
 import aiohttp
 from aiohttp import web, ClientSession, ClientTimeout
-from aiohttp.web import Request, Response, StreamResponse
 import time
 from typing import Optional, Dict, Any
 from urllib.parse import urlparse
@@ -11,10 +10,6 @@ import structlog
 import socket
 
 from ..config import settings
-from ..models.database import AsyncSessionLocal
-from ..models.base import RequestLog
-from datetime import datetime, timezone
-import uuid
 
 logger = structlog.get_logger()
 
@@ -94,20 +89,63 @@ class ProxyServer:
 
     def setup_routes(self):
         """Настройка маршрутов"""
-        # Основной прокси-обработчик для всех запросов
-        self.app.router.add_route('*', '/{path:.*}', self.proxy_handler)
-
-        # Также добавим специальные обработчики
+        # Специальный обработчик для корневого пути
         self.app.router.add_get('/', self.root_handler)
+
+        # Специальный обработчик для proxy status
+        self.app.router.add_get('/status', self.status_handler)
+
+        # Основной прокси-обработчик для всех остальных запросов
+        self.app.router.add_route('*', '/{path:.*}', self.proxy_handler)
 
     async def root_handler(self, request):
         """Обработчик корневого пути"""
-        return web.json_response({
-            "service": "Mobile Proxy Server",
-            "status": "running",
-            "version": "1.0.0",
-            "available_devices": len(await self.device_manager.get_all_devices()) if self.device_manager else 0
-        })
+        try:
+            device_count = 0
+            if self.device_manager:
+                devices = await self.device_manager.get_all_devices()
+                device_count = len(devices)
+
+            return web.json_response({
+                "service": "Mobile Proxy Server",
+                "status": "running",
+                "version": "1.0.0",
+                "available_devices": device_count,
+                "message": "Proxy server is working. Use this server as HTTP/HTTPS proxy.",
+                "example": "curl -x http://192.168.1.50:8080 https://httpbin.org/ip"
+            })
+        except Exception as e:
+            logger.error(f"Error in root handler: {e}")
+            return web.json_response({
+                "service": "Mobile Proxy Server",
+                "status": "error",
+                "error": str(e)
+            }, status=500)
+
+    async def status_handler(self, request):
+        """Обработчик статуса прокси"""
+        try:
+            device_count = 0
+            online_devices = 0
+
+            if self.device_manager:
+                devices = await self.device_manager.get_all_devices()
+                device_count = len(devices)
+                online_devices = len([d for d in devices.values() if d.get('status') == 'online'])
+
+            return web.json_response({
+                "proxy_status": "running",
+                "total_devices": device_count,
+                "online_devices": online_devices,
+                "proxy_host": settings.proxy_host,
+                "proxy_port": settings.proxy_port
+            })
+        except Exception as e:
+            logger.error(f"Error in status handler: {e}")
+            return web.json_response({
+                "proxy_status": "error",
+                "error": str(e)
+            }, status=500)
 
     async def proxy_handler(self, request: web.Request) -> web.Response:
         """Основной обработчик прокси-запросов"""
@@ -122,7 +160,7 @@ class ProxyServer:
             if not target_url:
                 logger.warning(f"Bad request: no target URL - {request.url}")
                 return web.Response(
-                    text="Bad Request: Invalid URL - use proxy with target URL",
+                    text="Bad Request: Use this server as HTTP proxy. Example: curl -x http://192.168.1.50:8080 https://httpbin.org/ip",
                     status=400
                 )
 
@@ -142,40 +180,16 @@ class ProxyServer:
             # Выполнение запроса через устройство
             response = await self.forward_request(request, target_url, device)
 
-            # Логирование и статистика
+            # Логирование успешного запроса
             response_time = int((time.time() - start_time) * 1000)
             logger.info(f"Request completed: {response.status} in {response_time}ms")
-
-            await self.log_request(
-                device_id=device['id'],
-                client_ip=client_ip,
-                target_url=target_url,
-                method=request.method,
-                status_code=response.status,
-                response_time=response_time,
-                user_agent=request.headers.get('User-Agent', ''),
-                request_size=request.content_length or 0,
-                response_size=len(response.body) if hasattr(response, 'body') else 0
-            )
 
             return response
 
         except Exception as e:
             logger.error(f"Error in proxy handler: {e}")
-
-            # Логирование ошибки
-            response_time = int((time.time() - start_time) * 1000)
-            await self.log_request(
-                device_id=None,
-                client_ip=client_ip,
-                target_url=str(request.url),
-                method=request.method,
-                status_code=500,
-                response_time=response_time,
-                error_message=str(e),
-                user_agent=request.headers.get('User-Agent', ''),
-                request_size=request.content_length or 0
-            )
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
 
             return web.Response(
                 text=f"Internal Server Error: {str(e)}",
@@ -184,53 +198,70 @@ class ProxyServer:
 
     def get_client_ip(self, request: web.Request) -> str:
         """Получение IP адреса клиента"""
-        forwarded_for = request.headers.get('X-Forwarded-For')
-        if forwarded_for:
-            return forwarded_for.split(',')[0].strip()
+        try:
+            forwarded_for = request.headers.get('X-Forwarded-For')
+            if forwarded_for:
+                return forwarded_for.split(',')[0].strip()
 
-        real_ip = request.headers.get('X-Real-IP')
-        if real_ip:
-            return real_ip
+            real_ip = request.headers.get('X-Real-IP')
+            if real_ip:
+                return real_ip
 
-        if hasattr(request, 'remote') and request.remote:
-            return request.remote
+            # Исправленное получение remote IP
+            transport = request.transport
+            if transport:
+                peername = transport.get_extra_info('peername')
+                if peername:
+                    return peername[0]
 
-        return 'unknown'
+            return 'unknown'
+        except Exception as e:
+            logger.error(f"Error getting client IP: {e}")
+            return 'unknown'
 
     def get_target_url(self, request: web.Request) -> Optional[str]:
         """Получение целевого URL из запроса"""
-        # Для прямых HTTP запросов через прокси
-        if request.path.startswith('http'):
-            return request.path
+        try:
+            # Для CONNECT запросов (HTTPS туннелирование)
+            if request.method == 'CONNECT':
+                return f"https://{request.path_qs}"
 
-        # Проверяем заголовки
-        host = request.headers.get('Host')
-        if host and not host.startswith('127.0.0.1') and not host.startswith('localhost') and not host.startswith(
-            '192.168.1.50'):
-            scheme = 'https' if request.secure else 'http'
-            return f"{scheme}://{host}{request.path_qs}"
+            # Для прямых HTTP запросов через прокси (полный URL в пути)
+            if request.path_qs.startswith('http://') or request.path_qs.startswith('https://'):
+                return request.path_qs
 
-        # Для тестирования - если это запрос к нашему серверу, возвращаем тестовый URL
-        if request.path == '/':
+            # Для запросов с Host заголовком
+            host = request.headers.get('Host')
+            if host and host not in ['192.168.1.50:8080', '127.0.0.1:8080', 'localhost:8080']:
+                scheme = 'https' if request.secure else 'http'
+                return f"{scheme}://{host}{request.path_qs}"
+
+            # Если это запрос к самому прокси-серверу
             return None
 
-        # Возвращаем тестовый URL для отладки
-        return "https://httpbin.org/ip"
+        except Exception as e:
+            logger.error(f"Error getting target URL: {e}")
+            return None
 
     async def select_device(self, request: web.Request) -> Optional[Dict[str, Any]]:
         """Выбор устройства для проксирования"""
-        if not self.device_manager:
+        try:
+            if not self.device_manager:
+                return None
+
+            # Проверка заголовка для выбора конкретного устройства
+            device_id = request.headers.get('X-Proxy-Device-ID')
+            if device_id:
+                device = await self.device_manager.get_device_by_id(device_id)
+                if device and device.get('status') == 'online':
+                    return device
+
+            # Выбор случайного доступного устройства
+            return await self.device_manager.get_random_device()
+
+        except Exception as e:
+            logger.error(f"Error selecting device: {e}")
             return None
-
-        # Проверка заголовка для выбора конкретного устройства
-        device_id = request.headers.get('X-Proxy-Device-ID')
-        if device_id:
-            device = await self.device_manager.get_device_by_id(device_id)
-            if device and device['status'] == 'online':
-                return device
-
-        # Выбор случайного доступного устройства
-        return await self.device_manager.get_random_device()
 
     async def forward_request(
         self,
@@ -258,15 +289,14 @@ class ProxyServer:
 
             logger.info(f"Forwarding {request.method} {target_url} via device {device['id']}")
 
-            # Простое выполнение запроса без использования устройства как прокси
-            # (для начала делаем прямой запрос)
+            # Выполнение запроса через выбранное устройство
             async with self.session.request(
                 method=request.method,
                 url=target_url,
                 headers=headers,
                 data=body,
                 allow_redirects=False,
-                ssl=False  # Отключаем проверку SSL
+                ssl=False  # Отключаем проверку SSL для упрощения
             ) as response:
 
                 # Получение тела ответа
@@ -299,31 +329,12 @@ class ProxyServer:
                 status=502
             )
 
-    async def log_request(
-        self,
-        device_id: Optional[str],
-        client_ip: str,
-        target_url: str,
-        method: str,
-        status_code: int,
-        response_time: int,
-        user_agent: str = '',
-        request_size: int = 0,
-        response_size: int = 0,
-        error_message: str = ''
-    ):
-        """Логирование запроса в базу данных"""
-        try:
-            # Пока просто логируем в консоль
-            logger.info(
-                f"Request logged: {method} {target_url} -> {status_code} ({response_time}ms) "
-                f"from {client_ip} via {device_id or 'direct'}"
-            )
-
-            # TODO: добавить запись в БД когда она будет готова
-
         except Exception as e:
-            logger.error(f"Failed to log request: {e}")
+            logger.error(f"Unexpected error forwarding request: {e}")
+            return web.Response(
+                text=f"Internal Server Error: {str(e)}",
+                status=500
+            )
 
     async def get_stats(self) -> Dict[str, Any]:
         """Получение статистики прокси-сервера"""

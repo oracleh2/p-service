@@ -36,3 +36,24 @@ tail -n 20 /var/www/p-service/logs/backend-error-0.log | grep -i proxy
 echo ""
 echo "8. Testing proxy with device ID:"
 curl -X POST "http://192.168.1.50:8000/admin/modems/android_AH3SCP4B11207250/test" | jq .
+
+echo "🔍 Checking proxy server error details..."
+
+echo "1. Full error from logs:"
+echo "Last 30 lines containing proxy errors:"
+grep -A 10 -B 5 "proxy_server.py.*line 171" /var/www/p-service/logs/backend-error*.log | tail -30
+
+echo ""
+echo "2. Testing proxy with a proper HTTP request:"
+echo "Testing with httpbin.org through proxy:"
+curl -v -x http://192.168.1.50:8080 https://httpbin.org/ip 2>&1
+
+echo ""
+echo "3. Testing proxy root endpoint:"
+echo "GET request to proxy root:"
+curl -v http://192.168.1.50:8080/ 2>&1
+
+echo ""
+echo "4. Check if the issue is in get_target_url function:"
+echo "Let's see recent error logs:"
+tail -50 /var/www/p-service/logs/backend-error*.log | grep -A 5 -B 5 "proxy_handler\|get_target_url\|select_device"
