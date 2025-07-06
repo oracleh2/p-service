@@ -734,6 +734,227 @@ async def restart_adb():
             "message": "Failed to restart ADB server"
         }
 
+
+@app.post("/admin/modems/{modem_id}/test")
+async def simple_test_modem(modem_id: str):
+    """Простое тестирование модема без прокси-сервера"""
+    device_manager = get_device_manager()
+    if not device_manager:
+        raise HTTPException(status_code=503, detail="Device manager not available")
+
+    try:
+        logger.info(f"Testing device: {modem_id}")
+
+        # Получаем информацию об устройстве
+        all_devices = await device_manager.get_all_devices()
+
+        if modem_id not in all_devices:
+            raise HTTPException(status_code=404, detail="Device not found")
+
+        device = all_devices[modem_id]
+        logger.info(f"Device found: {device}")
+
+        # Получаем внешний IP
+        external_ip = await device_manager.get_device_external_ip(modem_id)
+        logger.info(f"External IP: {external_ip}")
+
+        # Проверяем статус
+        is_online = await device_manager.is_device_online(modem_id)
+        logger.info(f"Is online: {is_online}")
+
+        # Простая проверка ADB команды для Android устройств
+        test_results = {
+            "device_id": modem_id,
+            "device_type": device['type'],
+            "status": device['status'],
+            "external_ip": external_ip,
+            "is_online": is_online,
+            "test_timestamp": time.time(),
+            "test_details": {}
+        }
+
+        if device['type'] == 'android':
+            try:
+                # Тестируем ADB соединение
+                device_id = device['adb_id']
+
+                # Простая ADB команда
+                result = await asyncio.create_subprocess_exec(
+                    'adb', '-s', device_id, 'shell', 'echo', 'test',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await result.communicate()
+
+                adb_test = {
+                    "return_code": result.returncode,
+                    "stdout": stdout.decode().strip(),
+                    "stderr": stderr.decode().strip(),
+                    "success": result.returncode == 0 and "test" in stdout.decode()
+                }
+
+                test_results["test_details"]["adb_connection"] = adb_test
+
+                # Тест получения IP
+                if adb_test["success"]:
+                    ip_result = await asyncio.create_subprocess_exec(
+                        'adb', '-s', device_id, 'shell', 'ip', 'route', 'get', '8.8.8.8',
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    ip_stdout, ip_stderr = await ip_result.communicate()
+
+                    test_results["test_details"]["ip_test"] = {
+                        "return_code": ip_result.returncode,
+                        "stdout": ip_stdout.decode().strip(),
+                        "stderr": ip_stderr.decode().strip(),
+                        "success": ip_result.returncode == 0
+                    }
+
+            except Exception as e:
+                test_results["test_details"]["android_test_error"] = str(e)
+
+        # Простой HTTP тест (без прокси)
+        try:
+            import aiohttp
+            start_time = time.time()
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    'https://httpbin.org/ip',
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        response_time = int((time.time() - start_time) * 1000)
+
+                        test_results["test_details"]["direct_http_test"] = {
+                            "success": True,
+                            "response_time_ms": response_time,
+                            "server_ip": data.get('origin', 'Unknown'),
+                            "status_code": response.status
+                        }
+                    else:
+                        test_results["test_details"]["direct_http_test"] = {
+                            "success": False,
+                            "status_code": response.status
+                        }
+
+        except Exception as e:
+            test_results["test_details"]["direct_http_test"] = {
+                "success": False,
+                "error": str(e)
+            }
+
+        # Определяем общий результат теста
+        overall_success = (
+            is_online and
+            external_ip is not None and
+            test_results["test_details"].get("direct_http_test", {}).get("success", False)
+        )
+
+        test_results["overall_success"] = overall_success
+        test_results["message"] = "Test completed successfully" if overall_success else "Test completed with issues"
+
+        return test_results
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error testing device {modem_id}: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Test failed: {str(e)}")
+
+
+@app.get("/admin/proxy-server/status")
+async def get_proxy_server_status():
+    """Проверка статуса прокси-сервера"""
+    try:
+        proxy_server = get_proxy_server()
+
+        if not proxy_server:
+            return {
+                "proxy_server": "not_initialized",
+                "is_running": False,
+                "message": "Proxy server not initialized"
+            }
+
+        is_running = proxy_server.is_running()
+
+        return {
+            "proxy_server": "initialized",
+            "is_running": is_running,
+            "message": "Proxy server running" if is_running else "Proxy server stopped",
+            "config": {
+                "host": settings.PROXY_HOST if hasattr(settings, 'PROXY_HOST') else "0.0.0.0",
+                "port": settings.PROXY_PORT if hasattr(settings, 'PROXY_PORT') else 8080
+            }
+        }
+
+    except Exception as e:
+        return {
+            "proxy_server": "error",
+            "is_running": False,
+            "message": f"Error checking proxy server: {str(e)}"
+        }
+
+
+@app.post("/admin/proxy-server/start")
+async def start_proxy_server():
+    """Запуск прокси-сервера"""
+    try:
+        proxy_server = get_proxy_server()
+
+        if not proxy_server:
+            raise HTTPException(status_code=503, detail="Proxy server not initialized")
+
+        if proxy_server.is_running():
+            return {
+                "message": "Proxy server is already running",
+                "status": "running"
+            }
+
+        await proxy_server.start()
+
+        return {
+            "message": "Proxy server started successfully",
+            "status": "running"
+        }
+
+    except Exception as e:
+        logger.error(f"Error starting proxy server: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to start proxy server: {str(e)}")
+
+
+@app.post("/admin/proxy-server/stop")
+async def stop_proxy_server():
+    """Остановка прокси-сервера"""
+    try:
+        proxy_server = get_proxy_server()
+
+        if not proxy_server:
+            raise HTTPException(status_code=503, detail="Proxy server not initialized")
+
+        if not proxy_server.is_running():
+            return {
+                "message": "Proxy server is already stopped",
+                "status": "stopped"
+            }
+
+        await proxy_server.stop()
+
+        return {
+            "message": "Proxy server stopped successfully",
+            "status": "stopped"
+        }
+
+    except Exception as e:
+        logger.error(f"Error stopping proxy server: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to stop proxy server: {str(e)}")
+
+
+
 # ... (остальные endpoints остаются без изменений)
 
 # Error handlers

@@ -130,3 +130,19 @@ DEFAULT_SYSTEM_CONFIG = {
         "config_type": "integer"
     }
 }
+
+# Константы для совместимости
+PROXY_HOST = settings.PROXY_HOST
+PROXY_PORT = settings.PROXY_PORT
+MAX_CONCURRENT_CONNECTIONS = settings.MAX_CONCURRENT_CONNECTIONS
+REQUEST_TIMEOUT_SECONDS = settings.REQUEST_TIMEOUT_SECONDS
+BUFFER_SIZE = settings.BUFFER_SIZE
+DEFAULT_ROTATION_INTERVAL = settings.default_rotation_interval
+MAX_ROTATION_ATTEMPTS = settings.max_rotation_attempts
+ROTATION_TIMEOUT_SECONDS = settings.rotation_timeout_seconds
+ROTATION_RETRY_DELAY_SECONDS = settings.rotation_retry_delay_seconds
+MAX_DEVICES = settings.max_devices
+MAX_REQUESTS_PER_MINUTE = settings.max_requests_per_minute
+HEALTH_CHECK_INTERVAL = settings.health_check_interval
+HEARTBEAT_TIMEOUT = settings.heartbeat_timeout
+LOG_RETENTION_DAYS = settings.log_retention_days
