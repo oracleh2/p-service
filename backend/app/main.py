@@ -8,26 +8,13 @@ import logging
 import time
 import random
 from datetime import datetime, timezone
-from .api import auth
 from .models.database import init_db
 from .models.config import settings
 from .core.modem_manager import ModemManager  # Добавить эту строку
 from .api import auth, proxy, admin, stats
+from .core.managers import init_managers
 
-
-# Добавить эту строку:
-modem_manager = ModemManager()
-
-def get_modem_manager():
-    return modem_manager
-
-def get_proxy_server():
-    # Заглушка - позже можно подключить реальный прокси сервер
-    return None
-
-def get_rotation_manager():
-    # Заглушка - позже можно подключить менеджер ротации
-    return None
+init_managers()
 
 created_users = []
 

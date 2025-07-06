@@ -6,7 +6,7 @@ import uuid
 import asyncio
 
 from ..api.auth import get_current_active_user
-from ..main import get_modem_manager, get_proxy_server, get_rotation_manager
+from ..core.managers import get_modem_manager, get_proxy_server, get_rotation_manager
 from ..config import settings
 
 router = APIRouter()
@@ -651,9 +651,9 @@ const headers = {{
     'X-Proxy-Modem-ID': 'your-modem-id'
 }};
 
-fetch('https://httpbin.org/ip', {{ 
+fetch('https://httpbin.org/ip', {{
     agent,
-    headers 
+    headers
 }})
     .then(response => response.json())
     .then(data => console.log(data));
