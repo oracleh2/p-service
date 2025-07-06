@@ -357,10 +357,13 @@ const fetchDashboardData = async () => {
         }
 
         // Update recent modems
-        recentModems.value = modemsResponse.data.slice(0, 5).map(modem => ({
-            id: modem.modem_id,
-            name: modem.modem_id,
-            type: modem.modem_type,
+        const modemsData = modemsResponse.data
+        const modemsArray = Array.isArray(modemsData) ? modemsData : (modemsData.devices || [])
+
+       recentModems.value = modemsArray.slice(0, 5).map(modem => ({
+            id: modem.modem_id || modem.id,
+            name: modem.device_info || modem.name || modem.modem_id || modem.id,
+            type: modem.modem_type || modem.device_type || modem.type,
             status: modem.status,
             externalIp: modem.external_ip,
             lastSeen: new Date().toISOString()
