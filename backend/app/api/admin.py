@@ -179,6 +179,82 @@ async def admin_get_devices_legacy():
         logger.error(f"Error getting devices: {e}")
         return []
 
+@router.get("/devices/{device_id}")
+async def admin_get_device_by_id_legacy(device_id: str):
+    """Получение информации о конкретном устройстве (legacy endpoint)"""
+    try:
+        from ..core.managers import get_device_manager
+        device_manager = get_device_manager()
+        if not device_manager:
+            raise HTTPException(status_code=404, detail="Device manager not available")
+
+        logger.info(f"Getting info for device: {device_id}")
+
+        # Получаем все устройства
+        all_devices = await device_manager.get_all_devices()
+
+        if device_id not in all_devices:
+            raise HTTPException(status_code=404, detail="Device not found")
+
+        device_info = all_devices[device_id]
+        logger.info(f"Device info: {device_info}")
+
+        # Получаем внешний IP
+        external_ip = await device_manager.get_device_external_ip(device_id)
+
+        # Базовые данные устройства
+        device_data = {
+            "modem_id": device_id,
+            "modem_type": device_info.get('type', 'unknown'),
+            "status": device_info.get('status', 'unknown'),
+            "external_ip": external_ip or "Not connected",
+            "operator": device_info.get('operator', 'Unknown'),
+            "interface": device_info.get('interface', 'Unknown'),
+            "device_info": device_info.get('device_info', f"Device {device_id}"),
+            "last_rotation": time.time() * 1000,
+            "total_requests": 0,
+            "successful_requests": 0,
+            "failed_requests": 0,
+            "success_rate": 100.0,
+            "avg_response_time": 250,
+            "auto_rotation": True,
+            "rotation_interval": 600,
+            "last_seen": device_info.get('last_seen', datetime.now().isoformat()),
+            "rotation_methods": device_info.get('rotation_methods', [])
+        }
+
+        # Добавляем специфичную информацию по типу
+        if device_info.get('type') == 'android':
+            device_data.update({
+                'manufacturer': device_info.get('manufacturer', 'Unknown'),
+                'model': device_info.get('model', 'Unknown'),
+                'android_version': device_info.get('android_version', 'Unknown'),
+                'battery_level': device_info.get('battery_level', 0),
+                'adb_id': device_info.get('adb_id', ''),
+            })
+        elif device_info.get('type') == 'usb_modem':
+            device_data.update({
+                'signal_strength': device_info.get('signal_strength', 'N/A'),
+                'technology': device_info.get('technology', 'Unknown'),
+                'manufacturer': device_info.get('manufacturer', 'Unknown'),
+                'model': device_info.get('model', 'Unknown'),
+            })
+        elif device_info.get('type') == 'raspberry_pi':
+            device_data.update({
+                'interface_type': 'PPP/WWAN',
+                'connection_type': 'Network modem'
+            })
+
+        logger.info(f"Returning device data: {device_data}")
+        return device_data
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error getting device {device_id}: {str(e)}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @router.post("/devices/discover")
 async def discover_devices(current_user=Depends(get_admin_user)):
