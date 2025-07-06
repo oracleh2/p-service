@@ -11,8 +11,8 @@ from ..models.database import get_db, get_system_config, update_system_config
 
 from ..models.base import ProxyDevice, RotationConfig, SystemConfig, RequestLog, IpHistory
 from ..api.auth import get_admin_user
-# from ..main import get_modem_manager, get_rotation_manager, get_proxy_server
-from ..core.managers import get_modem_manager, get_proxy_server, get_rotation_manager
+# from ..main import get_device_manager, get_rotation_manager, get_proxy_server
+from ..core.managers import get_device_manager, get_proxy_server, get_rotation_manager
 from ..config import DEFAULT_SYSTEM_CONFIG
 
 router = APIRouter()
@@ -162,19 +162,19 @@ async def get_system_stats(
 ):
     """Получение общей статистики системы"""
     try:
-        modem_manager = get_modem_manager()
-        if not modem_manager:
+        device_manager = get_device_manager()
+        if not device_manager:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Modem manager not available"
             )
 
         # Получение информации о модемах
-        modems = await modem_manager.get_all_modems()
+        modems = await device_manager.get_all_devices()
         online_modems = 0
 
         for modem_id in modems.keys():
-            if await modem_manager.is_modem_online(modem_id):
+            if await device_manager.is_device_online(modem_id):
                 online_modems += 1
 
         # Статистика запросов за сегодня
@@ -248,14 +248,14 @@ async def get_modems_management(
 ):
     """Получение списка модемов для управления"""
     try:
-        modem_manager = get_modem_manager()
-        if not modem_manager:
+        device_manager = get_device_manager()
+        if not device_manager:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Modem manager not available"
             )
 
-        modems = await modem_manager.get_all_modems()
+        modems = await device_manager.get_all_devices()
         modem_responses = []
 
         for modem_id, modem_info in modems.items():
@@ -276,8 +276,8 @@ async def get_modems_management(
                 rotation_config = result.scalar_one_or_none()
 
             # Получение статуса
-            is_online = await modem_manager.is_modem_online(modem_id)
-            external_ip = await modem_manager.get_modem_external_ip(modem_id)
+            is_online = await device_manager.is_device_online(modem_id)
+            external_ip = await device_manager.get_device_external_ip(modem_id)
 
             # Расчет success rate
             success_rate = 0.0
@@ -559,17 +559,17 @@ async def restart_system(
     """Перезапуск системы (только компонентов, не контейнера)"""
     try:
         # Получение всех менеджеров
-        modem_manager = get_modem_manager()
+        device_manager = get_device_manager()
         rotation_manager = get_rotation_manager()
         proxy_server = get_proxy_server()
 
         restart_results = {}
 
         # Перезапуск modem manager
-        if modem_manager:
-            await modem_manager.stop()
-            await modem_manager.start()
-            restart_results["modem_manager"] = "restarted"
+        if device_manager:
+            await device_manager.stop()
+            await device_manager.start()
+            restart_results["device_manager"] = "restarted"
 
         # Перезапуск rotation manager
         if rotation_manager:
@@ -607,15 +607,15 @@ async def get_system_health(
         }
 
         # Проверка modem manager
-        modem_manager = get_modem_manager()
-        if modem_manager:
-            modems = await modem_manager.get_all_modems()
-            health_data["components"]["modem_manager"] = {
+        device_manager = get_device_manager()
+        if device_manager:
+            modems = await device_manager.get_all_devices()
+            health_data["components"]["device_manager"] = {
                 "status": "running",
                 "modems_count": len(modems)
             }
         else:
-            health_data["components"]["modem_manager"] = {
+            health_data["components"]["device_manager"] = {
                 "status": "not_running"
             }
 
