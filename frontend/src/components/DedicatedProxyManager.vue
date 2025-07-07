@@ -761,38 +761,6 @@ export default {
       })
     }
 
-    const closeUsageModal = () => {
-      showUsageModal.value = false
-      usageExamples.value = null
-    }
-
-    // Инициализация
-    onMounted(async () => {
-      await loadProxies()
-      await loadAvailableDevices()
-    })
-
-    return {
-      loading,
-      proxies,
-      availableDevices,
-      showCreateModal,
-      showUsageModal,
-      usageExamples,
-      showPasswords,
-      newProxy,
-      showDebug,
-      debugResults,
-      loadProxies,
-      createProxy,
-      removeProxy,
-      regenerateCredentials,
-      showUsageExamples,
-      copyToClipboard,
-      togglePassword,
-      getDeviceStatusClass,
-      closeCreateModal,
-      closeUsageModal,
     const simpleTest = async () => {
       console.log('🧪 Simple device test...')
 
@@ -843,6 +811,40 @@ export default {
         }
       }
     }
+
+    const closeUsageModal = () => {
+      showUsageModal.value = false
+      usageExamples.value = null
+    }
+
+    // Инициализация
+    onMounted(async () => {
+      await loadProxies()
+      await loadAvailableDevices()
+    })
+
+    return {
+      loading,
+      proxies,
+      availableDevices,
+      showCreateModal,
+      showUsageModal,
+      usageExamples,
+      showPasswords,
+      newProxy,
+      showDebug,
+      debugResults,
+      loadProxies,
+      createProxy,
+      removeProxy,
+      regenerateCredentials,
+      showUsageExamples,
+      copyToClipboard,
+      togglePassword,
+      getDeviceStatusClass,
+      closeCreateModal,
+      closeUsageModal,
+
   }
 }
 </script>
