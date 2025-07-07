@@ -16,6 +16,7 @@
         <button @click="debugDevices" class="btn-warning">Диагностировать устройства</button>
         <button @click="testAPI" class="btn-secondary">Тест API</button>
         <button @click="simpleTest" class="btn-primary">Простой тест</button>
+        <button @click="syncDevicesToDB" class="btn-info">Синхронизировать устройства с БД</button>
         <button @click="forceRefresh" class="btn-success">Принудительное обновление</button>
         <button @click="showDebug = false" class="btn-danger">Скрыть диагностику</button>
       </div>
@@ -556,57 +557,6 @@ export default {
       }
     }
 
-    const simpleTest = async () => {
-      console.log('🧪 Simple device test...')
-
-      try {
-        // Используем api utility с авторизацией
-        const response = await api.get('/admin/devices')
-        console.log('📡 API response:', response.data)
-
-        const devices = response.data
-        if (Array.isArray(devices) && devices.length > 0) {
-          // Обновляем доступные устройства напрямую
-          const proxyDeviceIds = new Set(proxies.value.map(p => p.device_id))
-          availableDevices.value = devices.filter(d => {
-            const deviceId = d.modem_id || d.id
-            return !proxyDeviceIds.has(deviceId)
-          })
-
-          console.log('🎯 Updated available devices:', availableDevices.value)
-
-          debugResults.value = {
-            simple_test: {
-              success: true,
-              total_devices: devices.length,
-              available_devices: availableDevices.value.length,
-              devices: devices,
-              available: availableDevices.value
-            }
-          }
-        } else {
-          console.log('❌ No devices found')
-          debugResults.value = {
-            simple_test: {
-              success: false,
-              message: 'No devices found in API response',
-              response: devices
-            }
-          }
-        }
-
-      } catch (error) {
-        console.error('❌ Simple test failed:', error)
-        debugResults.value = {
-          simple_test: {
-            success: false,
-            error: error.message,
-            details: error
-          }
-        }
-      }
-    }
-
     const forceRefresh = async () => {
       console.log('🔄 Force refresh...')
       try {
@@ -634,6 +584,39 @@ export default {
             error: error.message
           }
         }
+      }
+    }
+
+    const syncDevicesToDB = async () => {
+      console.log('🔄 Syncing devices to database...')
+      try {
+        const response = await api.post('/admin/devices/sync-to-db')
+        console.log('✅ Sync completed:', response.data)
+
+        debugResults.value = {
+          sync_result: {
+            success: true,
+            discovered_devices: response.data.discovered_devices,
+            database_devices: response.data.database_devices,
+            message: response.data.message,
+            devices: response.data.devices
+          }
+        }
+
+        // Обновляем список доступных устройств
+        await loadAvailableDevices()
+
+        alert(`Устройства синхронизированы!\nОбнаружено: ${response.data.discovered_devices}\nВ БД: ${response.data.database_devices}`)
+
+      } catch (error) {
+        console.error('❌ Sync failed:', error)
+        debugResults.value = {
+          sync_result: {
+            success: false,
+            error: error.response?.data?.detail || error.message
+          }
+        }
+        alert(`Ошибка синхронизации: ${error.response?.data?.detail || error.message}`)
       }
     }
 
@@ -810,10 +793,55 @@ export default {
       getDeviceStatusClass,
       closeCreateModal,
       closeUsageModal,
-      debugDevices,
-      testAPI,
-      simpleTest,
-      forceRefresh
+    const simpleTest = async () => {
+      console.log('🧪 Simple device test...')
+
+      try {
+        // Используем api utility с авторизацией
+        const response = await api.get('/admin/devices')
+        console.log('📡 API response:', response.data)
+
+        const devices = response.data
+        if (Array.isArray(devices) && devices.length > 0) {
+          // Обновляем доступные устройства напрямую
+          const proxyDeviceIds = new Set(proxies.value.map(p => p.device_id))
+          availableDevices.value = devices.filter(d => {
+            const deviceId = d.modem_id || d.id
+            return !proxyDeviceIds.has(deviceId)
+          })
+
+          console.log('🎯 Updated available devices:', availableDevices.value)
+
+          debugResults.value = {
+            simple_test: {
+              success: true,
+              total_devices: devices.length,
+              available_devices: availableDevices.value.length,
+              devices: devices,
+              available: availableDevices.value
+            }
+          }
+        } else {
+          console.log('❌ No devices found')
+          debugResults.value = {
+            simple_test: {
+              success: false,
+              message: 'No devices found in API response',
+              response: devices
+            }
+          }
+        }
+
+      } catch (error) {
+        console.error('❌ Simple test failed:', error)
+        debugResults.value = {
+          simple_test: {
+            success: false,
+            error: error.message,
+            details: error
+          }
+        }
+      }
     }
   }
 }
@@ -922,7 +950,7 @@ export default {
   flex-wrap: wrap;
 }
 
-.btn-primary, .btn-secondary, .btn-warning, .btn-danger, .btn-success {
+.btn-primary, .btn-secondary, .btn-warning, .btn-danger, .btn-success, .btn-info {
   padding: 8px 16px;
   border: none;
   border-radius: 4px;
@@ -936,6 +964,7 @@ export default {
 .btn-warning { background: #f59e0b; color: white; }
 .btn-danger { background: #ef4444; color: white; }
 .btn-success { background: #10b981; color: white; }
+.btn-info { background: #06b6d4; color: white; }
 
 .modal-overlay {
   position: fixed;

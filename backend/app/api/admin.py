@@ -344,6 +344,68 @@ async def admin_get_devices_legacy():
         logger.error(f"Error getting devices: {e}")
         return []
 
+
+@router.post("/devices/sync-to-db")
+async def sync_devices_to_database(current_user=Depends(get_admin_user)):
+    """Принудительная синхронизация обнаруженных устройств с базой данных"""
+    try:
+        device_manager = get_device_manager()
+        if not device_manager:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Device manager not available"
+            )
+
+        # Сначала обнаруживаем устройства
+        await device_manager.discover_all_devices()
+
+        # Затем принудительно синхронизируем с БД
+        synced_count = await device_manager.force_sync_to_db()
+
+        # Получаем актуальный список из БД
+        db_devices = await device_manager.get_devices_from_db()
+
+        return {
+            "message": "Devices synchronized to database successfully",
+            "discovered_devices": synced_count,
+            "database_devices": len(db_devices),
+            "devices": db_devices
+        }
+
+    except Exception as e:
+        logger.error(f"Error syncing devices to database: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to sync devices to database: {str(e)}"
+        )
+
+
+@router.get("/devices/from-db")
+async def get_devices_from_database(current_user=Depends(get_admin_user)):
+    """Получение списка устройств из базы данных"""
+    try:
+        device_manager = get_device_manager()
+        if not device_manager:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Device manager not available"
+            )
+
+        db_devices = await device_manager.get_devices_from_db()
+
+        return {
+            "message": "Devices from database",
+            "count": len(db_devices),
+            "devices": db_devices
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting devices from database: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get devices from database: {str(e)}"
+        )
+
 @router.get("/devices/{device_id}")
 async def admin_get_device_by_id_legacy(device_id: str):
     """Получение информации о конкретном устройстве (legacy endpoint)"""

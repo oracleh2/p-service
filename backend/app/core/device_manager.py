@@ -12,6 +12,11 @@ from datetime import datetime, timezone
 import structlog
 import psutil
 import random
+import uuid
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, update
+from ..models.database import AsyncSessionLocal
+from ..models.base import ProxyDevice
 
 logger = structlog.get_logger()
 
@@ -35,7 +40,7 @@ class DeviceManager:
         logger.info("Device manager stopped")
 
     async def discover_all_devices(self):
-        """Обнаружение всех типов устройств с улучшенной логикой"""
+        """Обнаружение всех типов устройств с сохранением в БД"""
         try:
             # Очищаем старый список
             self.devices.clear()
@@ -55,7 +60,9 @@ class DeviceManager:
             all_devices = {**android_devices, **usb_modems, **raspberry_devices}
 
             for device_id, device_info in all_devices.items():
+                # Сохраняем в память
                 self.devices[device_id] = device_info
+
                 logger.info(
                     "Device discovered",
                     device_id=device_id,
@@ -64,10 +71,86 @@ class DeviceManager:
                     info=device_info.get('device_info', 'Unknown')
                 )
 
+                # НОВОЕ: Сохраняем в базу данных
+                await self.save_device_to_db(device_id, device_info)
+
             logger.info(f"✅ Total devices discovered: {len(self.devices)}")
+            logger.info(f"✅ Devices saved to database")
 
         except Exception as e:
             logger.error("Error discovering devices", error=str(e))
+
+    async def save_device_to_db(self, device_id: str, device_info: dict):
+        """Сохранение информации об устройстве в базу данных"""
+        try:
+            async with AsyncSessionLocal() as db:
+                # Проверяем, существует ли устройство в БД
+                stmt = select(ProxyDevice).where(ProxyDevice.name == device_id)
+                result = await db.execute(stmt)
+                existing_device = result.scalar_one_or_none()
+
+                # Определяем тип устройства
+                device_type = device_info.get('type', 'unknown')
+
+                # Получаем IP адрес интерфейса
+                ip_address = "0.0.0.0"
+                interface = device_info.get('usb_interface') or device_info.get('interface', 'unknown')
+
+                if interface and interface != 'unknown':
+                    # Пробуем получить IP интерфейса
+                    try:
+                        import netifaces
+                        if interface in netifaces.interfaces():
+                            addrs = netifaces.ifaddresses(interface)
+                            if netifaces.AF_INET in addrs:
+                                ip_address = addrs[netifaces.AF_INET][0]['addr']
+                    except:
+                        pass
+
+                # Получаем внешний IP
+                external_ip = await self.get_device_external_ip(device_id)
+
+                if existing_device:
+                    # Обновляем существующее устройство
+                    stmt = update(ProxyDevice).where(
+                        ProxyDevice.name == device_id
+                    ).values(
+                        device_type=device_type,
+                        ip_address=ip_address,
+                        status=device_info.get('status', 'offline'),
+                        current_external_ip=external_ip,
+                        operator=device_info.get('operator', 'Unknown'),
+                        last_heartbeat=datetime.now(timezone.utc)
+                    )
+                    await db.execute(stmt)
+                    logger.info(f"Updated device {device_id} in database")
+                else:
+                    # Создаем новое устройство
+                    new_device = ProxyDevice(
+                        name=device_id,
+                        device_type=device_type,
+                        ip_address=ip_address,
+                        port=0,  # Заглушка для основного порта
+                        status=device_info.get('status', 'offline'),
+                        current_external_ip=external_ip,
+                        operator=device_info.get('operator', 'Unknown'),
+                        region=device_info.get('region', 'Unknown'),
+                        rotation_interval=600  # По умолчанию 10 минут
+                    )
+                    db.add(new_device)
+                    logger.info(f"Created new device {device_id} in database")
+
+                await db.commit()
+
+        except Exception as e:
+            logger.error(
+                "Error saving device to database",
+                device_id=device_id,
+                error=str(e)
+            )
+            # Не прерываем работу, если не удалось сохранить в БД
+            import traceback
+            logger.error(f"Database save traceback: {traceback.format_exc()}")
 
     async def discover_android_devices_with_interfaces(self) -> Dict[str, dict]:
         """Обнаружение Android устройств с обнаружением USB интерфейсов"""
@@ -477,6 +560,82 @@ class DeviceManager:
     async def get_all_devices(self) -> Dict[str, Dict[str, Any]]:
         """Получение всех устройств"""
         return self.devices.copy()
+
+    async def update_device_status(self, device_id: str, status: str):
+        """Обновление статуса устройства в памяти и БД"""
+        try:
+            # Обновляем в памяти
+            if device_id in self.devices:
+                self.devices[device_id]['status'] = status
+                self.devices[device_id]['last_seen'] = datetime.now(timezone.utc).isoformat()
+
+            # Обновляем в БД
+            async with AsyncSessionLocal() as db:
+                stmt = update(ProxyDevice).where(
+                    ProxyDevice.name == device_id
+                ).values(
+                    status=status,
+                    last_heartbeat=datetime.now(timezone.utc)
+                )
+                await db.execute(stmt)
+                await db.commit()
+
+        except Exception as e:
+            logger.error(f"Error updating device status: {e}")
+
+    async def get_devices_from_db(self) -> List[dict]:
+        """Получение списка устройств из базы данных"""
+        try:
+            async with AsyncSessionLocal() as db:
+                stmt = select(ProxyDevice)
+                result = await db.execute(stmt)
+                devices = result.scalars().all()
+
+                devices_list = []
+                for device in devices:
+                    device_data = {
+                        "id": str(device.id),
+                        "name": device.name,
+                        "device_type": device.device_type,
+                        "ip_address": device.ip_address,
+                        "port": device.port,
+                        "status": device.status,
+                        "current_external_ip": device.current_external_ip,
+                        "operator": device.operator,
+                        "region": device.region,
+                        "last_heartbeat": device.last_heartbeat,
+                        "rotation_interval": device.rotation_interval,
+                        "proxy_enabled": device.proxy_enabled or False,
+                        "dedicated_port": device.dedicated_port,
+                        "proxy_username": device.proxy_username,
+                        "proxy_password": device.proxy_password
+                    }
+                    devices_list.append(device_data)
+
+                return devices_list
+
+        except Exception as e:
+            logger.error(f"Error getting devices from database: {e}")
+            return []
+
+    async def sync_devices_with_db(self):
+        """Синхронизация обнаруженных устройств с базой данных"""
+        try:
+            logger.info("Syncing discovered devices with database...")
+
+            for device_id, device_info in self.devices.items():
+                await self.save_device_to_db(device_id, device_info)
+
+            logger.info("✅ Device synchronization completed")
+
+        except Exception as e:
+            logger.error(f"Error syncing devices with database: {e}")
+
+    async def force_sync_to_db(self):
+        """Принудительная синхронизация всех устройств с БД"""
+        logger.info("🔄 Starting forced device synchronization to database...")
+        await self.sync_devices_with_db()
+        return len(self.devices)
 
     async def get_device_by_id(self, device_id: str) -> Optional[Dict[str, Any]]:
         """Получение устройства по ID"""
