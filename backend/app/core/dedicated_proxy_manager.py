@@ -72,46 +72,69 @@ class DedicatedProxyServer:
             raise
 
     async def start(self):
-        """Запуск менеджера индивидуальных прокси"""
+        """Запуск индивидуального прокси-сервера"""
         if self._running:
+            logger.info(f"Dedicated proxy server for {self.device_id} already running on port {self.port}")
             return
 
-        logger.info("Starting dedicated proxy manager")
-
-        # Загрузка существующих устройств с настроенными прокси
-        await self.load_existing_proxies()
-
-        self._running = True
-        logger.info("Dedicated proxy manager started")
-
-    async def load_existing_proxies(self):
-        """Загрузка существующих прокси-настроек из базы данных"""
         try:
-            async with AsyncSessionLocal() as db:
-                stmt = select(ProxyDevice).where(
-                    ProxyDevice.proxy_enabled == True,
-                    ProxyDevice.dedicated_port.is_not(None)
-                )
-                result = await db.execute(stmt)
-                devices = result.scalars().all()
+            logger.info(f"🚀 Starting dedicated proxy server for device {self.device_id} on port {self.port}")
 
-                logger.info(f"Found {len(devices)} devices with dedicated proxies in database")
+            # Проверяем доступность порта перед запуском
+            import socket
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                try:
+                    s.bind(('0.0.0.0', self.port))
+                    logger.info(f"✅ Port {self.port} is available")
+                except OSError as e:
+                    logger.error(f"❌ Port {self.port} is not available: {e}")
+                    raise
 
-                for device in devices:
-                    logger.info(f"Loading proxy for device: {device.name} on port {device.dedicated_port}")
-                    try:
-                        await self.create_dedicated_proxy(
-                            device_id=device.name,  # ИСПРАВЛЕНИЕ: используем name вместо id
-                            port=device.dedicated_port,
-                            username=device.proxy_username,
-                            password=device.proxy_password
-                        )
-                        logger.info(f"✅ Successfully loaded proxy for {device.name}")
-                    except Exception as e:
-                        logger.error(f"❌ Failed to load proxy for {device.name}: {e}")
+            # Создание веб-приложения
+            self.app = web.Application()
+
+            # Добавление middleware для аутентификации
+            self.app.middlewares.append(self.auth_middleware)
+
+            # Добавление роутов
+            self.app.router.add_route('*', '/{path:.*}', self.proxy_handler)
+
+            # Запуск сервера
+            self.runner = web.AppRunner(self.app)
+            await self.runner.setup()
+
+            self.site = web.TCPSite(self.runner, '0.0.0.0', self.port)
+            await self.site.start()
+
+            self._running = True
+
+            # Проверяем, что сервер действительно слушает
+            await asyncio.sleep(0.1)  # Даем время серверу запуститься
+
+            # Тестируем подключение
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                result = s.connect_ex(('127.0.0.1', self.port))
+                if result == 0:
+                    logger.info(f"✅ Dedicated proxy server started and listening on port {self.port}")
+                else:
+                    logger.error(f"❌ Dedicated proxy server started but not listening on port {self.port}")
+
+            logger.info(
+                "Dedicated proxy server started successfully",
+                device_id=self.device_id,
+                port=self.port,
+                username=self.username
+            )
 
         except Exception as e:
-            logger.error("Error loading existing proxies", error=str(e))
+            logger.error(
+                "Failed to start dedicated proxy server",
+                device_id=self.device_id,
+                port=self.port,
+                error=str(e)
+            )
+            self._running = False
+            raise
 
     async def stop(self):
         """Остановка индивидуального прокси-сервера"""
@@ -543,13 +566,21 @@ class DedicatedProxyManager:
                 result = await db.execute(stmt)
                 devices = result.scalars().all()
 
+                logger.info(f"Found {len(devices)} devices with dedicated proxies in database")
+
                 for device in devices:
-                    await self.create_dedicated_proxy(
-                        device_id=str(device.id),
-                        port=device.dedicated_port,
-                        username=device.proxy_username,
-                        password=device.proxy_password
-                    )
+                    logger.info(f"Loading proxy for device: {device.name} on port {device.dedicated_port}")
+                    try:
+                        # ИСПРАВЛЕНИЕ: Вызываем правильный метод на правильном объекте
+                        await self.create_dedicated_proxy(
+                            device_id=device.name,  # Используем name устройства
+                            port=device.dedicated_port,
+                            username=device.proxy_username,
+                            password=device.proxy_password
+                        )
+                        logger.info(f"✅ Successfully loaded proxy for {device.name}")
+                    except Exception as e:
+                        logger.error(f"❌ Failed to load proxy for {device.name}: {e}")
 
         except Exception as e:
             logger.error("Error loading existing proxies", error=str(e))

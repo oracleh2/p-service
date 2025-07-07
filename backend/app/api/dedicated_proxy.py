@@ -612,3 +612,69 @@ echo $response;
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get usage examples: {str(e)}"
         )
+
+
+# В dedicated_proxy.py добавь временный endpoint:
+@router.post("/cleanup-db")
+async def cleanup_dedicated_proxy_db(current_user=Depends(get_admin_user)):
+    """Временный endpoint для очистки некорректных записей"""
+    try:
+        async with AsyncSessionLocal() as db:
+            # Найти записи с UUID вместо device_name
+            stmt = select(ProxyDevice).where(
+                ProxyDevice.proxy_enabled == True,
+                ProxyDevice.dedicated_port.is_not(None)
+            )
+            result = await db.execute(stmt)
+            devices = result.scalars().all()
+
+            cleaned_count = 0
+            for device in devices:
+                # Если name выглядит как UUID, ищем соответствующее устройство
+                if len(device.name) == 36 and '-' in device.name:  # UUID формат
+                    logger.info(f"Found UUID-named device: {device.name}, cleaning up...")
+
+                    # Ищем устройство с правильным именем
+                    android_stmt = select(ProxyDevice).where(
+                        ProxyDevice.name.like('android_%'),
+                        ProxyDevice.dedicated_port.is_(None)
+                    ).limit(1)
+                    android_result = await db.execute(android_stmt)
+                    android_device = android_result.scalar_one_or_none()
+
+                    if android_device:
+                        # Переносим настройки на правильное устройство
+                        update_stmt = update(ProxyDevice).where(
+                            ProxyDevice.id == android_device.id
+                        ).values(
+                            dedicated_port=device.dedicated_port,
+                            proxy_username=device.proxy_username,
+                            proxy_password=device.proxy_password,
+                            proxy_enabled=True
+                        )
+                        await db.execute(update_stmt)
+
+                        # Очищаем старую запись
+                        cleanup_stmt = update(ProxyDevice).where(
+                            ProxyDevice.id == device.id
+                        ).values(
+                            dedicated_port=None,
+                            proxy_username=None,
+                            proxy_password=None,
+                            proxy_enabled=False
+                        )
+                        await db.execute(cleanup_stmt)
+                        cleaned_count += 1
+
+                        logger.info(f"Moved proxy settings from {device.name} to {android_device.name}")
+
+            await db.commit()
+
+        return {
+            "message": f"Cleaned up {cleaned_count} proxy configurations",
+            "cleaned_count": cleaned_count
+        }
+
+    except Exception as e:
+        logger.error(f"Error in cleanup: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

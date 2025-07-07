@@ -120,7 +120,7 @@ class DeviceManager:
                         status=device_info.get('status', 'offline'),
                         current_external_ip=external_ip,
                         operator=device_info.get('operator', 'Unknown'),
-                        last_heartbeat=datetime.now(timezone.utc)
+                        last_heartbeat=datetime.now()  # ИСПРАВЛЕНО: убрали timezone.utc
                     )
                     await db.execute(stmt)
                     logger.info(f"Updated device {device_id} in database")
@@ -616,7 +616,7 @@ class DeviceManager:
                     ProxyDevice.name == device_id
                 ).values(
                     status=status,
-                    last_heartbeat=datetime.now(timezone.utc)
+                    last_heartbeat=datetime.now()
                 )
                 await db.execute(stmt)
                 await db.commit()
