@@ -434,35 +434,6 @@ async def rotate_all_devices_enhanced(current_user=Depends(get_admin_user)):
         )
 
 
-@router.get("/devices/{device_id}/rotation-methods")
-async def get_device_rotation_methods(
-    device_id: str,
-    current_user=Depends(get_admin_user)
-):
-    """Получение доступных методов ротации для устройства"""
-    try:
-        from ..core.managers import get_device_rotation_methods
-
-        result = await get_device_rotation_methods(device_id)
-
-        if "error" in result:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=result["error"]
-            )
-
-        return result
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting rotation methods: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get rotation methods: {str(e)}"
-        )
-
-
 @router.post("/devices/{device_id}/test-rotation")
 async def test_device_rotation(
     device_id: str,

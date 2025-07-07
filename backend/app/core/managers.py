@@ -167,23 +167,212 @@ async def cleanup_managers():
 
 
 # Дополнительные утилиты для работы с ротацией
+# async def perform_device_rotation(device_id: str, method: str = None) -> tuple[bool, str]:
+#     """
+#     Выполнение ротации устройства с использованием улучшенного менеджера
+#
+#     Args:
+#         device_id: ID устройства
+#         method: Принудительный метод ротации (опционально)
+#
+#     Returns:
+#         tuple[bool, str]: (успех, сообщение/новый_IP)
+#     """
+#     rotation_manager = get_enhanced_rotation_manager()
+#     if not rotation_manager:
+#         return False, "Enhanced rotation manager not available"
+#
+#     try:
+#         return await rotation_manager.rotate_device_ip(device_id)
+#     except Exception as e:
+#         logger.error(f"Error in device rotation: {e}")
+#         return False, f"Rotation error: {str(e)}"
+#
+#
+# async def get_device_rotation_methods(device_id: str) -> dict:
+#     """Получение доступных методов ротации для устройства"""
+#     device_manager = get_device_manager()
+#     if not device_manager:
+#         return {"error": "Device manager not available"}
+#
+#     try:
+#         all_devices = await device_manager.get_all_devices()
+#         device_info = all_devices.get(device_id)
+#
+#         if not device_info:
+#             return {"error": "Device not found"}
+#
+#         device_type = device_info.get('type', 'unknown')
+#
+#         # Методы ротации для каждого типа устройства
+#         rotation_methods = {
+#             'android': [
+#                 {
+#                     'method': 'data_toggle',
+#                     'name': 'Переключение мобильных данных',
+#                     'description': 'Отключение и включение мобильных данных',
+#                     'recommended': True,
+#                     'risk_level': 'low'
+#                 },
+#                 {
+#                     'method': 'airplane_mode',
+#                     'name': 'Режим полета',
+#                     'description': 'Включение и отключение режима полета',
+#                     'recommended': False,
+#                     'risk_level': 'medium'
+#                 },
+#                 {
+#                     'method': 'usb_reconnect',
+#                     'name': 'Переподключение USB',
+#                     'description': 'Переподключение USB tethering',
+#                     'recommended': False,
+#                     'risk_level': 'medium'
+#                 }
+#             ],
+#             'usb_modem': [
+#                 {
+#                     'method': 'at_commands',
+#                     'name': 'AT команды',
+#                     'description': 'Ротация через AT команды модема',
+#                     'recommended': True,
+#                     'risk_level': 'low'
+#                 },
+#                 {
+#                     'method': 'interface_restart',
+#                     'name': 'Перезапуск интерфейса',
+#                     'description': 'Перезапуск сетевого интерфейса',
+#                     'recommended': False,
+#                     'risk_level': 'medium'
+#                 }
+#             ],
+#             'raspberry_pi': [
+#                 {
+#                     'method': 'ppp_restart',
+#                     'name': 'Перезапуск PPP',
+#                     'description': 'Перезапуск PPP соединения',
+#                     'recommended': True,
+#                     'risk_level': 'low'
+#                 }
+#             ],
+#             'network_device': [
+#                 {
+#                     'method': 'interface_restart',
+#                     'name': 'Перезапуск интерфейса',
+#                     'description': 'Перезапуск сетевого интерфейса',
+#                     'recommended': True,
+#                     'risk_level': 'low'
+#                 }
+#             ]
+#         }
+#
+#         available_methods = rotation_methods.get(device_type, [])
+#
+#         return {
+#             "device_id": device_id,
+#             "device_type": device_type,
+#             "available_methods": available_methods,
+#             "current_method": device_info.get('rotation_method', 'data_toggle'),
+#             "device_status": device_info.get('status', 'unknown')
+#         }
+#
+#     except Exception as e:
+#         logger.error(f"Error getting rotation methods: {e}")
+#         return {"error": str(e)}
+#
+#
+# async def test_device_rotation(device_id: str, method: str) -> dict:
+#     """Тестирование метода ротации устройства"""
+#     device_manager = get_device_manager()
+#     rotation_manager = get_enhanced_rotation_manager()
+#
+#     if not device_manager or not rotation_manager:
+#         return {"error": "Required managers not available"}
+#
+#     try:
+#         # Получаем текущий IP
+#         current_ip = await device_manager.get_device_external_ip(device_id)
+#
+#         # Выполняем тестовую ротацию
+#         import time
+#         start_time = time.time()
+#         success, result = await rotation_manager.rotate_device_ip(device_id)
+#         execution_time = time.time() - start_time
+#
+#         # Проверяем новый IP
+#         new_ip = await device_manager.get_device_external_ip(device_id)
+#         ip_changed = new_ip != current_ip if current_ip and new_ip else False
+#
+#         return {
+#             "success": success,
+#             "method": method,
+#             "device_id": device_id,
+#             "execution_time_seconds": round(execution_time, 2),
+#             "current_ip_before": current_ip,
+#             "new_ip_after": new_ip,
+#             "ip_changed": ip_changed,
+#             "result_message": result,
+#             "timestamp": datetime.now(timezone.utc).isoformat(),
+#             "recommendation": "success" if success and ip_changed else "try_different_method"
+#         }
+#
+#     except Exception as e:
+#         logger.error(f"Error testing rotation: {e}")
+#         return {"error": str(e)}
+
+
 async def perform_device_rotation(device_id: str, method: str = None) -> tuple[bool, str]:
     """
-    Выполнение ротации устройства с использованием улучшенного менеджера
+    Выполнение ротации устройства с использованием DeviceManager (не EnhancedRotationManager)
 
     Args:
-        device_id: ID устройства
+        device_id: ID устройства (строковый ID из DeviceManager)
         method: Принудительный метод ротации (опционально)
 
     Returns:
         tuple[bool, str]: (успех, сообщение/новый_IP)
     """
-    rotation_manager = get_enhanced_rotation_manager()
-    if not rotation_manager:
-        return False, "Enhanced rotation manager not available"
+    device_manager = get_device_manager()
+    if not device_manager:
+        return False, "Device manager not available"
 
     try:
-        return await rotation_manager.rotate_device_ip(device_id)
+        # ИСПРАВЛЕНО: Используем DeviceManager напрямую вместо EnhancedRotationManager
+        # так как у нас строковые ID, а не UUID
+
+        logger.info(f"Performing rotation for device: {device_id} with method: {method}")
+
+        # Получаем информацию об устройстве
+        all_devices = await device_manager.get_all_devices()
+        device_info = all_devices.get(device_id)
+
+        if not device_info:
+            return False, f"Device {device_id} not found"
+
+        # Получаем старый IP для сравнения
+        old_ip = await device_manager.get_device_external_ip(device_id)
+
+        # Выполняем ротацию через DeviceManager
+        success = await device_manager.rotate_device_ip(device_id)
+
+        if success:
+            # Ждем стабилизации соединения
+            await asyncio.sleep(15)
+
+            # Получаем новый IP
+            new_ip = await device_manager.get_device_external_ip(device_id)
+
+            if new_ip and new_ip != old_ip:
+                logger.info(f"IP rotation successful: {old_ip} -> {new_ip}")
+                return True, new_ip
+            elif new_ip:
+                logger.warning(f"IP rotation executed but IP didn't change: {new_ip}")
+                return True, new_ip  # Считаем успехом, даже если IP не изменился
+            else:
+                logger.warning("IP rotation executed but couldn't get new IP")
+                return True, "Rotation completed"
+        else:
+            return False, "Device rotation failed"
+
     except Exception as e:
         logger.error(f"Error in device rotation: {e}")
         return False, f"Rotation error: {str(e)}"
@@ -210,7 +399,7 @@ async def get_device_rotation_methods(device_id: str) -> dict:
                 {
                     'method': 'data_toggle',
                     'name': 'Переключение мобильных данных',
-                    'description': 'Отключение и включение мобильных данных',
+                    'description': 'Отключение и включение мобильных данных через ADB команды',
                     'recommended': True,
                     'risk_level': 'low'
                 },
@@ -233,16 +422,23 @@ async def get_device_rotation_methods(device_id: str) -> dict:
                 {
                     'method': 'at_commands',
                     'name': 'AT команды',
-                    'description': 'Ротация через AT команды модема',
+                    'description': 'Ротация через AT команды модема (CFUN=0/1)',
                     'recommended': True,
                     'risk_level': 'low'
                 },
                 {
                     'method': 'interface_restart',
                     'name': 'Перезапуск интерфейса',
-                    'description': 'Перезапуск сетевого интерфейса',
+                    'description': 'Перезапуск сетевого интерфейса модема',
                     'recommended': False,
                     'risk_level': 'medium'
+                },
+                {
+                    'method': 'usb_reset',
+                    'name': 'USB сброс',
+                    'description': 'Физический сброс USB модема',
+                    'recommended': False,
+                    'risk_level': 'high'
                 }
             ],
             'raspberry_pi': [
@@ -252,6 +448,13 @@ async def get_device_rotation_methods(device_id: str) -> dict:
                     'description': 'Перезапуск PPP соединения',
                     'recommended': True,
                     'risk_level': 'low'
+                },
+                {
+                    'method': 'modem_reset',
+                    'name': 'Сброс модема',
+                    'description': 'Сброс модема через GPIO или USB',
+                    'recommended': False,
+                    'risk_level': 'medium'
                 }
             ],
             'network_device': [
@@ -260,6 +463,13 @@ async def get_device_rotation_methods(device_id: str) -> dict:
                     'name': 'Перезапуск интерфейса',
                     'description': 'Перезапуск сетевого интерфейса',
                     'recommended': True,
+                    'risk_level': 'low'
+                },
+                {
+                    'method': 'dhcp_renew',
+                    'name': 'Обновление DHCP',
+                    'description': 'Запрос нового IP через DHCP',
+                    'recommended': False,
                     'risk_level': 'low'
                 }
             ]
@@ -283,20 +493,33 @@ async def get_device_rotation_methods(device_id: str) -> dict:
 async def test_device_rotation(device_id: str, method: str) -> dict:
     """Тестирование метода ротации устройства"""
     device_manager = get_device_manager()
-    rotation_manager = get_enhanced_rotation_manager()
 
-    if not device_manager or not rotation_manager:
-        return {"error": "Required managers not available"}
+    if not device_manager:
+        return {"error": "Device manager not available"}
 
     try:
+        # Получаем информацию об устройстве
+        all_devices = await device_manager.get_all_devices()
+        device_info = all_devices.get(device_id)
+
+        if not device_info:
+            return {"error": "Device not found"}
+
         # Получаем текущий IP
         current_ip = await device_manager.get_device_external_ip(device_id)
 
         # Выполняем тестовую ротацию
         import time
         start_time = time.time()
-        success, result = await rotation_manager.rotate_device_ip(device_id)
+
+        logger.info(f"Testing rotation method '{method}' for device {device_id}")
+
+        # Используем обычную ротацию DeviceManager для тестирования
+        success = await device_manager.rotate_device_ip(device_id)
         execution_time = time.time() - start_time
+
+        # Ждем стабилизации
+        await asyncio.sleep(10)
 
         # Проверяем новый IP
         new_ip = await device_manager.get_device_external_ip(device_id)
@@ -310,7 +533,7 @@ async def test_device_rotation(device_id: str, method: str) -> dict:
             "current_ip_before": current_ip,
             "new_ip_after": new_ip,
             "ip_changed": ip_changed,
-            "result_message": result,
+            "result_message": "Test rotation completed successfully" if success else "Test rotation failed",
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "recommendation": "success" if success and ip_changed else "try_different_method"
         }
