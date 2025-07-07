@@ -2,4 +2,4 @@
 export { useAuthStore } from './auth'
 export { useSystemStore } from './system'
 export { useNotificationStore } from './notifications'
-export { useModemsStore } from './modems'
+export { useDeviceStore } from './devices'
