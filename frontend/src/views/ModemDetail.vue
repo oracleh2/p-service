@@ -226,7 +226,7 @@ import {ref, onMounted, computed} from 'vue'
 import {useRoute} from 'vue-router'
 import {useToast} from 'vue-toastification'
 import {format} from 'date-fns'
-import {useModemsStore} from '@/stores/modems'
+import {useDeviceStore} from '../stores/devices'
 
 // Icons
 import {
@@ -242,7 +242,7 @@ import {
 
 const route = useRoute()
 const toast = useToast()
-const modemsStore = useModemsStore()
+const modemsStore = useDeviceStore()
 
 // State
 const isLoading = ref(false)
