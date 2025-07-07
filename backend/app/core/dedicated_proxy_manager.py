@@ -485,6 +485,8 @@ class DedicatedProxyServer:
     async def proxy_handler(self, request):
         """ИСПРАВЛЕННЫЙ обработчик прокси-запросов для конкретного устройства"""
         try:
+            logger.info(f"🎯 Dedicated proxy request: {request.method} {request.path_qs} via device {self.device_id}")
+
             # Получение информации об устройстве
             device = await self.device_manager.get_device_by_id(self.device_id)
             if not device or device.get('status') != 'online':
@@ -494,23 +496,24 @@ class DedicatedProxyServer:
                     text="Device not available"
                 )
 
-            # Получение целевого URL
+            # ИСПРАВЛЕНО: Обрабатываем CONNECT запросы отдельно
+            if request.method == 'CONNECT':
+                logger.info(f"🔗 CONNECT request for {request.path_qs}")
+                return await self.handle_connect(request, device)
+
+            # Для остальных методов получаем полный URL
             target_url = self._get_target_url_from_request(request)
             if not target_url:
+                logger.error(f"❌ Could not determine target URL for {request.method} {request.path_qs}")
                 return web.Response(
                     status=400,
                     text="Bad Request: Invalid target URL"
                 )
 
-            logger.info(f"Dedicated proxy request: {request.method} {target_url} via device {self.device_id}")
+            logger.info(f"🌐 HTTP request: {request.method} {target_url} via device {self.device_id}")
 
-            # Подготовка целевого URL
-            if request.method == 'CONNECT':
-                # HTTPS туннелирование (пока упрощенная реализация)
-                return await self.handle_connect(request, device)
-            else:
-                # HTTP прокси с использованием логики из proxy_server.py
-                return await self.handle_http_via_device_interface(request, target_url, device)
+            # HTTP прокси с использованием логики из proxy_server.py
+            return await self.handle_http_via_device_interface(request, target_url, device)
 
         except Exception as e:
             logger.error(
@@ -518,6 +521,8 @@ class DedicatedProxyServer:
                 device_id=self.device_id,
                 error=str(e)
             )
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return web.Response(
                 status=500,
                 text="Internal proxy error"
@@ -526,6 +531,10 @@ class DedicatedProxyServer:
     def _get_target_url_from_request(self, request):
         """Получение целевого URL из запроса"""
         try:
+            # ИСПРАВЛЕНИЕ: Для CONNECT запросов возвращаем путь как есть
+            if request.method == 'CONNECT':
+                return request.path_qs  # Например "httpbin.org:443"
+
             # Для прямых HTTP запросов через прокси
             if request.path_qs.startswith('http://') or request.path_qs.startswith('https://'):
                 return request.path_qs
