@@ -42,8 +42,8 @@ const routes = [
     {
         path: '/dedicated-proxies',
         name: 'DedicatedProxies',
-        // component: () => import('../components/DedicatedProxyManager.vue'),
-        component: DedicatedProxies,
+        component: () => import('../components/DedicatedProxyManager.vue'),
+        // component: DedicatedProxies,
         meta: {requiresAuth: true, requiresAdmin: true}
     },
     {
