@@ -351,6 +351,14 @@
                 </div>
             </div>
         </div>
+
+        <!-- Модальное окно выбора метода ротации -->
+        <RotationMethodModal
+            :is-visible="showRotationMethodModal"
+            :device-info="selectedDeviceForRotation || {}"
+            @close="closeRotationModal"
+            @rotation-success="handleRotationSuccess"
+        />
     </div>
 </template>
 
@@ -360,6 +368,7 @@ import {useRouter} from 'vue-router'
 import {useToast} from 'vue-toastification'
 import {format} from 'date-fns'
 import api from '@/utils/api'
+import RotationMethodModal from '@/components/RotationMethodModal.vue'
 
 // Icons
 import {
@@ -388,6 +397,9 @@ const typeFilter = ref('')
 const showRotationModal = ref(false)
 const rotationInterval = ref(600)
 const selectedModemId = ref('')
+
+const showRotationMethodModal = ref(false)
+const selectedDeviceForRotation = ref(null)
 
 // Data
 const modems = ref([])
@@ -474,20 +486,28 @@ const rotateAllModems = async () => {
 }
 
 const rotateModem = async (modemId) => {
-    try {
-        rotatingModems.value.push(modemId)
-        await api.post(`/admin/devices/${modemId}/rotate`)
-        toast.success('IP rotation initiated')
+    // Найдем информацию об устройстве
+    const device = modems.value.find(m => m.modem_id === modemId)
 
-        // Refresh modems after rotation
-        setTimeout(() => {
-            fetchModems()
-        }, 2000)
-    } catch (error) {
-        toast.error('Failed to rotate modem IP')
-    } finally {
-        rotatingModems.value = rotatingModems.value.filter(id => id !== modemId)
+    if (!device) {
+        toast.error('Устройство не найдено')
+        return
     }
+
+    // Подготавливаем данные устройства для модального окна
+    selectedDeviceForRotation.value = {
+        modem_id: device.modem_id,
+        device_id: device.modem_id,
+        modem_type: device.modem_type,
+        device_type: device.modem_type,
+        interface: device.interface,
+        status: device.status,
+        external_ip: device.external_ip,
+        name: device.device_info || device.modem_id
+    }
+
+    // Показываем модальное окно вместо прямой ротации
+    showRotationMethodModal.value = true
 }
 
 const toggleAutoRotation = async (modemId, enabled) => {
@@ -582,6 +602,29 @@ const getSuccessRateColor = (rate) => {
     return 'text-red-600'
 }
 
+const closeRotationModal = () => {
+    showRotationMethodModal.value = false
+    selectedDeviceForRotation.value = null
+}
+
+const handleRotationSuccess = (result) => {
+    toast.success(`IP ротация завершена! Новый IP: ${result.new_ip || 'получается...'}`)
+
+    // Обновляем данные устройства в локальном состоянии
+    const deviceIndex = modems.value.findIndex(m => m.modem_id === result.device_id)
+    if (deviceIndex !== -1) {
+        modems.value[deviceIndex].external_ip = result.new_ip
+        modems.value[deviceIndex].last_rotation = Date.now()
+    }
+
+    // Закрываем модальное окно
+    closeRotationModal()
+
+    // Перезагружаем данные через небольшую задержку
+    setTimeout(() => {
+        fetchModems()
+    }, 2000)
+}
 // Lifecycle
 onMounted(() => {
     fetchModems()

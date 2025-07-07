@@ -738,7 +738,7 @@ class EnhancedRotationManager:
         """Перезапуск интерфейса USB модема"""
         try:
             # Находим сетевой интерфейс модема
-            interface = await self._find_modem_network_interface(device)
+            interface = self._find_modem_network_interface(device)
 
             if not interface:
                 return False, "Could not find network interface for modem"
@@ -792,23 +792,50 @@ class EnhancedRotationManager:
             return False, f"Serial reconnect error: {str(e)}"
 
     def _find_modem_network_interface(self, device: ProxyDevice) -> Optional[str]:
-        """Поиск сетевого интерфейса модема (синхронная версия)"""
+        """Поиск сетевого интерфейса модема с использованием информации об устройстве"""
         try:
             import netifaces
             interfaces = netifaces.interfaces()
 
-            # Проверяем типичные интерфейсы модемов
+            # Используем информацию об устройстве для поиска интерфейса
+            device_name = device.name
+            device_type = device.device_type
+
+            # Если в имени устройства есть информация об интерфейсе
+            if 'wwan' in device_name.lower():
+                for interface in interfaces:
+                    if interface.startswith('wwan') and interface in device_name:
+                        return interface
+
+            if 'ppp' in device_name.lower():
+                for interface in interfaces:
+                    if interface.startswith('ppp') and interface in device_name:
+                        return interface
+
+            # Поиск по типичным интерфейсам модемов
+            modem_interface_patterns = ['wwan', 'ppp', 'usb']
+
+            for pattern in modem_interface_patterns:
+                for interface in interfaces:
+                    if interface.startswith(pattern):
+                        try:
+                            addrs = netifaces.ifaddresses(interface)
+                            if netifaces.AF_INET in addrs:
+                                # Проверяем, активен ли интерфейс
+                                ip_addr = addrs[netifaces.AF_INET][0]['addr']
+                                if ip_addr and ip_addr != '127.0.0.1':
+                                    logger.debug(f"Found active modem interface: {interface} ({ip_addr})")
+                                    return interface
+                        except:
+                            continue
+
+            # Если ничего не найдено, возвращаем первый доступный wwan интерфейс
             for interface in interfaces:
-                if interface.startswith(('wwan', 'ppp', 'usb')):
-                    try:
-                        addrs = netifaces.ifaddresses(interface)
-                        if netifaces.AF_INET in addrs:
-                            return interface
-                    except:
-                        continue
+                if interface.startswith('wwan'):
+                    return interface
 
         except Exception as e:
-            logger.debug(f"Error finding modem interface: {e}")
+            logger.debug(f"Error finding modem interface for device {device.name}: {e}")
 
         return None
 
