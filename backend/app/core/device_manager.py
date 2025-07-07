@@ -916,8 +916,8 @@ class DeviceManager:
 
         return None
 
-    async def rotate_device_ip(self, device_id: str) -> bool:
-        """Ротация IP устройства"""
+    async def rotate_device_ip(self, device_id: str, method: str = None) -> bool:
+        """Ротация IP устройства с поддержкой выбора метода"""
         device = self.devices.get(device_id)
         if not device:
             return False
@@ -925,40 +925,33 @@ class DeviceManager:
         device_type = device.get('type')
 
         if device_type == 'android':
-            return await self.rotate_android_ip(device)
+            return await self.rotate_android_ip(device, method)
         elif device_type == 'usb_modem':
-            return await self.rotate_usb_modem_ip(device)
+            return await self.rotate_usb_modem_ip(device, method)
         elif device_type == 'raspberry_pi':
-            return await self.rotate_raspberry_ip(device)
+            return await self.rotate_raspberry_ip(device, method)
 
         return False
 
-    async def rotate_android_ip(self, device: dict) -> bool:
-        """Ротация IP для Android устройства"""
+    async def rotate_android_ip(self, device: dict, method: str = None) -> bool:
+        """Ротация IP для Android устройства с поддержкой разных методов"""
         try:
             device_id = device['adb_id']
-            logger.info(f"Starting Android IP rotation for {device_id}")
 
-            # Отключение мобильных данных
-            result = await asyncio.create_subprocess_exec(
-                'adb', '-s', device_id, 'shell', 'svc', 'data', 'disable'
-            )
-            await result.wait()
+            # Определяем метод ротации (по умолчанию data_toggle)
+            rotation_method = method or 'data_toggle'
 
-            # Ждем немного
-            await asyncio.sleep(3)
+            logger.info(f"Starting Android IP rotation for {device_id} using method: {rotation_method}")
 
-            # Включение мобильных данных
-            result = await asyncio.create_subprocess_exec(
-                'adb', '-s', device_id, 'shell', 'svc', 'data', 'enable'
-            )
-            await result.wait()
-
-            # Ждем восстановления соединения
-            await asyncio.sleep(10)
-
-            logger.info(f"Android IP rotation completed for {device_id}")
-            return True
+            if rotation_method == 'airplane_mode':
+                return await self._android_airplane_mode(device_id)
+            elif rotation_method == 'data_toggle':
+                return await self._android_data_toggle(device_id)
+            elif rotation_method == 'usb_reconnect':
+                return await self._android_usb_reconnect(device_id)
+            else:
+                logger.warning(f"Unknown rotation method: {rotation_method}, using data_toggle")
+                return await self._android_data_toggle(device_id)
 
         except Exception as e:
             logger.error(f"Error rotating Android IP: {e}")
@@ -1668,3 +1661,108 @@ class DeviceManager:
             ]
         }
         return risks.get(device_type, ['Неизвестные риски'])
+
+    async def _android_data_toggle(self, device_id: str) -> bool:
+        """Ротация через переключение мобильных данных (ваш текущий метод)"""
+        try:
+            logger.info(f"Using data toggle method for {device_id}")
+
+            # Отключение мобильных данных
+            result = await asyncio.create_subprocess_exec(
+                'adb', '-s', device_id, 'shell', 'svc', 'data', 'disable'
+            )
+            await result.wait()
+
+            # Ждем немного
+            await asyncio.sleep(3)
+
+            # Включение мобильных данных
+            result = await asyncio.create_subprocess_exec(
+                'adb', '-s', device_id, 'shell', 'svc', 'data', 'enable'
+            )
+            await result.wait()
+
+            # Ждем восстановления соединения
+            await asyncio.sleep(10)
+
+            logger.info(f"Data toggle rotation completed for {device_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error in data toggle rotation: {e}")
+            return False
+
+    async def _android_airplane_mode(self, device_id: str) -> bool:
+        """Ротация через режим полета"""
+        try:
+            logger.info(f"Using airplane mode method for {device_id}")
+
+            # Включение режима полета
+            result = await asyncio.create_subprocess_exec(
+                'adb', '-s', device_id, 'shell', 'settings', 'put', 'global', 'airplane_mode_on', '1'
+            )
+            await result.wait()
+
+            # Применение настроек
+            result = await asyncio.create_subprocess_exec(
+                'adb', '-s', device_id, 'shell', 'am', 'broadcast',
+                '-a', 'android.intent.action.AIRPLANE_MODE', '--ez', 'state', 'true'
+            )
+            await result.wait()
+
+            # Ожидание в режиме полета
+            logger.info(f"Device {device_id} in airplane mode, waiting 5 seconds...")
+            await asyncio.sleep(5)
+
+            # Отключение режима полета
+            result = await asyncio.create_subprocess_exec(
+                'adb', '-s', device_id, 'shell', 'settings', 'put', 'global', 'airplane_mode_on', '0'
+            )
+            await result.wait()
+
+            # Применение настроек
+            result = await asyncio.create_subprocess_exec(
+                'adb', '-s', device_id, 'shell', 'am', 'broadcast',
+                '-a', 'android.intent.action.AIRPLANE_MODE', '--ez', 'state', 'false'
+            )
+            await result.wait()
+
+            # Ожидание восстановления соединения
+            logger.info(f"Device {device_id} exited airplane mode, waiting 15 seconds for reconnection...")
+            await asyncio.sleep(15)
+
+            logger.info(f"Airplane mode rotation completed for {device_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error in airplane mode rotation: {e}")
+            return False
+
+    async def _android_usb_reconnect(self, device_id: str) -> bool:
+        """Ротация через переподключение USB tethering"""
+        try:
+            logger.info(f"Using USB reconnect method for {device_id}")
+
+            # Отключение USB tethering
+            result = await asyncio.create_subprocess_exec(
+                'adb', '-s', device_id, 'shell', 'svc', 'usb', 'setFunctions', 'none'
+            )
+            await result.wait()
+
+            await asyncio.sleep(3)
+
+            # Включение USB tethering (rndis = USB ethernet)
+            result = await asyncio.create_subprocess_exec(
+                'adb', '-s', device_id, 'shell', 'svc', 'usb', 'setFunctions', 'rndis'
+            )
+            await result.wait()
+
+            # Ждем восстановления USB соединения
+            await asyncio.sleep(8)
+
+            logger.info(f"USB reconnect rotation completed for {device_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error in USB reconnect rotation: {e}")
+            return False
