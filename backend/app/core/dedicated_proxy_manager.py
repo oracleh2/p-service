@@ -57,11 +57,8 @@ class DedicatedProxyServer:
             # Добавление middleware для аутентификации
             self.app.middlewares.append(self.auth_middleware)
 
-            # ИСПРАВЛЕНО: Добавляем специальные роуты
-            # Специальный обработчик для CONNECT (самый приоритетный)
-            self.app.router.add_route('CONNECT', '/{target:.*}', self.connect_handler)
-
-            # Обычный обработчик для всех остальных методов
+            # ИСПРАВЛЕНО: Используем только универсальный роут
+            # Универсальный обработчик для ВСЕХ методов (включая CONNECT)
             self.app.router.add_route('*', '/{path:.*}', self.proxy_handler)
 
             # Запуск сервера
@@ -101,44 +98,6 @@ class DedicatedProxyServer:
             self._running = False
             raise
 
-    async def connect_handler(self, request):
-        """Специальный обработчик для CONNECT запросов"""
-        try:
-            target = request.match_info.get('target', '')
-            if not target:
-                target = request.headers.get('Host', '')
-
-            logger.info(f"🔗 CONNECT handler: target='{target}' via device {self.device_id}")
-
-            # Получение информации об устройстве
-            device = await self.device_manager.get_device_by_id(self.device_id)
-            if not device or device.get('status') != 'online':
-                logger.error(f"Device {self.device_id} not available or offline")
-                return web.Response(
-                    status=503,
-                    text="Device not available"
-                )
-
-            # Создаем модифицированный запрос с правильным target
-            class ConnectRequest:
-                def __init__(self, original_request, target):
-                    self.original = original_request
-                    self.path_qs = target
-                    self.method = original_request.method
-                    self.headers = original_request.headers
-                    self.transport = original_request.transport
-
-            modified_request = ConnectRequest(request, target)
-            return await self.handle_connect(modified_request, device)
-
-        except Exception as e:
-            logger.error(f"Error in CONNECT handler: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            return web.Response(
-                status=502,
-                text="Bad Gateway"
-            )
     async def stop(self):
         """Остановка индивидуального прокси-сервера"""
         if not self._running:
@@ -490,6 +449,7 @@ class DedicatedProxyServer:
         try:
             logger.info(f"🎯 Dedicated proxy request: {request.method} '{request.path_qs}' via device {self.device_id}")
             logger.info(f"🎯 Request headers: {dict(request.headers)}")
+            logger.info(f"🎯 Request URL: {request.url}")
 
             # Получение информации об устройстве
             device = await self.device_manager.get_device_by_id(self.device_id)
@@ -502,18 +462,39 @@ class DedicatedProxyServer:
 
             # ИСПРАВЛЕНО: Специальная обработка CONNECT запросов
             if request.method == 'CONNECT':
-                # Для CONNECT запросов цель НЕ в path_qs, а в заголовке Host
-                target = request.headers.get('Host', '').strip()
+                logger.info(f"🔗 Processing CONNECT request")
 
-                # Также проверяем path_qs на случай если есть
-                if not target and request.path_qs:
+                # Для CONNECT запросов цель может быть в разных местах
+                target = None
+
+                # 1. Проверяем Host заголовок (наиболее вероятно)
+                if request.headers.get('Host'):
+                    target = request.headers.get('Host').strip()
+                    logger.info(f"🎯 Target from Host header: '{target}'")
+
+                # 2. Проверяем path_qs (если есть)
+                elif request.path_qs and request.path_qs.strip():
                     target = request.path_qs.strip()
+                    logger.info(f"🎯 Target from path_qs: '{target}'")
+
+                # 3. Проверяем полный URL
+                elif str(request.url) != f"http://192.168.1.50:{self.port}/":
+                    target_url = str(request.url)
+                    # Извлекаем хост из URL
+                    from urllib.parse import urlparse
+                    parsed = urlparse(target_url)
+                    if parsed.netloc:
+                        target = parsed.netloc
+                        logger.info(f"🎯 Target from URL netloc: '{target}'")
 
                 if not target:
-                    logger.error(f"❌ No target for CONNECT request. Headers: {dict(request.headers)}")
+                    logger.error(f"❌ No target for CONNECT request")
+                    logger.error(f"❌ Host header: {request.headers.get('Host')}")
+                    logger.error(f"❌ path_qs: '{request.path_qs}'")
+                    logger.error(f"❌ URL: {request.url}")
                     return web.Response(
                         status=400,
-                        text="Bad Request: No target specified"
+                        text="Bad Request: No target specified for CONNECT"
                     )
 
                 logger.info(f"🔗 CONNECT request for '{target}'")
