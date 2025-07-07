@@ -645,7 +645,7 @@ class DedicatedProxyServer:
         return self._running
 
     async def handle_connect_direct(self, request, device, target: str):
-        """Прямая обработка CONNECT запросов с указанным target"""
+        """Прямая обработка CONNECT запросов через RAW сокет"""
         try:
             # Парсим хост и порт из target
             if ':' in target:
@@ -655,26 +655,198 @@ class DedicatedProxyServer:
                 host = target
                 port = 443
 
-            logger.info(f"🔗 CONNECT tunnel: {host}:{port} via device {self.device_id}")
+            logger.info(f"🔗 RAW CONNECT tunnel: {host}:{port} via device {self.device_id}")
 
             # Получаем интерфейс устройства для туннелирования
             interface = device.get('interface') or device.get('usb_interface')
 
+            # Создаем соединение с целевым сервером
+            target_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            target_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+            # Привязываем к интерфейсу если возможно
             if interface and interface != 'unknown':
-                logger.info(f"🔧 Creating tunnel via interface: {interface}")
-                return await self.create_interface_tunnel_direct(request, host, port, interface)
-            else:
-                logger.info("🔧 Creating standard tunnel (no specific interface)")
-                return await self.create_standard_tunnel_direct(request, host, port)
+                try:
+                    target_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, interface.encode())
+                    logger.info(f"✅ Socket bound to interface: {interface}")
+                except OSError as e:
+                    logger.warning(f"⚠️  Failed to bind to interface {interface}: {e}")
+
+            # Подключаемся к целевому серверу
+            target_sock.setblocking(False)
+            try:
+                await asyncio.get_event_loop().sock_connect(target_sock, (host, port))
+                logger.info(f"✅ Connected to {host}:{port} via interface {interface}")
+            except OSError as e:
+                target_sock.close()
+                logger.error(f"❌ Failed to connect to {host}:{port}: {e}")
+                return web.Response(status=502, text="Connection failed")
+
+            # Получаем транспорт клиента
+            client_transport = request.transport
+            if not client_transport:
+                target_sock.close()
+                return web.Response(status=502, text="No client transport")
+
+            # КРИТИЧНО: Отправляем ответ напрямую через транспорт, минуя aiohttp
+            success_response = b"HTTP/1.1 200 Connection established\r\n\r\n"
+            client_transport.write(success_response)
+
+            # Ждем отправки
+            await asyncio.sleep(0.1)
+
+            # Получаем клиентский сокет
+            client_sock = client_transport.get_extra_info('socket')
+            if not client_sock:
+                target_sock.close()
+                return web.Response(status=502, text="No client socket")
+
+            logger.info(f"🚀 Starting RAW tunnel relay")
+
+            # ГЛАВНОЕ ИСПРАВЛЕНИЕ: Запускаем туннель и закрываем HTTP соединение
+            # Это заставляет aiohttp прекратить парсинг HTTP
+            asyncio.create_task(self.run_raw_tunnel(client_sock, target_sock, host, port, client_transport))
+
+            # ВАЖНО: Возвращаем Response без тела, который закроет HTTP-парсер
+            response = web.Response(status=200, text="")
+
+            # Эти заголовки заставляют aiohttp закрыть HTTP-парсер
+            response.headers['Connection'] = 'close'
+            response.headers['Content-Length'] = '0'
+
+            return response
 
         except Exception as e:
-            logger.error(f"❌ CONNECT direct error: {e}")
+            logger.error(f"❌ RAW CONNECT error: {e}")
             import traceback
             logger.error(f"❌ Traceback: {traceback.format_exc()}")
-            return web.Response(
-                status=502,
-                text="Bad Gateway"
+            return web.Response(status=502, text="Bad Gateway")
+
+    async def run_raw_tunnel(self, client_sock, target_sock, host: str, port: int, client_transport):
+        """Запуск сырого TCP туннеля без HTTP обработки"""
+        try:
+            logger.info(f"🔄 Starting RAW TCP tunnel to {host}:{port}")
+
+            # Небольшая пауза чтобы aiohttp завершил HTTP обработку
+            await asyncio.sleep(0.2)
+
+            # Закрываем HTTP транспорт чтобы освободить сокет
+            try:
+                # Не закрываем сам транспорт, а только отключаем HTTP-парсер
+                if hasattr(client_transport, '_protocol'):
+                    protocol = client_transport._protocol
+                    if hasattr(protocol, '_request_parser'):
+                        protocol._request_parser = None
+                    logger.info("🔧 Disabled HTTP parser")
+            except Exception as e:
+                logger.warning(f"⚠️  Failed to disable HTTP parser: {e}")
+
+            # Запускаем передачу данных в обе стороны
+            async def forward_data_raw(from_sock, to_sock, direction):
+                try:
+                    total_bytes = 0
+                    buffer_size = 8192
+
+                    while True:
+                        try:
+                            # Читаем данные
+                            data = await asyncio.get_event_loop().sock_recv(from_sock, buffer_size)
+                            if not data:
+                                logger.info(f"📤 RAW {direction}: EOF")
+                                break
+
+                            # Отправляем данные
+                            await asyncio.get_event_loop().sock_sendall(to_sock, data)
+                            total_bytes += len(data)
+
+                            # Логируем прогресс для больших передач
+                            if total_bytes % (32 * 1024) == 0:  # Каждые 32KB
+                                logger.debug(f"📊 RAW {direction}: {total_bytes} bytes")
+
+                        except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                            if e.errno in (9, 104, 32):  # EBADF, ECONNRESET, EPIPE
+                                logger.info(f"📤 RAW {direction}: connection closed ({e})")
+                            else:
+                                logger.warning(f"📤 RAW {direction}: socket error {e}")
+                            break
+
+                    logger.info(f"✅ RAW {direction}: finished, {total_bytes} bytes total")
+
+                except asyncio.CancelledError:
+                    logger.info(f"🚫 RAW {direction}: cancelled")
+                except Exception as e:
+                    logger.error(f"❌ RAW {direction}: error {e}")
+                finally:
+                    # Закрываем сокеты
+                    try:
+                        from_sock.close()
+                    except:
+                        pass
+                    try:
+                        to_sock.close()
+                    except:
+                        pass
+
+            # Создаем задачи для передачи в обе стороны
+            client_to_server = asyncio.create_task(
+                forward_data_raw(client_sock, target_sock, f"client -> {host}:{port}")
             )
+            server_to_client = asyncio.create_task(
+                forward_data_raw(target_sock, client_sock, f"{host}:{port} -> client")
+            )
+
+            # Ждем завершения любой из задач
+            try:
+                done, pending = await asyncio.wait(
+                    [client_to_server, server_to_client],
+                    return_when=asyncio.FIRST_COMPLETED,
+                    timeout=600  # 10 минут таймаут
+                )
+
+                logger.info(f"🔚 RAW tunnel completed for {host}:{port}")
+
+            except asyncio.TimeoutError:
+                logger.info(f"⏰ RAW tunnel timeout for {host}:{port}")
+            finally:
+                # Отменяем оставшиеся задачи
+                for task in [client_to_server, server_to_client]:
+                    if not task.done():
+                        task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+
+                # Закрываем все соединения
+                try:
+                    client_sock.close()
+                except:
+                    pass
+                try:
+                    target_sock.close()
+                except:
+                    pass
+                try:
+                    client_transport.close()
+                except:
+                    pass
+
+            logger.info(f"🏁 RAW tunnel ended for {host}:{port}")
+
+        except Exception as e:
+            logger.error(f"❌ RAW tunnel error: {e}")
+            import traceback
+            logger.error(f"❌ Traceback: {traceback.format_exc()}")
+
+            # Закрываем сокеты при ошибке
+            try:
+                client_sock.close()
+            except:
+                pass
+            try:
+                target_sock.close()
+            except:
+                pass
 
     async def create_interface_tunnel_direct(self, request, host: str, port: int, interface: str):
         """Создание туннеля через конкретный интерфейс (прямая версия)"""
