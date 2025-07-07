@@ -262,7 +262,7 @@ class DedicatedProxyServer:
             raise
 
     async def proxy_handler(self, request):
-        """Отладочная версия обработчика"""
+        """Отладочная версия обработчика с настоящим туннелем"""
         try:
             logger.info(f"🎯 PROXY HANDLER START")
             logger.info(f"   Method: {request.method}")
@@ -309,12 +309,8 @@ class DedicatedProxyServer:
 
                 logger.info(f"🔗 CONNECT target: '{target}'")
 
-                # Простой ответ для CONNECT
-                return web.Response(
-                    status=200,
-                    text="Connection established",
-                    headers={'Connection': 'close'}
-                )
+                # НАСТОЯЩИЙ ТУННЕЛЬ вместо простого ответа
+                return await self.handle_connect_direct(request, device, target)
 
             # HTTP запросы
             logger.info(f"🌐 HTTP request processing...")
@@ -719,10 +715,12 @@ class DedicatedProxyServer:
 
             logger.info(f"🚀 Starting bidirectional tunnel for {host}:{port}")
 
-            # Запускаем bidirectional туннель
-            await self.run_tunnel(client_transport, target_sock, host, port)
+            # ВАЖНО: Запускаем туннель в фоновом режиме и НЕ возвращаем Response
+            # Это позволит aiohttp продолжить обработку сырых данных
+            asyncio.create_task(self.run_tunnel_background(client_transport, target_sock, host, port))
 
-            return web.Response(status=200, text="")
+            # Возвращаем специальный StreamResponse для туннеля
+            return await self.create_tunnel_response(request, client_transport, target_sock)
 
         except Exception as e:
             logger.error(f"❌ Interface tunnel direct error: {e}")
@@ -758,16 +756,82 @@ class DedicatedProxyServer:
 
             logger.info(f"🚀 Starting standard tunnel for {host}:{port}")
 
-            # Запускаем туннель
-            await self.run_tunnel(client_transport, target_sock, host, port)
+            # Запускаем туннель в фоновом режиме
+            asyncio.create_task(self.run_tunnel_background(client_transport, target_sock, host, port))
 
-            return web.Response(status=200, text="")
+            # Возвращаем специальный ответ для туннеля
+            return await self.create_tunnel_response(request, client_transport, target_sock)
 
         except Exception as e:
             logger.error(f"❌ Standard tunnel direct error: {e}")
             if 'target_sock' in locals():
                 target_sock.close()
             return web.Response(status=502, text="Connection failed")
+
+    async def create_tunnel_response(self, request, client_transport, target_sock):
+        """Создание специального ответа для туннеля"""
+        # Создаем StreamResponse для длительного соединения
+        response = web.StreamResponse(status=200, reason='Connection established')
+        response.headers['Connection'] = 'close'
+
+        # Подготавливаем ответ но НЕ отправляем тело
+        await response.prepare(request)
+
+        # Возвращаем ответ - туннель будет работать в фоне
+        return response
+
+    async def run_tunnel_background(self, client_transport, target_sock, host: str, port: int):
+        """Запуск туннеля в фоновом режиме"""
+        try:
+            # Получаем сокет клиента
+            client_sock = client_transport.get_extra_info('socket')
+            if not client_sock:
+                raise Exception("No client socket available")
+
+            logger.info(f"🔄 Running background tunnel: client <-> {host}:{port}")
+
+            # Создаем задачи для перенаправления данных в обе стороны
+            client_to_server_task = asyncio.create_task(
+                self.forward_data(client_sock, target_sock, f"client -> {host}:{port}")
+            )
+            server_to_client_task = asyncio.create_task(
+                self.forward_data(target_sock, client_sock, f"{host}:{port} -> client")
+            )
+
+            # Ждем завершения любой из задач
+            try:
+                done, pending = await asyncio.wait(
+                    [client_to_server_task, server_to_client_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                    timeout=300  # 5 минут таймаут
+                )
+
+                logger.info(f"🔚 Background tunnel ended for {host}:{port}")
+
+            except asyncio.TimeoutError:
+                logger.info(f"⏰ Background tunnel timeout for {host}:{port}")
+            finally:
+                # Отменяем оставшиеся задачи
+                client_to_server_task.cancel()
+                server_to_client_task.cancel()
+
+                # Закрываем соединения
+                try:
+                    target_sock.close()
+                except:
+                    pass
+
+                try:
+                    client_transport.close()
+                except:
+                    pass
+
+        except Exception as e:
+            logger.error(f"❌ Background tunnel error: {e}")
+            try:
+                target_sock.close()
+            except:
+                pass
 
     def _get_target_url_from_request(self, request):
         """Получение целевого URL из запроса"""
