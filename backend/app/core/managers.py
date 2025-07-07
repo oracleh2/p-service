@@ -322,11 +322,11 @@ async def cleanup_managers():
 
 async def perform_device_rotation(device_id: str, method: str = None) -> tuple[bool, str]:
     """
-    Выполнение ротации устройства с использованием DeviceManager (не EnhancedRotationManager)
+    Выполнение ротации устройства с использованием DeviceManager
 
     Args:
         device_id: ID устройства (строковый ID из DeviceManager)
-        method: Принудительный метод ротации (опционально)
+        method: Принудительный метод ротации (например: 'airplane_mode', 'data_toggle', 'usb_reconnect')
 
     Returns:
         tuple[bool, str]: (успех, сообщение/новый_IP)
@@ -336,9 +336,6 @@ async def perform_device_rotation(device_id: str, method: str = None) -> tuple[b
         return False, "Device manager not available"
 
     try:
-        # ИСПРАВЛЕНО: Используем DeviceManager напрямую вместо EnhancedRotationManager
-        # так как у нас строковые ID, а не UUID
-
         logger.info(f"Performing rotation for device: {device_id} with method: {method}")
 
         # Получаем информацию об устройстве
@@ -351,12 +348,14 @@ async def perform_device_rotation(device_id: str, method: str = None) -> tuple[b
         # Получаем старый IP для сравнения
         old_ip = await device_manager.get_device_external_ip(device_id)
 
-        # Выполняем ротацию через DeviceManager
-        success = await device_manager.rotate_device_ip(device_id)
+        # ИСПРАВЛЕНО: Передаем метод ротации в DeviceManager
+        success = await device_manager.rotate_device_ip(device_id, method)
 
         if success:
             # Ждем стабилизации соединения
-            await asyncio.sleep(15)
+            stabilization_time = 15 if method == 'airplane_mode' else 10
+            logger.info(f"Waiting {stabilization_time} seconds for connection stabilization...")
+            await asyncio.sleep(stabilization_time)
 
             # Получаем новый IP
             new_ip = await device_manager.get_device_external_ip(device_id)
@@ -369,9 +368,9 @@ async def perform_device_rotation(device_id: str, method: str = None) -> tuple[b
                 return True, new_ip  # Считаем успехом, даже если IP не изменился
             else:
                 logger.warning("IP rotation executed but couldn't get new IP")
-                return True, "Rotation completed"
+                return True, f"Rotation completed using {method or 'default'} method"
         else:
-            return False, "Device rotation failed"
+            return False, f"Device rotation failed using {method or 'default'} method"
 
     except Exception as e:
         logger.error(f"Error in device rotation: {e}")
