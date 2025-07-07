@@ -1721,15 +1721,15 @@ class DeviceManager:
             await result.wait()
 
             # Применение настроек
-            result = await asyncio.create_subprocess_exec(
-                'adb', '-s', device_id, 'shell', 'am', 'broadcast',
-                '-a', 'android.intent.action.AIRPLANE_MODE', '--ez', 'state', 'false'
-            )
-            await result.wait()
+            # result = await asyncio.create_subprocess_exec(
+            #     'adb', '-s', device_id, 'shell', 'am', 'broadcast',
+            #     '-a', 'android.intent.action.AIRPLANE_MODE', '--ez', 'state', 'false'
+            # )
+            # await result.wait()
 
             # Ожидание восстановления соединения
             logger.info(f"Device {device_id} exited airplane mode, waiting 15 seconds for reconnection...")
-            await asyncio.sleep(15)
+            await asyncio.sleep(5)
 
             logger.info(f"Airplane mode rotation completed for {device_id}")
             return True
