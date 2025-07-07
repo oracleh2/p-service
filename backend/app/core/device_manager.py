@@ -1346,3 +1346,325 @@ class DeviceManager:
         except Exception as e:
             logger.error(f"Error checking port usage: {e}")
             return True  # В случае ошибки считаем порт занятым
+
+        # Добавьте эти методы в backend/app/core/device_manager.py
+
+    async def enhanced_discover_all_devices(self):
+        """Улучшенное обнаружение всех устройств"""
+        try:
+            from ..utils.device_detection import get_device_detector
+
+            logger.info("🔍 Starting enhanced device discovery...")
+
+            detector = get_device_detector()
+            discovered_devices = await detector.detect_all_devices()
+
+            logger.info(f"🔍 Enhanced discovery found {len(discovered_devices)} devices")
+
+            # Обновляем наш список устройств
+            for device_id, device_info in discovered_devices.items():
+                # Тестируем подключение каждого устройства
+                connectivity_test = await detector.test_device_connectivity(device_id)
+
+                if connectivity_test.get('success', False):
+                    device_info['status'] = 'online'
+                    device_info['connectivity_test'] = connectivity_test
+
+                    # Получаем внешний IP если возможно
+                    external_ip = await self._get_device_external_ip_enhanced(device_info)
+                    if external_ip:
+                        device_info['external_ip'] = external_ip
+
+                else:
+                    device_info['status'] = 'offline'
+                    device_info['connectivity_error'] = connectivity_test.get('error', 'Unknown error')
+
+                # Обновляем информацию об устройстве
+                self.devices[device_id] = device_info
+                logger.info(
+                    f"📱 Device {device_id}: {device_info['status']} - {device_info.get('device_info', 'Unknown')}")
+
+            # Синхронизируем с базой данных
+            await self.sync_devices_to_database()
+
+            logger.info(f"✅ Enhanced discovery completed. Total devices: {len(self.devices)}")
+            return self.devices
+
+        except Exception as e:
+            logger.error(f"❌ Enhanced discovery failed: {e}")
+            # Fallback к старому методу
+            return await self.discover_all_devices()
+
+    async def _get_device_external_ip_enhanced(self, device_info: dict) -> Optional[str]:
+        """Улучшенное получение внешнего IP устройства"""
+        device_type = device_info.get('type')
+
+        try:
+            if device_type == 'android':
+                # Для Android пытаемся через ADB
+                adb_id = device_info.get('adb_id')
+                if adb_id:
+                    return await self._get_android_external_ip_via_adb(adb_id)
+
+            elif device_type == 'usb_modem':
+                # Для USB модема пытаемся через AT команды
+                return await self._get_usb_modem_external_ip(device_info)
+
+            elif device_type in ['network_device', 'raspberry_pi']:
+                # Для сетевых устройств пытаемся через интерфейс
+                return await self._get_network_device_external_ip(device_info)
+
+        except Exception as e:
+            logger.error(f"Error getting external IP for {device_info.get('id')}: {e}")
+
+        return None
+
+    async def _get_android_external_ip_via_adb(self, adb_id: str) -> Optional[str]:
+        """Получение внешнего IP Android устройства через ADB"""
+        try:
+            # Пытаемся получить IP через curl на устройстве
+            result = await asyncio.create_subprocess_exec(
+                'adb', '-s', adb_id, 'shell', 'curl', '-s', '--max-time', '10', 'https://httpbin.org/ip',
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            stdout, stderr = await result.communicate()
+
+            if result.returncode == 0:
+                import json
+                data = json.loads(stdout.decode())
+                return data.get('origin', '').split(',')[0].strip()
+
+        except Exception as e:
+            logger.debug(f"Error getting Android IP via ADB: {e}")
+
+        # Альтернативный способ через wget
+        try:
+            result = await asyncio.create_subprocess_exec(
+                'adb', '-s', adb_id, 'shell', 'wget', '-qO-', '--timeout=10', 'https://icanhazip.com',
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            stdout, stderr = await result.communicate()
+
+            if result.returncode == 0:
+                ip = stdout.decode().strip()
+                if self._is_valid_ip(ip):
+                    return ip
+
+        except Exception as e:
+            logger.debug(f"Error getting Android IP via wget: {e}")
+
+        return None
+
+    async def _get_usb_modem_external_ip(self, device_info: dict) -> Optional[str]:
+        """Получение внешнего IP USB модема"""
+        try:
+            # Пытаемся найти сетевой интерфейс модема
+            interface = await self._find_modem_network_interface(device_info)
+            if interface:
+                return await self._get_interface_external_ip(interface)
+
+        except Exception as e:
+            logger.debug(f"Error getting USB modem IP: {e}")
+
+        return None
+
+    async def _find_modem_network_interface(self, device_info: dict) -> Optional[str]:
+        """Поиск сетевого интерфейса USB модема"""
+        try:
+            # Ищем интерфейсы, которые могут принадлежать модему
+            interfaces = netifaces.interfaces()
+
+            # Проверяем типичные интерфейсы модемов
+            for interface in interfaces:
+                if interface.startswith(('wwan', 'ppp', 'usb')):
+                    try:
+                        addrs = netifaces.ifaddresses(interface)
+                        if netifaces.AF_INET in addrs:
+                            return interface
+                    except:
+                        continue
+
+        except Exception as e:
+            logger.debug(f"Error finding modem interface: {e}")
+
+        return None
+
+    async def _get_network_device_external_ip(self, device_info: dict) -> Optional[str]:
+        """Получение внешнего IP сетевого устройства"""
+        interface = device_info.get('interface')
+        if interface:
+            return await self._get_interface_external_ip(interface)
+        return None
+
+    async def _get_interface_external_ip(self, interface: str) -> Optional[str]:
+        """Получение внешнего IP через конкретный интерфейс"""
+        try:
+            # Используем curl с привязкой к интерфейсу
+            result = await asyncio.create_subprocess_exec(
+                'curl', '-s', '--max-time', '10', '--interface', interface, 'https://httpbin.org/ip',
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            stdout, stderr = await result.communicate()
+
+            if result.returncode == 0:
+                import json
+                data = json.loads(stdout.decode())
+                return data.get('origin', '').split(',')[0].strip()
+
+        except Exception as e:
+            logger.debug(f"Error getting IP via interface {interface}: {e}")
+
+        # Альтернативный способ
+        try:
+            result = await asyncio.create_subprocess_exec(
+                'wget', '-qO-', '--timeout=10', '--bind-address',
+                await self._get_interface_ip(interface), 'https://icanhazip.com',
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            stdout, stderr = await result.communicate()
+
+            if result.returncode == 0:
+                ip = stdout.decode().strip()
+                if self._is_valid_ip(ip):
+                    return ip
+
+        except Exception as e:
+            logger.debug(f"Error getting IP via wget for interface {interface}: {e}")
+
+        return None
+
+    async def _get_interface_ip(self, interface: str) -> Optional[str]:
+        """Получение локального IP интерфейса"""
+        try:
+            addrs = netifaces.ifaddresses(interface)
+            if netifaces.AF_INET in addrs:
+                return addrs[netifaces.AF_INET][0]['addr']
+        except:
+            pass
+        return None
+
+    def _is_valid_ip(self, ip: str) -> bool:
+        """Проверка валидности IP адреса"""
+        try:
+            import ipaddress
+            ipaddress.ip_address(ip)
+            return True
+        except:
+            return False
+
+    async def enhanced_rotate_device_ip(self, device_id: str) -> bool:
+        """Улучшенная ротация IP с автоматическим выбором метода"""
+        try:
+            from ..core.managers import get_enhanced_rotation_manager
+
+            rotation_manager = get_enhanced_rotation_manager()
+            if not rotation_manager:
+                logger.error("Enhanced rotation manager not available")
+                return False
+
+            success, result = await rotation_manager.rotate_device_ip(device_id)
+
+            if success:
+                logger.info(f"Enhanced IP rotation successful for {device_id}: {result}")
+
+                # Обновляем информацию об устройстве
+                if device_id in self.devices:
+                    # Ждем немного для стабилизации соединения
+                    await asyncio.sleep(5)
+
+                    # Получаем новый IP
+                    device_info = self.devices[device_id]
+                    new_ip = await self._get_device_external_ip_enhanced(device_info)
+
+                    if new_ip:
+                        self.devices[device_id]['external_ip'] = new_ip
+                        logger.info(f"New IP for {device_id}: {new_ip}")
+
+                return True
+            else:
+                logger.error(f"Enhanced IP rotation failed for {device_id}: {result}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error in enhanced IP rotation for {device_id}: {e}")
+            return False
+
+    async def get_device_rotation_capabilities(self, device_id: str) -> dict:
+        """Получение возможностей ротации устройства"""
+        device = self.devices.get(device_id)
+        if not device:
+            return {"error": "Device not found"}
+
+        device_type = device.get('type', 'unknown')
+
+        capabilities = {
+            'device_id': device_id,
+            'device_type': device_type,
+            'available_methods': device.get('rotation_methods', []),
+            'recommended_method': self._get_recommended_rotation_method(device_type),
+            'supports_auto_rotation': True,
+            'estimated_rotation_time': self._get_estimated_rotation_time(device_type),
+            'risk_factors': self._get_rotation_risk_factors(device_type)
+        }
+
+        # Проверяем специфические возможности устройства
+        if device_type == 'android':
+            capabilities.update({
+                'adb_available': device.get('adb_id') is not None,
+                'usb_tethering': device.get('interface') is not None,
+                'battery_level': device.get('battery_level', 0)
+            })
+        elif device_type == 'usb_modem':
+            capabilities.update({
+                'serial_port': device.get('interface'),
+                'at_commands_support': True,
+                'manufacturer': device.get('manufacturer', 'Unknown')
+            })
+
+        return capabilities
+
+    def _get_recommended_rotation_method(self, device_type: str) -> str:
+        """Получение рекомендуемого метода ротации"""
+        recommendations = {
+            'android': 'data_toggle',
+            'usb_modem': 'at_commands',
+            'raspberry_pi': 'ppp_restart',
+            'network_device': 'interface_restart'
+        }
+        return recommendations.get(device_type, 'data_toggle')
+
+    def _get_estimated_rotation_time(self, device_type: str) -> int:
+        """Получение предполагаемого времени ротации в секундах"""
+        times = {
+            'android': 15,
+            'usb_modem': 25,
+            'raspberry_pi': 30,
+            'network_device': 10
+        }
+        return times.get(device_type, 20)
+
+    def _get_rotation_risk_factors(self, device_type: str) -> list:
+        """Получение факторов риска при ротации"""
+        risks = {
+            'android': [
+                'Временная потеря соединения (10-15 сек)',
+                'Возможна необходимость разблокировки устройства'
+            ],
+            'usb_modem': [
+                'Длительное время восстановления (20-30 сек)',
+                'Возможны проблемы с AT командами'
+            ],
+            'raspberry_pi': [
+                'Наиболее длительный процесс (30+ сек)',
+                'Может потребоваться физический доступ'
+            ],
+            'network_device': [
+                'Кратковременная потеря соединения',
+                'Минимальные риски'
+            ]
+        }
+        return risks.get(device_type, ['Неизвестные риски'])

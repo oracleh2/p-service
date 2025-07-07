@@ -271,6 +271,99 @@ export const useDeviceStore = defineStore('modems', () => {
         error.value = ''
     }
 
+    const enhancedRotateModemIP = async (modemId, forceMethod = null) => {
+        try {
+            const requestData = forceMethod ? { force_method: forceMethod } : {}
+
+            const response = await api.post(`/admin/devices/${modemId}/rotate`, requestData)
+
+            // Update modem status in store
+            const modemIndex = modems.value.findIndex(m =>
+                (m.modem_id === modemId || m.device_id === modemId || m.id === modemId)
+            )
+
+            if (modemIndex !== -1) {
+                modems.value[modemIndex].last_rotation = new Date().toISOString()
+
+                // Обновляем IP если получен новый
+                if (response.data.new_ip) {
+                    modems.value[modemIndex].external_ip = response.data.new_ip
+                    modems.value[modemIndex].current_external_ip = response.data.new_ip
+                }
+            }
+
+            return response.data
+        } catch (err) {
+            console.error('Failed to rotate modem IP (enhanced):', err)
+            throw err
+        }
+    }
+
+    const getRotationMethods = async (modemId) => {
+        try {
+            const response = await api.get(`/admin/devices/${modemId}/rotation-methods`)
+            return response.data
+        } catch (err) {
+            console.error('Failed to get rotation methods:', err)
+            throw err
+        }
+    }
+
+    const testRotationMethod = async (modemId, method) => {
+        try {
+            const response = await api.post(`/admin/devices/${modemId}/test-rotation`, {
+                method: method
+            })
+            return response.data
+        } catch (err) {
+            console.error('Failed to test rotation method:', err)
+            throw err
+        }
+    }
+
+    const enhancedRotateAllModems = async () => {
+        try {
+            const response = await api.post('/admin/devices/rotate-all')
+
+            // Update all modem rotation timestamps and IPs
+            const now = new Date().toISOString()
+
+            if (response.data.results) {
+                Object.keys(response.data.results).forEach(deviceId => {
+                    const result = response.data.results[deviceId]
+                    const modemIndex = modems.value.findIndex(m =>
+                        (m.modem_id === deviceId || m.device_id === deviceId || m.id === deviceId)
+                    )
+
+                    if (modemIndex !== -1) {
+                        modems.value[modemIndex].last_rotation = now
+
+                        // Если есть новый IP в результате
+                        if (result.success && result.new_ip) {
+                            modems.value[modemIndex].external_ip = result.new_ip
+                            modems.value[modemIndex].current_external_ip = result.new_ip
+                        }
+                    }
+                })
+            }
+
+            return response.data
+        } catch (err) {
+            console.error('Failed to rotate all modems (enhanced):', err)
+            throw err
+        }
+    }
+
+    const getModemRotationStatus = async (modemId) => {
+        try {
+            const response = await api.get(`/admin/devices/${modemId}/rotation-status`)
+            return response.data
+        } catch (err) {
+            console.error('Failed to get rotation status:', err)
+            throw err
+        }
+    }
+
     return {
         // State
         modems,
@@ -291,8 +384,8 @@ export const useDeviceStore = defineStore('modems', () => {
         fetchModems,
         getDevices, // ДОБАВЛЕНО: алиас для совместимости
         getModemById,
-        rotateModemIP,
-        rotateAllModems,
+        // rotateModemIP,
+        // rotateAllModems,
         updateRotationInterval,
         toggleAutoRotation,
         addModem,
@@ -303,6 +396,15 @@ export const useDeviceStore = defineStore('modems', () => {
         getModemsByStatus,
         getModemsByType,
         searchModems,
-        clearError
+        clearError,
+
+        enhancedRotateModemIP,
+        getRotationMethods,
+        testRotationMethod,
+        enhancedRotateAllModems,
+        getModemRotationStatus,
+
+        rotateModemIP: enhancedRotateModemIP,  // Заменяем старый метод
+        rotateAllModems: enhancedRotateAllModems  // Заменяем старый метод
     }
 })

@@ -1,0 +1,598 @@
+# backend/app/core/enhanced_rotation_manager.py
+"""
+Улучшенный менеджер ротации IP для универсальной поддержки различных типов устройств
+"""
+
+import asyncio
+import uuid
+import aiohttp
+import subprocess
+import time
+import serial
+from datetime import datetime, timezone, timedelta
+from typing import Dict, Any, Optional, List, Tuple
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+import structlog
+
+from ..models.database import AsyncSessionLocal
+from ..models.base import ProxyDevice, RotationConfig, IpHistory
+from ..utils.device_utils import detect_device_capabilities, get_device_interfaces
+
+logger = structlog.get_logger()
+
+
+class EnhancedRotationManager:
+    """Улучшенный менеджер ротации IP с поддержкой различных типов устройств"""
+
+    def __init__(self):
+        self.rotation_tasks: Dict[str, asyncio.Task] = {}
+        self.rotation_in_progress: Dict[str, bool] = {}
+        self.device_manager = None
+        self._running = False
+
+        # Поддерживаемые методы ротации для каждого типа устройства
+        self.rotation_methods = {
+            'android': [
+                'data_toggle',
+                'airplane_mode',
+                'usb_reconnect',
+                'network_interface_reset'
+            ],
+            'usb_modem': [
+                'at_commands',
+                'usb_reset',
+                'interface_restart',
+                'serial_reconnect'
+            ],
+            'raspberry_pi': [
+                'ppp_restart',
+                'modem_reset',
+                'interface_restart',
+                'gpio_reset'
+            ],
+            'network_device': [
+                'interface_restart',
+                'dhcp_renew',
+                'route_refresh'
+            ]
+        }
+
+    async def start(self):
+        """Запуск менеджера ротации"""
+        if self._running:
+            logger.warning("Enhanced rotation manager already running")
+            return
+
+        self._running = True
+        logger.info("Starting enhanced rotation manager")
+
+        # Запуск задач ротации для всех активных устройств
+        await self.start_all_rotation_tasks()
+
+        # Запуск фонового мониторинга
+        asyncio.create_task(self._monitor_rotation_tasks())
+
+    async def rotate_device_ip(self, device_id: str) -> Tuple[bool, str]:
+        """
+        Универсальная ротация IP устройства
+
+        Returns:
+            Tuple[bool, str]: (успех, сообщение/новый_IP)
+        """
+        try:
+            device_uuid = uuid.UUID(device_id)
+        except ValueError:
+            return False, "Invalid device ID format"
+
+        # Проверка, не происходит ли уже ротация
+        if self.rotation_in_progress.get(device_id, False):
+            return False, "Rotation already in progress"
+
+        self.rotation_in_progress[device_id] = True
+
+        try:
+            # Получение информации об устройстве
+            async with AsyncSessionLocal() as db:
+                stmt = select(ProxyDevice).where(ProxyDevice.id == device_uuid)
+                result = await db.execute(stmt)
+                device = result.scalar_one_or_none()
+
+                if not device:
+                    return False, "Device not found"
+
+                # Получение конфигурации ротации
+                stmt = select(RotationConfig).where(
+                    RotationConfig.device_id == device_uuid
+                )
+                result = await db.execute(stmt)
+                config = result.scalar_one_or_none()
+
+                if not config:
+                    # Создание конфигурации по умолчанию
+                    config = await self._create_default_rotation_config(device)
+
+                logger.info(
+                    "Starting universal IP rotation",
+                    device_id=device_id,
+                    device_name=device.name,
+                    device_type=device.device_type,
+                    method=config.rotation_method
+                )
+
+                # Сохранение старого IP для сравнения
+                old_ip = device.current_external_ip
+
+                # Выполнение ротации в зависимости от типа устройства
+                success, message = await self._execute_rotation(device, config)
+
+                # Обновление статистики
+                await self._update_rotation_stats(device_id, success)
+
+                if success:
+                    logger.info(
+                        "IP rotation completed successfully",
+                        device_id=device_id,
+                        device_name=device.name,
+                        message=message
+                    )
+
+                    # Ожидание стабилизации соединения
+                    await asyncio.sleep(self._get_stabilization_delay(device.device_type))
+
+                    # Получение нового IP и проверка изменения
+                    new_ip = await self._verify_ip_change(device, old_ip)
+
+                    if new_ip and new_ip != old_ip:
+                        # Обновление IP в базе данных
+                        await self._update_device_ip(device_id, new_ip)
+                        await self._save_ip_history(device_id, new_ip)
+
+                        logger.info(
+                            "New IP obtained successfully",
+                            device_id=device_id,
+                            old_ip=old_ip,
+                            new_ip=new_ip
+                        )
+                        return True, new_ip
+                    else:
+                        # Если IP не изменился, пробуем альтернативный метод
+                        if config.rotation_method != self._get_fallback_method(device.device_type):
+                            logger.warning(
+                                "IP didn't change, trying fallback method",
+                                device_id=device_id,
+                                current_method=config.rotation_method
+                            )
+
+                            fallback_success, fallback_message = await self._try_fallback_rotation(device, config)
+                            if fallback_success:
+                                new_ip = await self._verify_ip_change(device, old_ip)
+                                if new_ip and new_ip != old_ip:
+                                    await self._update_device_ip(device_id, new_ip)
+                                    await self._save_ip_history(device_id, new_ip)
+                                    return True, new_ip
+
+                        return False, f"IP rotation executed but IP didn't change (still {old_ip})"
+                else:
+                    logger.error(
+                        "IP rotation failed",
+                        device_id=device_id,
+                        device_name=device.name,
+                        error=message
+                    )
+                    return False, message
+
+        except Exception as e:
+            logger.error(
+                "Error during IP rotation",
+                device_id=device_id,
+                error=str(e)
+            )
+            return False, f"Rotation error: {str(e)}"
+        finally:
+            self.rotation_in_progress[device_id] = False
+
+    async def _execute_rotation(self, device: ProxyDevice, config: RotationConfig) -> Tuple[bool, str]:
+        """Выполнение ротации в зависимости от типа устройства и метода"""
+        device_type = device.device_type
+        method = config.rotation_method
+
+        try:
+            if device_type == 'android':
+                return await self._rotate_android_device(device, method)
+            elif device_type == 'usb_modem':
+                return await self._rotate_usb_modem(device, method)
+            elif device_type == 'raspberry_pi':
+                return await self._rotate_raspberry_pi(device, method)
+            elif device_type == 'network_device':
+                return await self._rotate_network_device(device, method)
+            else:
+                return False, f"Unsupported device type: {device_type}"
+        except Exception as e:
+            return False, f"Rotation execution error: {str(e)}"
+
+    async def _rotate_android_device(self, device: ProxyDevice, method: str) -> Tuple[bool, str]:
+        """Ротация IP для Android устройства"""
+        adb_id = device.name  # Используем name как ADB ID
+
+        try:
+            if method == 'data_toggle':
+                return await self._android_data_toggle(adb_id)
+            elif method == 'airplane_mode':
+                return await self._android_airplane_mode(adb_id)
+            elif method == 'usb_reconnect':
+                return await self._android_usb_reconnect(adb_id, device)
+            elif method == 'network_interface_reset':
+                return await self._android_interface_reset(adb_id, device)
+            else:
+                return False, f"Unknown Android rotation method: {method}"
+        except Exception as e:
+            return False, f"Android rotation error: {str(e)}"
+
+    async def _android_data_toggle(self, adb_id: str) -> Tuple[bool, str]:
+        """Переключение мобильных данных на Android"""
+        try:
+            # Отключение мобильных данных
+            result = await asyncio.create_subprocess_exec(
+                'adb', '-s', adb_id, 'shell', 'svc', 'data', 'disable',
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            stdout, stderr = await result.communicate()
+
+            if result.returncode != 0:
+                return False, f"Failed to disable data: {stderr.decode()}"
+
+            # Ожидание отключения
+            await asyncio.sleep(3)
+
+            # Включение мобильных данных
+            result = await asyncio.create_subprocess_exec(
+                'adb', '-s', adb_id, 'shell', 'svc', 'data', 'enable',
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            stdout, stderr = await result.communicate()
+
+            if result.returncode != 0:
+                return False, f"Failed to enable data: {stderr.decode()}"
+
+            # Ожидание восстановления соединения
+            await asyncio.sleep(10)
+
+            return True, "Data toggle completed successfully"
+
+        except Exception as e:
+            return False, f"Data toggle error: {str(e)}"
+
+    async def _android_airplane_mode(self, adb_id: str) -> Tuple[bool, str]:
+        """Режим полета на Android"""
+        try:
+            # Включение режима полета
+            result = await asyncio.create_subprocess_exec(
+                'adb', '-s', adb_id, 'shell', 'settings', 'put', 'global', 'airplane_mode_on', '1',
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            await result.communicate()
+
+            # Применение настроек
+            result = await asyncio.create_subprocess_exec(
+                'adb', '-s', adb_id, 'shell', 'am', 'broadcast',
+                '-a', 'android.intent.action.AIRPLANE_MODE', '--ez', 'state', 'true',
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            await result.communicate()
+
+            # Ожидание
+            await asyncio.sleep(5)
+
+            # Отключение режима полета
+            result = await asyncio.create_subprocess_exec(
+                'adb', '-s', adb_id, 'shell', 'settings', 'put', 'global', 'airplane_mode_on', '0',
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            await result.communicate()
+
+            # Применение настроек
+            result = await asyncio.create_subprocess_exec(
+                'adb', '-s', adb_id, 'shell', 'am', 'broadcast',
+                '-a', 'android.intent.action.AIRPLANE_MODE', '--ez', 'state', 'false',
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            await result.communicate()
+
+            # Ожидание восстановления
+            await asyncio.sleep(15)
+
+            return True, "Airplane mode toggle completed successfully"
+
+        except Exception as e:
+            return False, f"Airplane mode error: {str(e)}"
+
+    async def _android_usb_reconnect(self, adb_id: str, device: ProxyDevice) -> Tuple[bool, str]:
+        """Переподключение USB tethering на Android"""
+        try:
+            # Отключение USB tethering
+            result = await asyncio.create_subprocess_exec(
+                'adb', '-s', adb_id, 'shell', 'svc', 'usb', 'setFunctions', 'none',
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            await result.communicate()
+
+            await asyncio.sleep(3)
+
+            # Включение USB tethering
+            result = await asyncio.create_subprocess_exec(
+                'adb', '-s', adb_id, 'shell', 'svc', 'usb', 'setFunctions', 'rndis',
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            await result.communicate()
+
+            await asyncio.sleep(8)
+
+            return True, "USB reconnect completed successfully"
+
+        except Exception as e:
+            return False, f"USB reconnect error: {str(e)}"
+
+    async def _rotate_usb_modem(self, device: ProxyDevice, method: str) -> Tuple[bool, str]:
+        """Ротация IP для USB модема"""
+        try:
+            if method == 'at_commands':
+                return await self._usb_modem_at_commands(device)
+            elif method == 'usb_reset':
+                return await self._usb_modem_usb_reset(device)
+            elif method == 'interface_restart':
+                return await self._usb_modem_interface_restart(device)
+            elif method == 'serial_reconnect':
+                return await self._usb_modem_serial_reconnect(device)
+            else:
+                return False, f"Unknown USB modem rotation method: {method}"
+        except Exception as e:
+            return False, f"USB modem rotation error: {str(e)}"
+
+    async def _usb_modem_at_commands(self, device: ProxyDevice) -> Tuple[bool, str]:
+        """Ротация через AT команды"""
+        serial_port = self._detect_modem_serial_port(device)
+        if not serial_port:
+            return False, "Could not detect modem serial port"
+
+        try:
+            with serial.Serial(serial_port, 115200, timeout=5) as ser:
+                # Отключение радио
+                ser.write(b'AT+CFUN=0\r\n')
+                response = ser.read(100)
+                logger.debug(f"CFUN=0 response: {response}")
+
+                await asyncio.sleep(5)
+
+                # Включение радио
+                ser.write(b'AT+CFUN=1\r\n')
+                response = ser.read(100)
+                logger.debug(f"CFUN=1 response: {response}")
+
+                await asyncio.sleep(20)
+
+            return True, "AT commands rotation completed successfully"
+
+        except Exception as e:
+            return False, f"AT commands error: {str(e)}"
+
+    async def _verify_ip_change(self, device: ProxyDevice, old_ip: str, max_attempts: int = 5) -> Optional[str]:
+        """Проверка изменения IP адреса устройства"""
+        for attempt in range(max_attempts):
+            try:
+                new_ip = await self._get_device_external_ip(device)
+                if new_ip and new_ip != old_ip:
+                    return new_ip
+
+                if attempt < max_attempts - 1:  # Не ждем после последней попытки
+                    await asyncio.sleep(5)
+
+            except Exception as e:
+                logger.warning(f"IP check attempt {attempt + 1} failed: {e}")
+
+        return None
+
+    async def _get_device_external_ip(self, device: ProxyDevice) -> Optional[str]:
+        """Получение внешнего IP адреса устройства"""
+        try:
+            # Попытка получить IP через прокси (если настроен)
+            if device.ip_address and device.port:
+                proxy_url = f"http://{device.ip_address}:{device.port}"
+
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        'https://httpbin.org/ip',
+                        proxy=proxy_url,
+                        timeout=aiohttp.ClientTimeout(total=30)
+                    ) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            return data.get('origin', '').split(',')[0].strip()
+
+            # Альтернативный способ для Android устройств
+            if device.device_type == 'android':
+                return await self._get_android_external_ip(device.name)
+
+            return None
+
+        except Exception as e:
+            logger.error(f"Error getting external IP: {e}")
+            return None
+
+    async def _get_android_external_ip(self, adb_id: str) -> Optional[str]:
+        """Получение внешнего IP для Android устройства через ADB"""
+        try:
+            result = await asyncio.create_subprocess_exec(
+                'adb', '-s', adb_id, 'shell', 'curl', '-s', 'https://httpbin.org/ip',
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            stdout, stderr = await result.communicate()
+
+            if result.returncode == 0:
+                import json
+                data = json.loads(stdout.decode())
+                return data.get('origin', '').split(',')[0].strip()
+
+        except Exception as e:
+            logger.error(f"Error getting Android external IP via ADB: {e}")
+
+        return None
+
+    def _get_stabilization_delay(self, device_type: str) -> int:
+        """Получение времени стабилизации в зависимости от типа устройства"""
+        delays = {
+            'android': 12,
+            'usb_modem': 20,
+            'raspberry_pi': 25,
+            'network_device': 8
+        }
+        return delays.get(device_type, 15)
+
+    def _get_fallback_method(self, device_type: str) -> str:
+        """Получение запасного метода ротации"""
+        fallbacks = {
+            'android': 'airplane_mode',
+            'usb_modem': 'interface_restart',
+            'raspberry_pi': 'modem_reset',
+            'network_device': 'dhcp_renew'
+        }
+        return fallbacks.get(device_type, 'interface_restart')
+
+    async def _try_fallback_rotation(self, device: ProxyDevice, config: RotationConfig) -> Tuple[bool, str]:
+        """Попытка ротации запасным методом"""
+        fallback_method = self._get_fallback_method(device.device_type)
+        logger.info(f"Trying fallback rotation method: {fallback_method}")
+
+        # Временно меняем метод
+        original_method = config.rotation_method
+        config.rotation_method = fallback_method
+
+        try:
+            result = await self._execute_rotation(device, config)
+            return result
+        finally:
+            # Возвращаем оригинальный метод
+            config.rotation_method = original_method
+
+    def _detect_modem_serial_port(self, device: ProxyDevice) -> Optional[str]:
+        """Определение серийного порта модема"""
+        # Попытка определения порта по имени устройства или интерфейсу
+        if 'ttyUSB' in device.name:
+            return f"/dev/{device.name}"
+        elif 'ttyACM' in device.name:
+            return f"/dev/{device.name}"
+
+        # Поиск доступных портов
+        import glob
+        for pattern in ['/dev/ttyUSB*', '/dev/ttyACM*']:
+            ports = glob.glob(pattern)
+            if ports:
+                return ports[0]  # Возвращаем первый найденный
+
+        return None
+
+    async def _create_default_rotation_config(self, device: ProxyDevice) -> RotationConfig:
+        """Создание конфигурации ротации по умолчанию"""
+        default_methods = {
+            'android': 'data_toggle',
+            'usb_modem': 'at_commands',
+            'raspberry_pi': 'ppp_restart',
+            'network_device': 'interface_restart'
+        }
+
+        method = default_methods.get(device.device_type, 'data_toggle')
+
+        config = RotationConfig(
+            device_id=device.id,
+            rotation_method=method,
+            rotation_interval=600,
+            auto_rotation=True
+        )
+
+        async with AsyncSessionLocal() as db:
+            db.add(config)
+            await db.commit()
+            await db.refresh(config)
+
+        return config
+
+    async def _update_device_ip(self, device_id: str, new_ip: str):
+        """Обновление IP адреса устройства в базе данных"""
+        try:
+            async with AsyncSessionLocal() as db:
+                device_uuid = uuid.UUID(device_id)
+                stmt = update(ProxyDevice).where(
+                    ProxyDevice.id == device_uuid
+                ).values(
+                    current_external_ip=new_ip,
+                    updated_at=datetime.now(timezone.utc)
+                )
+                await db.execute(stmt)
+                await db.commit()
+        except Exception as e:
+            logger.error(f"Error updating device IP: {e}")
+
+    async def _save_ip_history(self, device_id: str, ip_address: str):
+        """Сохранение IP адреса в историю"""
+        try:
+            async with AsyncSessionLocal() as db:
+                device_uuid = uuid.UUID(device_id)
+
+                ip_history = IpHistory(
+                    device_id=device_uuid,
+                    ip_address=ip_address,
+                    first_seen=datetime.now(timezone.utc),
+                    last_seen=datetime.now(timezone.utc),
+                    total_requests=1
+                )
+                db.add(ip_history)
+                await db.commit()
+        except Exception as e:
+            logger.error(f"Error saving IP history: {e}")
+
+    async def _update_rotation_stats(self, device_id: str, success: bool):
+        """Обновление статистики ротации"""
+        try:
+            async with AsyncSessionLocal() as db:
+                device_uuid = uuid.UUID(device_id)
+
+                stmt = update(ProxyDevice).where(
+                    ProxyDevice.id == device_uuid
+                ).values(
+                    last_ip_rotation=datetime.now(timezone.utc),
+                    updated_at=datetime.now(timezone.utc)
+                )
+                await db.execute(stmt)
+                await db.commit()
+        except Exception as e:
+            logger.error(f"Error updating rotation stats: {e}")
+
+    async def stop(self):
+        """Остановка менеджера ротации"""
+        if not self._running:
+            return
+
+        self._running = False
+        logger.info("Stopping enhanced rotation manager")
+
+        # Остановка всех задач ротации
+        for device_id, task in self.rotation_tasks.items():
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+        self.rotation_tasks.clear()
+        self.rotation_in_progress.clear()
+
+    async def start_all_rotation_tasks(self):
+        """Запуск задач ротации для всех активных устройств - заглушка"""
+        # Реализация автоматического запуска задач ротации
+        pass
+
+    async def _monitor_rotation_tasks(self):
+        """Мониторинг состояния задач ротации - заглушка"""
+        # Реализация мониторинга
+        pass
