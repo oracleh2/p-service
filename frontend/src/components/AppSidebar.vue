@@ -154,7 +154,8 @@ import {
     DocumentTextIcon,
     CogIcon,
     UsersIcon,
-    WifiIcon
+    WifiIcon,
+    BugAntIcon
 } from '@heroicons/vue/24/outline'
 
 const route = useRoute()
