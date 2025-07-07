@@ -4,7 +4,7 @@
 set -e
 
 HONOR_DEVICE_ID="AH3SCP4B11207250"
-USB_INTERFACE="enx566cf3eaaf4b"
+USB_INTERFACE="enx7a859934e22a"
 
 echo "🔧 Setting up HONOR phone USB tethering..."
 
@@ -36,7 +36,7 @@ echo "  - Wait for the interface to appear on server"
 
 # Ждем появления USB интерфейса
 echo "3. Waiting for USB interface to appear..."
-for i in {1..30}; do
+for i in {1..10}; do
     if ip link show "$USB_INTERFACE" 2>/dev/null | grep -q "UP"; then
         echo "✅ USB interface $USB_INTERFACE is UP"
         break
@@ -45,7 +45,7 @@ for i in {1..30}; do
         sudo ip link set "$USB_INTERFACE" up
         break
     else
-        echo "⏳ Waiting for USB interface... ($i/30)"
+        echo "⏳ Waiting for USB interface... ($i/10)"
         sleep 2
     fi
 done
