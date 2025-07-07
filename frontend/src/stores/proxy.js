@@ -1,6 +1,7 @@
+
 import {defineStore} from 'pinia'
 import {ref, computed} from 'vue'
-import api from '../utils/api'
+import api from '@/utils/api'
 
 export const useProxyStore = defineStore('proxy', () => {
   // ... существующие состояния и методы ...

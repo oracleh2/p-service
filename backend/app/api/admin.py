@@ -124,60 +124,7 @@ async def update_system_config_endpoint(
 
 
 # Управление устройствами
-@router.get("/devices")
-async def admin_get_devices_legacy():
-    """Список устройств (legacy endpoint для фронтенда)"""
-    try:
-        from ..core.managers import get_device_manager
-        device_manager = get_device_manager()
-        if not device_manager:
-            return []
 
-        await device_manager.discover_all_devices()
-        all_devices = await device_manager.get_all_devices()
-
-        devices_list = []
-        for device_id, device_info in all_devices.items():
-            external_ip = await device_manager.get_device_external_ip(device_id)
-
-            device_data = {
-                "modem_id": device_id,
-                "id": device_id,
-                "device_info": device_info.get('device_info', f"Device {device_id}"),
-                "name": device_info.get('device_info', f"Device {device_id}"),
-                "modem_type": device_info['type'],
-                "device_type": device_info['type'],
-                "type": device_info['type'],
-                "status": device_info['status'],
-                "external_ip": external_ip or "Not connected",
-                "operator": device_info.get('operator', 'Unknown'),
-                "interface": device_info.get('interface', 'Unknown'),
-                "last_rotation": time.time() * 1000,  # В миллисекундах для JS
-                "total_requests": 0,
-                "successful_requests": 0,
-                "failed_requests": 0,
-                "success_rate": 100.0,  # Всегда float
-                "auto_rotation": True,
-                "avg_response_time": 0
-            }
-
-            # Добавляем специфичные поля
-            if device_info['type'] == 'android':
-                device_data.update({
-                    "manufacturer": device_info.get('manufacturer', 'Unknown'),
-                    "model": device_info.get('model', 'Unknown'),
-                    "android_version": device_info.get('android_version', 'Unknown'),
-                    "battery_level": device_info.get('battery_level', 0),
-                    "adb_id": device_info.get('adb_id', ''),
-                })
-
-            devices_list.append(device_data)
-
-        return devices_list
-
-    except Exception as e:
-        logger.error(f"Error getting devices: {e}")
-        return []
 
 @router.get("/devices/{device_id}")
 async def admin_get_device_by_id_legacy(device_id: str):
@@ -417,6 +364,60 @@ async def rotate_device_ip(
             detail=f"Failed to rotate IP: {str(e)}"
         )
 
+@router.get("/devices")
+async def admin_get_devices_legacy():
+    """Список устройств (legacy endpoint для фронтенда)"""
+    try:
+        from ..core.managers import get_device_manager
+        device_manager = get_device_manager()
+        if not device_manager:
+            return []
+
+        await device_manager.discover_all_devices()
+        all_devices = await device_manager.get_all_devices()
+
+        devices_list = []
+        for device_id, device_info in all_devices.items():
+            external_ip = await device_manager.get_device_external_ip(device_id)
+
+            device_data = {
+                "modem_id": device_id,
+                "id": device_id,
+                "device_info": device_info.get('device_info', f"Device {device_id}"),
+                "name": device_info.get('device_info', f"Device {device_id}"),
+                "modem_type": device_info['type'],
+                "device_type": device_info['type'],
+                "type": device_info['type'],
+                "status": device_info['status'],
+                "external_ip": external_ip or "Not connected",
+                "operator": device_info.get('operator', 'Unknown'),
+                "interface": device_info.get('interface', 'Unknown'),
+                "last_rotation": time.time() * 1000,  # В миллисекундах для JS
+                "total_requests": 0,
+                "successful_requests": 0,
+                "failed_requests": 0,
+                "success_rate": 100.0,  # Всегда float
+                "auto_rotation": True,
+                "avg_response_time": 0
+            }
+
+            # Добавляем специфичные поля
+            if device_info['type'] == 'android':
+                device_data.update({
+                    "manufacturer": device_info.get('manufacturer', 'Unknown'),
+                    "model": device_info.get('model', 'Unknown'),
+                    "android_version": device_info.get('android_version', 'Unknown'),
+                    "battery_level": device_info.get('battery_level', 0),
+                    "adb_id": device_info.get('adb_id', ''),
+                })
+
+            devices_list.append(device_data)
+
+        return devices_list
+
+    except Exception as e:
+        logger.error(f"Error getting devices: {e}")
+        return []
 
 # Статистика системы
 @router.get("/system/stats", response_model=SystemStatsResponse)
