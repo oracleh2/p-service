@@ -258,9 +258,10 @@ class DedicatedProxyServer:
         )
 
     async def handle_connect(self, request, device):
-        """Обработка CONNECT запросов (HTTPS туннелирование)"""
+        """ПОЛНАЯ реализация CONNECT запросов (HTTPS туннелирование)"""
         try:
-            host_port = request.path_qs
+            # Парсим хост и порт из запроса
+            host_port = request.path_qs  # например "httpbin.org:443"
             if ':' in host_port:
                 host, port = host_port.rsplit(':', 1)
                 port = int(port)
@@ -268,26 +269,214 @@ class DedicatedProxyServer:
                 host = host_port
                 port = 443
 
-            logger.info(f"CONNECT tunnel to {host}:{port} via device {self.device_id}")
+            logger.info(f"🔗 CONNECT tunnel: {host}:{port} via device {self.device_id}")
 
-            # Создаем соединение с целевым сервером
-            reader, writer = await asyncio.open_connection(host, port)
+            # Получаем интерфейс устройства для туннелирования
+            interface = device.get('interface') or device.get('usb_interface')
 
-            # Отправляем успешный ответ клиенту
+            if interface and interface != 'unknown':
+                logger.info(f"🔧 Creating tunnel via interface: {interface}")
+                return await self.create_interface_tunnel(request, host, port, interface)
+            else:
+                logger.info("🔧 Creating standard tunnel (no specific interface)")
+                return await self.create_standard_tunnel(request, host, port)
+
+        except Exception as e:
+            logger.error(f"❌ CONNECT error: {e}")
+            import traceback
+            logger.error(f"❌ Traceback: {traceback.format_exc()}")
+            return web.Response(
+                status=502,
+                text="Bad Gateway"
+            )
+
+    async def create_interface_tunnel(self, request, host: str, port: int, interface: str):
+        """Создание туннеля через конкретный интерфейс"""
+        try:
+            # Создаем сокет с привязкой к интерфейсу
+            target_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            target_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+            # Привязываем к интерфейсу (только на Linux)
+            try:
+                target_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, interface.encode())
+                logger.info(f"✅ Socket bound to interface: {interface}")
+            except OSError as e:
+                logger.warning(f"⚠️  Failed to bind to interface {interface}: {e}, using standard connection")
+                # Продолжаем без привязки к интерфейсу
+
+            # Делаем сокет неблокирующим
+            target_sock.setblocking(False)
+
+            # Подключаемся к целевому серверу
+            try:
+                await asyncio.get_event_loop().sock_connect(target_sock, (host, port))
+                logger.info(f"✅ Connected to {host}:{port} via interface {interface}")
+            except OSError as e:
+                target_sock.close()
+                logger.error(f"❌ Failed to connect to {host}:{port}: {e}")
+                return web.Response(status=502, text="Connection failed")
+
+            # Получаем транспорт клиента
+            client_transport = request.transport
+            if not client_transport:
+                target_sock.close()
+                return web.Response(status=502, text="No client transport")
+
+            # Отправляем клиенту подтверждение установки туннеля
             success_response = b"HTTP/1.1 200 Connection established\r\n\r\n"
-            request.transport.write(success_response)
+            client_transport.write(success_response)
+            await asyncio.sleep(0.1)  # Даем время на отправку
 
-            # Здесь должен быть полный туннель, но для начала просто подтверждаем
-            # Закрываем соединение с сервером (временно)
-            writer.close()
-            await writer.wait_closed()
+            logger.info(f"🚀 Starting bidirectional tunnel for {host}:{port}")
 
-            # Возвращаем пустой ответ - туннель "установлен"
+            # Запускаем bidirectional туннель
+            await self.run_tunnel(client_transport, target_sock, host, port)
+
             return web.Response(status=200, text="")
 
         except Exception as e:
-            logger.error(f"CONNECT error: {e}")
-            return web.Response(status=502, text="Bad Gateway")
+            logger.error(f"❌ Interface tunnel error: {e}")
+            if 'target_sock' in locals():
+                target_sock.close()
+            return web.Response(status=502, text="Tunnel creation failed")
+
+    async def create_standard_tunnel(self, request, host: str, port: int):
+        """Создание стандартного туннеля"""
+        try:
+            # Создаем соединение с целевым сервером
+            target_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            target_sock.setblocking(False)
+
+            try:
+                await asyncio.get_event_loop().sock_connect(target_sock, (host, port))
+                logger.info(f"✅ Connected to {host}:{port} (standard)")
+            except OSError as e:
+                target_sock.close()
+                logger.error(f"❌ Failed to connect to {host}:{port}: {e}")
+                return web.Response(status=502, text="Connection failed")
+
+            # Получаем транспорт клиента
+            client_transport = request.transport
+            if not client_transport:
+                target_sock.close()
+                return web.Response(status=502, text="No client transport")
+
+            # Отправляем подтверждение
+            success_response = b"HTTP/1.1 200 Connection established\r\n\r\n"
+            client_transport.write(success_response)
+            await asyncio.sleep(0.1)
+
+            logger.info(f"🚀 Starting standard tunnel for {host}:{port}")
+
+            # Запускаем туннель
+            await self.run_tunnel(client_transport, target_sock, host, port)
+
+            return web.Response(status=200, text="")
+
+        except Exception as e:
+            logger.error(f"❌ Standard tunnel error: {e}")
+            if 'target_sock' in locals():
+                target_sock.close()
+            return web.Response(status=502, text="Connection failed")
+
+    async def run_tunnel(self, client_transport, target_sock, host: str, port: int):
+        """Запуск bidirectional туннеля между клиентом и сервером"""
+        try:
+            # Получаем сокет клиента
+            client_sock = client_transport.get_extra_info('socket')
+            if not client_sock:
+                raise Exception("No client socket available")
+
+            logger.info(f"🔄 Running tunnel: client <-> {host}:{port}")
+
+            # Создаем задачи для перенаправления данных в обе стороны
+            client_to_server_task = asyncio.create_task(
+                self.forward_data(client_sock, target_sock, f"client -> {host}:{port}")
+            )
+            server_to_client_task = asyncio.create_task(
+                self.forward_data(target_sock, client_sock, f"{host}:{port} -> client")
+            )
+
+            # Ждем завершения любой из задач (что означает закрытие соединения)
+            try:
+                done, pending = await asyncio.wait(
+                    [client_to_server_task, server_to_client_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                    timeout=300  # 5 минут таймаут
+                )
+
+                logger.info(f"🔚 Tunnel ended for {host}:{port}")
+
+            except asyncio.TimeoutError:
+                logger.info(f"⏰ Tunnel timeout for {host}:{port}")
+            finally:
+                # Отменяем оставшиеся задачи
+                client_to_server_task.cancel()
+                server_to_client_task.cancel()
+
+                # Закрываем соединения
+                try:
+                    target_sock.close()
+                except:
+                    pass
+
+                try:
+                    client_transport.close()
+                except:
+                    pass
+
+        except Exception as e:
+            logger.error(f"❌ Tunnel run error: {e}")
+            try:
+                target_sock.close()
+            except:
+                pass
+
+    async def forward_data(self, from_sock, to_sock, direction: str):
+        """Перенаправление данных между сокетами"""
+        try:
+            total_bytes = 0
+            while True:
+                # Читаем данные из исходного сокета
+                try:
+                    data = await asyncio.get_event_loop().sock_recv(from_sock, 8192)
+                    if not data:
+                        logger.debug(f"📤 {direction}: connection closed (no data)")
+                        break
+
+                    # Отправляем данные в целевой сокет
+                    await asyncio.get_event_loop().sock_sendall(to_sock, data)
+                    total_bytes += len(data)
+
+                    if total_bytes % 10240 == 0:  # Логируем каждые 10KB
+                        logger.debug(f"📊 {direction}: {total_bytes} bytes transferred")
+
+                except ConnectionResetError:
+                    logger.debug(f"📤 {direction}: connection reset")
+                    break
+                except OSError as e:
+                    if e.errno in (9, 104):  # Bad file descriptor or Connection reset
+                        logger.debug(f"📤 {direction}: connection error {e}")
+                        break
+                    raise
+
+            logger.debug(f"✅ {direction}: finished, total {total_bytes} bytes")
+
+        except asyncio.CancelledError:
+            logger.debug(f"🚫 {direction}: cancelled")
+        except Exception as e:
+            logger.debug(f"❌ {direction}: error {e}")
+        finally:
+            # Попытка закрыть сокеты при завершении
+            try:
+                from_sock.close()
+            except:
+                pass
+            try:
+                to_sock.close()
+            except:
+                pass
 
     def is_running(self):
         """Проверка статуса работы сервера"""
