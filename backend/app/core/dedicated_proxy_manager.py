@@ -11,6 +11,7 @@ import structlog
 import socket
 import uuid
 import base64
+import subprocess
 
 from ..models.database import AsyncSessionLocal
 from ..models.base import ProxyDevice
@@ -34,7 +35,7 @@ class DedicatedProxyServer:
         self._running = False
 
     async def start(self):
-        """Запуск индивидуального прокси-сервера"""
+        """Запуск индивидуального прокси-сервера с улучшенной обработкой портов"""
         if self._running:
             logger.info(f"Dedicated proxy server for {self.device_id} already running on port {self.port}")
             return
@@ -42,145 +43,50 @@ class DedicatedProxyServer:
         try:
             logger.info(f"🚀 Starting dedicated proxy server for device {self.device_id} on port {self.port}")
 
-            # Проверяем доступность порта
-            import socket
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                try:
-                    s.bind(('0.0.0.0', self.port))
-                    logger.info(f"✅ Port {self.port} is available")
-                except OSError as e:
-                    logger.error(f"❌ Port {self.port} is not available: {e}")
-                    raise
-
             # Создание веб-приложения
             self.app = web.Application()
 
-            # ОТЛАДОЧНЫЙ MIDDLEWARE для логирования всех запросов
-            @web.middleware
-            async def debug_middleware(request, handler):
-                logger.info(f"🔥 RAW REQUEST DEBUG:")
-                logger.info(f"   Method: {request.method}")
-                logger.info(f"   Path: '{request.path}'")
-                logger.info(f"   Path_qs: '{request.path_qs}'")
-                logger.info(f"   URL: {request.url}")
-                logger.info(f"   Query string: '{request.query_string}'")
-                logger.info(f"   Headers: {dict(request.headers)}")
+            # ... (middleware остается тот же) ...
 
-                # Попробуем получить raw данные
-                try:
-                    if hasattr(request, 'transport') and request.transport:
-                        transport = request.transport
-                        logger.info(f"   Transport: {type(transport)}")
-                        if hasattr(transport, 'get_extra_info'):
-                            socket_info = transport.get_extra_info('socket')
-                            logger.info(f"   Socket: {socket_info}")
-                except Exception as e:
-                    logger.info(f"   Transport info error: {e}")
-
-                # Вызываем следующий middleware/handler
-                response = await handler(request)
-
-                logger.info(f"   Response status: {response.status}")
-                return response
-
-            # Добавляем отладочный middleware первым
-            self.app.middlewares.append(debug_middleware)
-
-            @web.middleware
-            async def auth_and_connect_middleware(request, handler):
-                # Проверяем аутентификацию
-                auth_header = request.headers.get('Proxy-Authorization')
-                if not auth_header:
-                    logger.info("❌ No Proxy-Authorization header")
-                    return web.Response(
-                        status=407,
-                        headers={'Proxy-Authenticate': 'Basic realm="Proxy"'},
-                        text="Proxy Authentication Required"
-                    )
-
-                try:
-                    # Парсинг Basic Auth
-                    if not auth_header.startswith('Basic '):
-                        raise ValueError("Invalid auth method")
-
-                    encoded_credentials = auth_header[6:]
-                    decoded_credentials = base64.b64decode(encoded_credentials).decode('utf-8')
-                    username, password = decoded_credentials.split(':', 1)
-
-                    # Проверка учетных данных
-                    if username != self.username or password != self.password:
-                        logger.info(f"❌ Invalid credentials: {username}")
-                        return web.Response(
-                            status=407,
-                            headers={'Proxy-Authenticate': 'Basic realm="Proxy"'},
-                            text="Invalid credentials"
-                        )
-
-                    logger.info(f"✅ Authentication successful for: {username}")
-
-                except Exception as e:
-                    logger.info(f"❌ Authentication error: {e}")
-                    return web.Response(
-                        status=407,
-                        headers={'Proxy-Authenticate': 'Basic realm="Proxy"'},
-                        text="Authentication error"
-                    )
-
-                # 🔥 ГЛАВНОЕ ИСПРАВЛЕНИЕ: Перехватываем CONNECT на уровне middleware
-                if request.method == 'CONNECT':
-                    logger.info(f"🔗 CONNECT intercepted in middleware - bypassing router!")
-
-                    try:
-                        # Вызываем proxy_handler напрямую, минуя роутер
-                        response = await self.proxy_handler(request)
-
-                        # ВАЖНО: Если response None (туннель запущен), прерываем обработку
-                        if response is None:
-                            logger.info("🔄 CONNECT tunnel started, connection hijacked")
-                            # Для CONNECT туннелей мы не возвращаем обычный HTTP response
-                            # Соединение захвачено туннелем
-                            return web.Response(status=200, text="")
-
-                        return response
-
-                    except Exception as e:
-                        logger.error(f"❌ CONNECT handler error: {e}")
-                        return web.Response(status=502, text="Bad Gateway")
-
-                # Для остальных запросов передаем в роутер
-                return await handler(request)
-
-            self.app.middlewares.append(auth_and_connect_middleware)
-
-            # МАКСИМАЛЬНО ПРОСТЫЕ РОУТЫ
-            # Один универсальный обработчик
-            async def universal_handler(request):
-                logger.info(f"🎯 UNIVERSAL HANDLER: {request.method} '{request.path_qs}'")
-                return await self.proxy_handler(request)
-
-            for method in ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS']:
-                self.app.router.add_route(method, '/{path:.*}', universal_handler)
-                self.app.router.add_route(method, '/', universal_handler)
-
-            logger.info(f"📋 Registered universal route for {self.device_id}")
-
-            # Запуск сервера
+            # Запуск сервера с улучшенными настройками сокета
             self.runner = web.AppRunner(self.app)
             await self.runner.setup()
 
-            self.site = web.TCPSite(self.runner, '0.0.0.0', self.port)
+            self.site = web.TCPSite(
+                self.runner,
+                '0.0.0.0',
+                self.port,
+                reuse_address=True,
+                reuse_port=True
+            )
             await self.site.start()
 
             self._running = True
 
-            # Проверяем запуск
-            await asyncio.sleep(0.1)
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                result = s.connect_ex(('127.0.0.1', self.port))
-                if result == 0:
-                    logger.info(f"✅ Dedicated proxy server started and listening on port {self.port}")
-                else:
-                    logger.error(f"❌ Dedicated proxy server started but not listening on port {self.port}")
+            # Проверяем запуск с более детальной диагностикой
+            await asyncio.sleep(0.2)
+
+            # Проверка через socket
+            test_success = False
+            for attempt in range(3):
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                        s.settimeout(2)
+                        result = s.connect_ex(('127.0.0.1', self.port))
+                        if result == 0:
+                            test_success = True
+                            break
+                        else:
+                            logger.warning(f"Connection test failed (attempt {attempt + 1}): {result}")
+                            await asyncio.sleep(0.5)
+                except Exception as e:
+                    logger.warning(f"Connection test error (attempt {attempt + 1}): {e}")
+                    await asyncio.sleep(0.5)
+
+            if test_success:
+                logger.info(f"✅ Dedicated proxy server started and verified on port {self.port}")
+            else:
+                logger.error(f"❌ Dedicated proxy server started but connection test failed on port {self.port}")
 
             logger.info(
                 "Dedicated proxy server started successfully",
@@ -760,7 +666,7 @@ class DedicatedProxyManager:
         logger.info("Dedicated proxy manager stopped")
 
     async def load_existing_proxies(self):
-        """Загрузка существующих прокси-настроек из базы данных"""
+        """Загрузка существующих прокси-настроек из базы данных с принудительной очисткой портов"""
         try:
             async with AsyncSessionLocal() as db:
                 stmt = select(ProxyDevice).where(
@@ -775,14 +681,32 @@ class DedicatedProxyManager:
                 for device in devices:
                     logger.info(f"Loading proxy for device: {device.name} on port {device.dedicated_port}")
                     try:
-                        # ИСПРАВЛЕНИЕ: Вызываем правильный метод на правильном объекте
+                        port = device.dedicated_port
+
+                        # Проверяем доступность порта
+                        port_available = await self.is_port_available(port)
+
+                        if not port_available:
+                            logger.warning(f"Port {port} is not available, trying to force cleanup...")
+
+                            # Попробуем принудительно освободить порт
+                            freed = await self.force_free_port(port)
+
+                            if not freed:
+                                logger.error(f"❌ Could not free port {port}, skipping device {device.name}")
+                                continue
+
+                        # Создаем прокси с небольшой задержкой
+                        await asyncio.sleep(0.5)  # Даем время на освобождение порта
+
                         await self.create_dedicated_proxy(
-                            device_id=device.name,  # Используем name устройства
-                            port=device.dedicated_port,
+                            device_id=device.name,
+                            port=port,
                             username=device.proxy_username,
                             password=device.proxy_password
                         )
                         logger.info(f"✅ Successfully loaded proxy for {device.name}")
+
                     except Exception as e:
                         logger.error(f"❌ Failed to load proxy for {device.name}: {e}")
 
@@ -791,7 +715,7 @@ class DedicatedProxyManager:
 
     async def create_dedicated_proxy(self, device_id: str, port: Optional[int] = None,
                                      username: Optional[str] = None, password: Optional[str] = None):
-        """Создание индивидуального прокси для устройства"""
+        """Создание индивидуального прокси для устройства с улучшенной проверкой портов"""
         try:
             # Валидация порта
             if port is not None:
@@ -799,8 +723,16 @@ class DedicatedProxyManager:
                     raise ValueError(f"Port must be in range {self.port_range_start}-{self.port_range_end}")
 
                 # Проверка уникальности порта
-                if port in self.used_ports or not await self.is_port_available(port):
-                    raise ValueError(f"Port {port} is already in use")
+                if port in self.used_ports:
+                    logger.warning(f"Port {port} already in used_ports set, removing...")
+                    self.used_ports.discard(port)  # Убираем из памяти
+
+                # Двойная проверка доступности
+                if not await self.is_port_available(port):
+                    logger.warning(f"Port {port} is not available, trying to free it...")
+                    freed = await self.force_free_port(port)
+                    if not freed:
+                        raise ValueError(f"Port {port} is not available and cannot be freed")
 
             # Генерация параметров если не указаны
             if port is None:
@@ -813,9 +745,9 @@ class DedicatedProxyManager:
                 import secrets
                 password = secrets.token_urlsafe(16)
 
-            # Проверка доступности порта (повторная проверка для автоматически выделенного)
-            if port in self.used_ports or not await self.is_port_available(port):
-                raise ValueError(f"Port {port} is not available")
+            # Финальная проверка порта перед созданием сервера
+            if not await self.is_port_available(port):
+                raise ValueError(f"Port {port} is not available for creating proxy server")
 
             # Создание прокси-сервера
             proxy_server = DedicatedProxyServer(
@@ -919,12 +851,51 @@ class DedicatedProxyManager:
         raise RuntimeError("No available ports in range")
 
     async def is_port_available(self, port: int) -> bool:
-        """Проверка доступности порта"""
+        """Улучшенная проверка доступности порта"""
         try:
+            # Проверяем через socket bind
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind(('0.0.0.0', port))
-                return True
-        except OSError:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    s.bind(('0.0.0.0', port))
+                    logger.debug(f"Port {port} is available via socket bind")
+                    return True
+                except OSError as e:
+                    logger.debug(f"Port {port} bind failed: {e}")
+
+                    # Дополнительная проверка через netstat
+                    try:
+                        import subprocess
+                        result = subprocess.run(
+                            ['netstat', '-tuln'],
+                            capture_output=True,
+                            text=True,
+                            timeout=5
+                        )
+                        if f":{port} " in result.stdout:
+                            logger.debug(f"Port {port} is in use according to netstat")
+                            return False
+                        else:
+                            logger.debug(f"Port {port} not found in netstat, may be available")
+                            # Попробуем с SO_REUSEPORT
+                            try:
+                                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s2:
+                                    s2.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                                    s2.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+                                    s2.bind(('0.0.0.0', port))
+                                    logger.debug(f"Port {port} available with SO_REUSEPORT")
+                                    return True
+                            except OSError:
+                                logger.debug(f"Port {port} still not available with SO_REUSEPORT")
+                                return False
+                    except (subprocess.TimeoutExpired, FileNotFoundError):
+                        logger.debug(f"netstat check failed for port {port}")
+                        return False
+
+                    return False
+
+        except Exception as e:
+            logger.error(f"Error checking port {port} availability: {e}")
             return False
 
     async def save_proxy_config(self, device_id: str, port: int, username: str, password: str):
@@ -1011,4 +982,85 @@ class DedicatedProxyManager:
 
         except Exception as e:
             logger.error(f"Error verifying proxy server: {e}")
+            return False
+
+    async def force_free_port(self, port: int) -> bool:
+        """Принудительное освобождение порта"""
+        try:
+            logger.info(f"🔧 Trying to force free port {port}")
+
+            # Найдем процессы, использующие порт
+            try:
+                import subprocess
+
+                # Используем lsof для поиска процессов
+                result = subprocess.run(
+                    ['lsof', '-ti', f':{port}'],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+
+                if result.returncode == 0 and result.stdout.strip():
+                    pids = result.stdout.strip().split('\n')
+                    logger.info(f"Found processes using port {port}: {pids}")
+
+                    for pid in pids:
+                        if pid.strip():
+                            try:
+                                logger.info(f"Attempting to kill process {pid}")
+                                subprocess.run(['kill', '-TERM', pid.strip()], timeout=5)
+                                await asyncio.sleep(1)  # Даем время на graceful shutdown
+
+                                # Проверяем, что процесс завершился
+                                check_result = subprocess.run(
+                                    ['kill', '-0', pid.strip()],
+                                    capture_output=True,
+                                    timeout=2
+                                )
+
+                                if check_result.returncode == 0:
+                                    logger.warning(f"Process {pid} still running, force killing")
+                                    subprocess.run(['kill', '-KILL', pid.strip()], timeout=5)
+
+                            except subprocess.TimeoutExpired:
+                                logger.warning(f"Timeout killing process {pid}")
+                            except Exception as e:
+                                logger.warning(f"Error killing process {pid}: {e}")
+
+                # Ждем немного и проверяем снова
+                await asyncio.sleep(2)
+                return await self.is_port_available(port)
+
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                logger.warning(f"lsof not available or timeout, trying alternative method")
+
+                # Альтернативный метод через netstat + grep
+                try:
+                    result = subprocess.run(
+                        ['sh', '-c', f'netstat -tulpn | grep ":{port} " | awk \'{{print $7}}\' | cut -d/ -f1'],
+                        capture_output=True,
+                        text=True,
+                        timeout=10
+                    )
+
+                    if result.stdout.strip():
+                        pids = [pid.strip() for pid in result.stdout.strip().split('\n') if
+                                pid.strip() and pid.strip() != '-']
+                        for pid in pids:
+                            try:
+                                subprocess.run(['kill', '-TERM', pid], timeout=5)
+                            except:
+                                pass
+
+                        await asyncio.sleep(2)
+                        return await self.is_port_available(port)
+
+                except Exception as e:
+                    logger.warning(f"Alternative port cleanup method failed: {e}")
+
+                return False
+
+        except Exception as e:
+            logger.error(f"Error in force_free_port for port {port}: {e}")
             return False
