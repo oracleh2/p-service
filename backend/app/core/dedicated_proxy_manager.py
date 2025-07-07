@@ -57,8 +57,12 @@ class DedicatedProxyServer:
             # Добавление middleware для аутентификации
             self.app.middlewares.append(self.auth_middleware)
 
-            # ИСПРАВЛЕНО: Используем только универсальный роут
-            # Универсальный обработчик для ВСЕХ методов (включая CONNECT)
+            # ИСПРАВЛЕНО: Явно регистрируем CONNECT роуты
+            # Специальные роуты для CONNECT
+            self.app.router.add_route('CONNECT', '/', self.proxy_handler)
+            self.app.router.add_route('CONNECT', '/{path:.*}', self.proxy_handler)
+
+            # Универсальный обработчик для всех остальных методов
             self.app.router.add_route('*', '/{path:.*}', self.proxy_handler)
 
             # Запуск сервера
