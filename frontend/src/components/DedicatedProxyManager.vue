@@ -762,7 +762,8 @@ export default {
             closeUsageModal,
             editProxy,
             showEditModal,
-            editProxyData
+            editProxyData,
+            closeEditModal
         }
     }
 }
