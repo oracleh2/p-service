@@ -467,7 +467,7 @@ export default {
               }
           }
       }
-  }
+
 
     const forceRefresh = async () => {
       console.log('🔄 Force refresh...')
@@ -632,6 +632,7 @@ export default {
       simpleTest,
       forceRefresh
     }
+
   }
 }
 </script>
