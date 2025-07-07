@@ -896,10 +896,25 @@ class ProxyServer:
 
     # ИЗМЕНЕНИЕ В backend/app/core/proxy_server.py
 
-    async def force_curl_via_interface(self, url, interface_name, method="GET", headers=None, data=None):
+    async def force_curl_via_interface(self, request: web.Request, target_url: str, interface_name: str):
         """Принудительное выполнение запроса через определенный интерфейс используя curl"""
         try:
             logger.info(f"🔧 FORCING CURL via interface: {interface_name}")
+            logger.info(f"🎯 Target URL: {target_url}")
+
+            # Получаем данные запроса
+            method = request.method
+            headers = dict(request.headers)
+
+            # Получаем тело запроса если есть
+            body = None
+            if method in ['POST', 'PUT', 'PATCH']:
+                body = await request.read()
+
+            # Убираем проблемные заголовки
+            headers.pop('Host', None)
+            headers.pop('Content-Length', None)
+            headers.pop('X-Proxy-Device-ID', None)
 
             # Базовая команда curl
             cmd = [
@@ -922,16 +937,15 @@ class ProxyServer:
                 cmd.extend(["-X", method.upper()])
 
             # Добавляем заголовки
-            if headers:
-                for key, value in headers.items():
-                    if key.lower() not in ['host', 'content-length']:
-                        cmd.extend(["--header", f"{key}: {value}"])
+            for key, value in headers.items():
+                if key.lower() not in ['host', 'content-length', 'connection']:
+                    cmd.extend(["--header", f"{key}: {value}"])
 
             # Добавляем данные для POST/PUT
-            if data and method.upper() in ['POST', 'PUT', 'PATCH']:
+            if body:
                 cmd.extend(["--data-binary", "@-"])
 
-            cmd.append(url)
+            cmd.append(target_url)
 
             logger.info(
                 f"🔧 Executing curl command: curl --interface {interface_name} --silent --show-error --fail-with-body --max-time 30...")
@@ -940,14 +954,13 @@ class ProxyServer:
             logger.info("📞 Starting subprocess...")
             process = await asyncio.create_subprocess_exec(
                 *cmd,
-                stdin=asyncio.subprocess.PIPE if data else None,
+                stdin=asyncio.subprocess.PIPE if body else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
 
             # Отправляем данные если есть
-            input_data = data.encode() if isinstance(data, str) else data
-            stdout, stderr = await process.communicate(input=input_data)
+            stdout, stderr = await process.communicate(input=body)
 
             if process.returncode != 0:
                 logger.error(f"❌ curl FAILED! Return code: {process.returncode}")
@@ -962,10 +975,9 @@ class ProxyServer:
             lines = output.split('\n')
             status_code = 200
             response_time = 0.0
-            response_body = ""
-
-            # Извлекаем метаданные
             body_lines = []
+
+            # Извлекаем метаданные и тело ответа
             for line in lines:
                 if line.startswith('HTTPSTATUS:'):
                     status_code = int(line.split(':')[1])
@@ -978,16 +990,22 @@ class ProxyServer:
 
             logger.info(f"🎉 SUCCESS! Interface {interface_name} -> Status {status_code}")
 
-            # ✅ ВАЖНО: ВОЗВРАЩАЕМ РЕЗУЛЬТАТ!
+            # ✅ ВАЖНО: ВОЗВРАЩАЕМ ПРАВИЛЬНУЮ СТРУКТУРУ!
             return {
                 'body': response_body,
                 'status': status_code,
-                'headers': {'Content-Type': 'application/json'},
+                'headers': {
+                    'Content-Type': 'application/json',
+                    'X-Proxy-Interface': interface_name,
+                    'X-Proxy-Via': 'curl'
+                },
                 'response_time': response_time
             }
 
         except Exception as e:
             logger.error(f"❌ Exception in force_curl_via_interface: {e}")
+            import traceback
+            logger.error(f"❌ Traceback: {traceback.format_exc()}")
             return None
 
     async def test_interface_connectivity(self, interface: str) -> bool:
