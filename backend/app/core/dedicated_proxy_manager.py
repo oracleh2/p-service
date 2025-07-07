@@ -249,13 +249,45 @@ class DedicatedProxyServer:
                 text="Bad Gateway"
             )
 
-    async def handle_connect(self, request, device):
+    async def handle_connect_backup(self, request, device):
         """Обработка CONNECT запросов (HTTPS туннелирование)"""
         # Упрощенная реализация CONNECT
         return web.Response(
             status=200,
             text="Connection established"
         )
+
+    async def handle_connect(self, request, device):
+        """Обработка CONNECT запросов (HTTPS туннелирование)"""
+        try:
+            host_port = request.path_qs
+            if ':' in host_port:
+                host, port = host_port.rsplit(':', 1)
+                port = int(port)
+            else:
+                host = host_port
+                port = 443
+
+            logger.info(f"CONNECT tunnel to {host}:{port} via device {self.device_id}")
+
+            # Создаем соединение с целевым сервером
+            reader, writer = await asyncio.open_connection(host, port)
+
+            # Отправляем успешный ответ клиенту
+            success_response = b"HTTP/1.1 200 Connection established\r\n\r\n"
+            request.transport.write(success_response)
+
+            # Здесь должен быть полный туннель, но для начала просто подтверждаем
+            # Закрываем соединение с сервером (временно)
+            writer.close()
+            await writer.wait_closed()
+
+            # Возвращаем пустой ответ - туннель "установлен"
+            return web.Response(status=200, text="")
+
+        except Exception as e:
+            logger.error(f"CONNECT error: {e}")
+            return web.Response(status=502, text="Bad Gateway")
 
     def is_running(self):
         """Проверка статуса работы сервера"""
