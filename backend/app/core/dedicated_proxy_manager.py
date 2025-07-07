@@ -57,13 +57,26 @@ class DedicatedProxyServer:
             # Добавление middleware для аутентификации
             self.app.middlewares.append(self.auth_middleware)
 
-            # ИСПРАВЛЕНО: Явно регистрируем CONNECT роуты
-            # Специальные роуты для CONNECT
+            # РАДИКАЛЬНОЕ ИСПРАВЛЕНИЕ: Регистрируем ВСЕ возможные варианты CONNECT
+
+            # 1. CONNECT к корню
+            self.app.router.add_route('CONNECT', '', self.proxy_handler)
             self.app.router.add_route('CONNECT', '/', self.proxy_handler)
+
+            # 2. CONNECT с любым путем
             self.app.router.add_route('CONNECT', '/{path:.*}', self.proxy_handler)
 
-            # Универсальный обработчик для всех остальных методов
+            # 3. Универсальный обработчик который ловит все остальное
             self.app.router.add_route('*', '/{path:.*}', self.proxy_handler)
+
+            # 4. Добавляем отдельный обработчик для корня
+            self.app.router.add_route('GET', '/', self.proxy_handler)
+            self.app.router.add_route('POST', '/', self.proxy_handler)
+
+            # Логируем зарегистрированные роуты
+            logger.info(f"📋 Registered routes for dedicated proxy {self.device_id}:")
+            for resource in self.app.router.resources():
+                logger.info(f"   Route: {resource}")
 
             # Запуск сервера
             self.runner = web.AppRunner(self.app)
@@ -451,9 +464,14 @@ class DedicatedProxyServer:
     async def proxy_handler(self, request):
         """ИСПРАВЛЕННЫЙ обработчик прокси-запросов для конкретного устройства"""
         try:
-            logger.info(f"🎯 Dedicated proxy request: {request.method} '{request.path_qs}' via device {self.device_id}")
-            logger.info(f"🎯 Request headers: {dict(request.headers)}")
-            logger.info(f"🎯 Request URL: {request.url}")
+            # ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ для диагностики
+            logger.info(f"🎯 DEDICATED PROXY REQUEST RECEIVED!")
+            logger.info(f"🎯 Method: {request.method}")
+            logger.info(f"🎯 Path: '{request.path}'")
+            logger.info(f"🎯 Path_qs: '{request.path_qs}'")
+            logger.info(f"🎯 URL: {request.url}")
+            logger.info(f"🎯 Headers: {dict(request.headers)}")
+            logger.info(f"🎯 Device ID: {self.device_id}")
 
             # Получение информации об устройстве
             device = await self.device_manager.get_device_by_id(self.device_id)
@@ -471,37 +489,50 @@ class DedicatedProxyServer:
                 # Для CONNECT запросов цель может быть в разных местах
                 target = None
 
-                # 1. Проверяем Host заголовок (наиболее вероятно)
+                # 1. Проверяем Host заголовок (наиболее вероятно для CONNECT)
                 if request.headers.get('Host'):
                     target = request.headers.get('Host').strip()
                     logger.info(f"🎯 Target from Host header: '{target}'")
 
                 # 2. Проверяем path_qs (если есть)
-                elif request.path_qs and request.path_qs.strip():
+                elif request.path_qs and request.path_qs.strip() and request.path_qs != '/':
                     target = request.path_qs.strip()
                     logger.info(f"🎯 Target from path_qs: '{target}'")
 
-                # 3. Проверяем полный URL
+                # 3. Проверяем path (без query string)
+                elif request.path and request.path.strip() and request.path != '/':
+                    target = request.path.strip().lstrip('/')
+                    logger.info(f"🎯 Target from path: '{target}'")
+
+                # 4. Проверяем полный URL
                 elif str(request.url) != f"http://192.168.1.50:{self.port}/":
                     target_url = str(request.url)
                     # Извлекаем хост из URL
                     from urllib.parse import urlparse
                     parsed = urlparse(target_url)
-                    if parsed.netloc:
+                    if parsed.netloc and parsed.netloc != f"192.168.1.50:{self.port}":
                         target = parsed.netloc
                         logger.info(f"🎯 Target from URL netloc: '{target}'")
 
                 if not target:
                     logger.error(f"❌ No target for CONNECT request")
                     logger.error(f"❌ Host header: {request.headers.get('Host')}")
+                    logger.error(f"❌ path: '{request.path}'")
                     logger.error(f"❌ path_qs: '{request.path_qs}'")
                     logger.error(f"❌ URL: {request.url}")
+
+                    # ПОПЫТКА ЭКСТРЕННОГО ИЗВЛЕЧЕНИЯ ЦЕЛИ ИЗ ПЕРВОЙ СТРОКИ HTTP
+                    # Попробуем прочитать raw запрос
+                    raw_data = getattr(request, '_raw_data', None)
+                    if raw_data:
+                        logger.info(f"🔍 Raw request data: {raw_data}")
+
                     return web.Response(
                         status=400,
                         text="Bad Request: No target specified for CONNECT"
                     )
 
-                logger.info(f"🔗 CONNECT request for '{target}'")
+                logger.info(f"🔗 CONNECT request for target: '{target}'")
 
                 # Напрямую вызываем handle_connect с правильным target
                 return await self.handle_connect_direct(request, device, target)
