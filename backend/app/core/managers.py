@@ -353,7 +353,7 @@ async def perform_device_rotation(device_id: str, method: str = None) -> tuple[b
 
         if success:
             # Ждем стабилизации соединения
-            stabilization_time = 15 if method == 'airplane_mode' else 10
+            stabilization_time = 10 if method == 'airplane_mode' else 10
             logger.info(f"Waiting {stabilization_time} seconds for connection stabilization...")
             await asyncio.sleep(stabilization_time)
 
