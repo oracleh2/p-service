@@ -32,7 +32,7 @@ class DedicatedProxyServer:
         self.site = None
         self._running = False
 
-    async def start(self):
+    async def startBackup(self):
         """Запуск индивидуального прокси-сервера"""
         if self._running:
             return
@@ -70,6 +70,48 @@ class DedicatedProxyServer:
                 error=str(e)
             )
             raise
+
+    async def start(self):
+        """Запуск менеджера индивидуальных прокси"""
+        if self._running:
+            return
+
+        logger.info("Starting dedicated proxy manager")
+
+        # Загрузка существующих устройств с настроенными прокси
+        await self.load_existing_proxies()
+
+        self._running = True
+        logger.info("Dedicated proxy manager started")
+
+    async def load_existing_proxies(self):
+        """Загрузка существующих прокси-настроек из базы данных"""
+        try:
+            async with AsyncSessionLocal() as db:
+                stmt = select(ProxyDevice).where(
+                    ProxyDevice.proxy_enabled == True,
+                    ProxyDevice.dedicated_port.is_not(None)
+                )
+                result = await db.execute(stmt)
+                devices = result.scalars().all()
+
+                logger.info(f"Found {len(devices)} devices with dedicated proxies in database")
+
+                for device in devices:
+                    logger.info(f"Loading proxy for device: {device.name} on port {device.dedicated_port}")
+                    try:
+                        await self.create_dedicated_proxy(
+                            device_id=device.name,  # ИСПРАВЛЕНИЕ: используем name вместо id
+                            port=device.dedicated_port,
+                            username=device.proxy_username,
+                            password=device.proxy_password
+                        )
+                        logger.info(f"✅ Successfully loaded proxy for {device.name}")
+                    except Exception as e:
+                        logger.error(f"❌ Failed to load proxy for {device.name}: {e}")
+
+        except Exception as e:
+            logger.error("Error loading existing proxies", error=str(e))
 
     async def stop(self):
         """Остановка индивидуального прокси-сервера"""
