@@ -32,45 +32,6 @@ class DedicatedProxyServer:
         self.site = None
         self._running = False
 
-    async def startBackup(self):
-        """Запуск индивидуального прокси-сервера"""
-        if self._running:
-            return
-
-        try:
-            # Создание веб-приложения
-            self.app = web.Application()
-
-            # Добавление middleware для аутентификации
-            self.app.middlewares.append(self.auth_middleware)
-
-            # Добавление роутов
-            self.app.router.add_route('*', '/{path:.*}', self.proxy_handler)
-
-            # Запуск сервера
-            self.runner = web.AppRunner(self.app)
-            await self.runner.setup()
-
-            self.site = web.TCPSite(self.runner, '0.0.0.0', self.port)
-            await self.site.start()
-
-            self._running = True
-            logger.info(
-                "Dedicated proxy server started",
-                device_id=self.device_id,
-                port=self.port,
-                username=self.username
-            )
-
-        except Exception as e:
-            logger.error(
-                "Failed to start dedicated proxy server",
-                device_id=self.device_id,
-                port=self.port,
-                error=str(e)
-            )
-            raise
-
     async def start(self):
         """Запуск индивидуального прокси-сервера"""
         if self._running:
@@ -96,7 +57,11 @@ class DedicatedProxyServer:
             # Добавление middleware для аутентификации
             self.app.middlewares.append(self.auth_middleware)
 
-            # Добавление роутов
+            # ИСПРАВЛЕНО: Добавляем специальные роуты
+            # Специальный обработчик для CONNECT (самый приоритетный)
+            self.app.router.add_route('CONNECT', '/{target:.*}', self.connect_handler)
+
+            # Обычный обработчик для всех остальных методов
             self.app.router.add_route('*', '/{path:.*}', self.proxy_handler)
 
             # Запуск сервера
@@ -136,6 +101,44 @@ class DedicatedProxyServer:
             self._running = False
             raise
 
+    async def connect_handler(self, request):
+        """Специальный обработчик для CONNECT запросов"""
+        try:
+            target = request.match_info.get('target', '')
+            if not target:
+                target = request.headers.get('Host', '')
+
+            logger.info(f"🔗 CONNECT handler: target='{target}' via device {self.device_id}")
+
+            # Получение информации об устройстве
+            device = await self.device_manager.get_device_by_id(self.device_id)
+            if not device or device.get('status') != 'online':
+                logger.error(f"Device {self.device_id} not available or offline")
+                return web.Response(
+                    status=503,
+                    text="Device not available"
+                )
+
+            # Создаем модифицированный запрос с правильным target
+            class ConnectRequest:
+                def __init__(self, original_request, target):
+                    self.original = original_request
+                    self.path_qs = target
+                    self.method = original_request.method
+                    self.headers = original_request.headers
+                    self.transport = original_request.transport
+
+            modified_request = ConnectRequest(request, target)
+            return await self.handle_connect(modified_request, device)
+
+        except Exception as e:
+            logger.error(f"Error in CONNECT handler: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return web.Response(
+                status=502,
+                text="Bad Gateway"
+            )
     async def stop(self):
         """Остановка индивидуального прокси-сервера"""
         if not self._running:
