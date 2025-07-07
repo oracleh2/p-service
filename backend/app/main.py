@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timezone
 
 from .config import settings
-from .api import auth, proxy, admin, stats, devices
+from .api import auth, proxy, admin, stats, devices, dedicated_proxy
 from .core.managers import init_managers, cleanup_managers, get_proxy_server
 
 # Настройка логирования
@@ -73,6 +73,9 @@ app.include_router(admin.router, prefix="/api/v1/admin", tags=["admin"])
 app.include_router(admin.router, prefix="/admin", tags=["admin-legacy"])  # Для совместимости с фронтендом
 app.include_router(stats.router, prefix="/api/v1/stats", tags=["stats"])
 app.include_router(stats.router, prefix="/stats", tags=["stats-legacy"])  # Для совместимости с фронтендом
+
+app.include_router(dedicated_proxy.router, prefix="/admin/dedicated-proxy", tags=["dedicated-proxy"])
+
 
 # Middleware для логирования запросов
 @app.middleware("http")

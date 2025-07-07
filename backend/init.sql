@@ -154,3 +154,10 @@ INSERT INTO system_config (key, value, description, config_type) VALUES
 ('alert_success_rate_threshold', '85', 'Порог успешности запросов для алертов (%)', 'integer'),
 ('device_offline_alert_minutes', '5', 'Время офлайн устройства для алерта (минуты)', 'integer')
 ON CONFLICT (key) DO NOTHING;
+
+
+-- Добавление новых полей в таблицу устройств
+ALTER TABLE proxy_devices ADD COLUMN dedicated_port INTEGER UNIQUE;
+ALTER TABLE proxy_devices ADD COLUMN proxy_username VARCHAR(255);
+ALTER TABLE proxy_devices ADD COLUMN proxy_password VARCHAR(255);
+ALTER TABLE proxy_devices ADD COLUMN proxy_enabled BOOLEAN DEFAULT TRUE;

@@ -1,6 +1,8 @@
 # backend/app/core/managers.py - ИСПРАВЛЕННАЯ ВЕРСИЯ
 
 from typing import Optional
+
+from .dedicated_proxy_manager import DedicatedProxyManager
 from .device_manager import DeviceManager
 from .proxy_server import ProxyServer
 import structlog
@@ -14,11 +16,13 @@ _proxy_server: Optional[ProxyServer] = None
 _rotation_manager = None
 _stats_collector = None
 _managers_initialized = False
+_dedicated_proxy_manager: Optional[DedicatedProxyManager] = None
+
 
 
 async def init_managers():
     """Инициализация всех менеджеров"""
-    global _device_manager, _proxy_server, _managers_initialized
+    global _device_manager, _proxy_server, _dedicated_proxy_manager, _managers_initialized
 
     try:
         if _managers_initialized:
@@ -38,6 +42,12 @@ async def init_managers():
             _proxy_server = ProxyServer(_device_manager, _stats_collector)
             # Не запускаем сразу, запустим позже в startup event
             logger.info("✅ Proxy server initialized")
+
+        # Инициализация DedicatedProxyManager
+        if _dedicated_proxy_manager is None:
+            _dedicated_proxy_manager = DedicatedProxyManager(_device_manager)
+            await _dedicated_proxy_manager.start()
+            logger.info("✅ Dedicated proxy manager initialized")
 
         _managers_initialized = True
         logger.info("✅ All managers initialized successfully")
@@ -76,6 +86,9 @@ def get_proxy_server() -> Optional[ProxyServer]:
     """Получение экземпляра прокси-сервера"""
     return _proxy_server
 
+def get_dedicated_proxy_manager() -> Optional[DedicatedProxyManager]:
+    """Получение экземпляра менеджера индивидуальных прокси"""
+    return _dedicated_proxy_manager
 
 def get_rotation_manager():
     """Получение экземпляра менеджера ротации"""
@@ -96,7 +109,7 @@ def get_modem_manager():
 
 async def cleanup_managers():
     """Очистка всех менеджеров при завершении работы"""
-    global _device_manager, _proxy_server
+    global _device_manager, _proxy_server, _dedicated_proxy_manager
 
     try:
         if _proxy_server:
@@ -108,6 +121,11 @@ async def cleanup_managers():
             await _device_manager.stop()
             _device_manager = None
             logger.info("✅ Device manager stopped")
+
+        if _dedicated_proxy_manager:
+            await _dedicated_proxy_manager.stop()
+            _dedicated_proxy_manager = None
+            logger.info("✅ Dedicated proxy manager stopped")
 
     except Exception as e:
         logger.error(f"❌ Error cleaning up managers: {e}")

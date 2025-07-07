@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     max_concurrent_connections: int = 100
     buffer_size: int = 8192
 
+    # Настройки индивидуальных прокси
+    dedicated_proxy_port_range_start: int = 6001
+    dedicated_proxy_port_range_end: int = 7000
+    dedicated_proxy_default_username_prefix: str = "device_"
+    dedicated_proxy_password_length: int = 16
+
     # Monitoring
     health_check_interval: int = 30
     heartbeat_timeout: int = 60

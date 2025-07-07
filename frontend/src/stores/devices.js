@@ -2,7 +2,7 @@ import {defineStore} from 'pinia'
 import {ref, computed} from 'vue'
 import api from '@/utils/api'
 
-export const useModemsStore = defineStore('modems', () => {
+export const useDeviceStore = defineStore('modems', () => {
     // State
     const modems = ref([])
     const isLoading = ref(false)

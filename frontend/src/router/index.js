@@ -1,16 +1,16 @@
 import {createRouter, createWebHistory} from 'vue-router'
-import {useAuthStore} from '@/stores/auth'
+import {useAuthStore} from '../stores/auth'
 
 // Lazy load components
-const Dashboard = () => import('@/views/Dashboard.vue')
-const Login = () => import('@/views/Login.vue')
-const Modems = () => import('@/views/Modems.vue')
-const ModemDetail = () => import('@/views/ModemDetail.vue')
-const Statistics = () => import('@/views/Statistics.vue')
-const Logs = () => import('@/views/Logs.vue')
-const Settings = () => import('@/views/Settings.vue')
-const Users = () => import('@/views/Users.vue')
-const NotFound = () => import('@/views/NotFound.vue')
+const Dashboard = () => import('../views/Dashboard.vue')
+const Login = () => import('../views/Login.vue')
+const Modems = () => import('../views/Modems.vue')
+const ModemDetail = () => import('../views/ModemDetail.vue')
+const Statistics = () => import('../views/Statistics.vue')
+const Logs = () => import('../views/Logs.vue')
+const Settings = () => import('../views/Settings.vue')
+const Users = () => import('../views/Users.vue')
+const NotFound = () => import('../views/NotFound.vue')
 
 const routes = [
     {
@@ -34,6 +34,12 @@ const routes = [
             requiresAuth: true,
             title: 'Dashboard'
         }
+    },
+    {
+        path: '/dedicated-proxies',
+        name: 'DedicatedProxies',
+        component: () => import('../components/DedicatedProxyManager.vue'),
+        meta: {requiresAuth: true, requiresAdmin: true}
     },
     {
         path: '/modems',

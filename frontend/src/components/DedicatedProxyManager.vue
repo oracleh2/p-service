@@ -1,0 +1,589 @@
+<!-- frontend/src/components/DedicatedProxyManager.vue -->
+<template>
+  <div class="dedicated-proxy-manager">
+    <div class="header">
+      <h2>Индивидуальные прокси устройств</h2>
+      <button @click="showCreateModal = true" class="btn-primary">
+        Создать прокси
+      </button>
+    </div>
+
+    <!-- Список прокси -->
+    <div class="proxy-list">
+      <div v-if="loading" class="loading">
+        Загрузка...
+      </div>
+
+      <div v-else-if="proxies.length === 0" class="empty-state">
+        <p>Индивидуальные прокси не настроены</p>
+        <button @click="showCreateModal = true" class="btn-secondary">
+          Создать первый прокси
+        </button>
+      </div>
+
+      <div v-else class="proxy-cards">
+        <div v-for="proxy in proxies" :key="proxy.device_id" class="proxy-card">
+          <div class="proxy-card-header">
+            <h3>{{ proxy.device_name || proxy.device_id }}</h3>
+            <div class="status-badges">
+              <span :class="['badge', proxy.status === 'running' ? 'badge-success' : 'badge-error']">
+                {{ proxy.status }}
+              </span>
+              <span :class="['badge', getDeviceStatusClass(proxy.device_status)]">
+                {{ proxy.device_status }}
+              </span>
+            </div>
+          </div>
+
+          <div class="proxy-info">
+            <div class="info-row">
+              <strong>Порт:</strong> {{ proxy.port }}
+            </div>
+            <div class="info-row">
+              <strong>URL:</strong>
+              <code>{{ proxy.proxy_url }}</code>
+              <button @click="copyToClipboard(proxy.proxy_url)" class="btn-copy">
+                📋
+              </button>
+            </div>
+            <div class="info-row">
+              <strong>Логин:</strong>
+              <code>{{ proxy.username }}</code>
+              <button @click="copyToClipboard(proxy.username)" class="btn-copy">
+                📋
+              </button>
+            </div>
+            <div class="info-row">
+              <strong>Пароль:</strong>
+              <code>{{ showPasswords[proxy.device_id] ? proxy.password : '••••••••' }}</code>
+              <button @click="togglePassword(proxy.device_id)" class="btn-copy">
+                {{ showPasswords[proxy.device_id] ? '🙈' : '👁️' }}
+              </button>
+              <button @click="copyToClipboard(proxy.password)" class="btn-copy">
+                📋
+              </button>
+            </div>
+          </div>
+
+          <div class="proxy-actions">
+            <button @click="showUsageExamples(proxy)" class="btn-secondary">
+              Примеры использования
+            </button>
+            <button @click="regenerateCredentials(proxy.device_id)" class="btn-warning">
+              Сменить пароль
+            </button>
+            <button @click="removeProxy(proxy.device_id)" class="btn-danger">
+              Удалить
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Модальное окно создания прокси -->
+    <div v-if="showCreateModal" class="modal-overlay" @click="closeCreateModal">
+      <div class="modal" @click.stop>
+        <div class="modal-header">
+          <h3>Создать индивидуальный прокси</h3>
+          <button @click="closeCreateModal" class="modal-close">×</button>
+        </div>
+
+        <form @submit.prevent="createProxy" class="modal-body">
+          <div class="form-group">
+            <label>Устройство:</label>
+            <select v-model="newProxy.device_id" required>
+              <option value="">Выберите устройство</option>
+              <option v-for="device in availableDevices" :key="device.id" :value="device.id">
+                {{ device.name }} ({{ device.status }})
+              </option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label>Порт (опционально):</label>
+            <input
+              v-model.number="newProxy.port"
+              type="number"
+              min="6001"
+              max="7000"
+              placeholder="Автоматически"
+            >
+          </div>
+
+          <div class="form-group">
+            <label>Логин (опционально):</label>
+            <input
+              v-model="newProxy.username"
+              type="text"
+              placeholder="Автоматически"
+            >
+          </div>
+
+          <div class="form-group">
+            <label>Пароль (опционально):</label>
+            <input
+              v-model="newProxy.password"
+              type="text"
+              placeholder="Автоматически"
+            >
+          </div>
+
+          <div class="modal-actions">
+            <button type="button" @click="closeCreateModal" class="btn-secondary">
+              Отмена
+            </button>
+            <button type="submit" class="btn-primary" :disabled="!newProxy.device_id">
+              Создать
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Модальное окно примеров использования -->
+    <div v-if="showUsageModal" class="modal-overlay" @click="closeUsageModal">
+      <div class="modal modal-large" @click.stop>
+        <div class="modal-header">
+          <h3>Примеры использования прокси</h3>
+          <button @click="closeUsageModal" class="modal-close">×</button>
+        </div>
+
+        <div class="modal-body">
+          <div v-if="usageExamples" class="usage-examples">
+            <div class="example-section">
+              <h4>cURL</h4>
+              <pre><code>{{ usageExamples.curl.example }}</code></pre>
+              <button @click="copyToClipboard(usageExamples.curl.example)" class="btn-copy">
+                Копировать
+              </button>
+            </div>
+
+            <div class="example-section">
+              <h4>Python requests</h4>
+              <pre><code>{{ usageExamples.python_requests.example }}</code></pre>
+              <button @click="copyToClipboard(usageExamples.python_requests.example)" class="btn-copy">
+                Копировать
+              </button>
+            </div>
+
+            <div class="example-section">
+              <h4>Настройки браузера</h4>
+              <div class="browser-config">
+                <div><strong>Тип:</strong> HTTP</div>
+                <div><strong>Хост:</strong> {{ usageExamples.proxy_info.host }}</div>
+                <div><strong>Порт:</strong> {{ usageExamples.proxy_info.port }}</div>
+                <div><strong>Логин:</strong> {{ usageExamples.proxy_info.username }}</div>
+                <div><strong>Пароль:</strong> {{ usageExamples.proxy_info.password }}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script>
+import { ref, onMounted, reactive } from 'vue'
+import { useProxyStore } from '../stores/proxy'
+import { useDeviceStore } from '../stores/devices'
+
+export default {
+  name: 'DedicatedProxyManager',
+  setup() {
+    const proxyStore = useProxyStore()
+    const deviceStore = useDeviceStore()
+
+    const loading = ref(false)
+    const proxies = ref([])
+    const availableDevices = ref([])
+    const showCreateModal = ref(false)
+    const showUsageModal = ref(false)
+    const usageExamples = ref(null)
+    const showPasswords = reactive({})
+
+    const newProxy = reactive({
+      device_id: '',
+      port: null,
+      username: '',
+      password: ''
+    })
+
+    // Загрузка данных
+    const loadProxies = async () => {
+      loading.value = true
+      try {
+        const response = await proxyStore.getDedicatedProxies()
+        proxies.value = response.proxies
+      } catch (error) {
+        console.error('Error loading proxies:', error)
+      } finally {
+        loading.value = false
+      }
+    }
+
+    const loadAvailableDevices = async () => {
+      try {
+        const devices = await deviceStore.getDevices()
+        // Фильтрация устройств без прокси
+        const proxyDeviceIds = new Set(proxies.value.map(p => p.device_id))
+        availableDevices.value = devices.filter(d => !proxyDeviceIds.has(d.id))
+      } catch (error) {
+        console.error('Error loading devices:', error)
+      }
+    }
+
+    // Создание прокси
+    const createProxy = async () => {
+      try {
+        const proxyData = {
+          device_id: newProxy.device_id,
+          ...(newProxy.port && { port: newProxy.port }),
+          ...(newProxy.username && { username: newProxy.username }),
+          ...(newProxy.password && { password: newProxy.password })
+        }
+
+        await proxyStore.createDedicatedProxy(proxyData)
+        await loadProxies()
+        await loadAvailableDevices()
+        closeCreateModal()
+      } catch (error) {
+        console.error('Error creating proxy:', error)
+        alert('Ошибка создания прокси: ' + error.message)
+      }
+    }
+
+    // Удаление прокси
+    const removeProxy = async (deviceId) => {
+      if (!confirm('Удалить индивидуальный прокси для этого устройства?')) {
+        return
+      }
+
+      try {
+        await proxyStore.removeDedicatedProxy(deviceId)
+        await loadProxies()
+        await loadAvailableDevices()
+      } catch (error) {
+        console.error('Error removing proxy:', error)
+        alert('Ошибка удаления прокси: ' + error.message)
+      }
+    }
+
+    // Смена учетных данных
+    const regenerateCredentials = async (deviceId) => {
+      if (!confirm('Сгенерировать новые учетные данные? Старые перестанут работать.')) {
+        return
+      }
+
+      try {
+        await proxyStore.regenerateProxyCredentials(deviceId)
+        await loadProxies()
+      } catch (error) {
+        console.error('Error regenerating credentials:', error)
+        alert('Ошибка смены учетных данных: ' + error.message)
+      }
+    }
+
+    // Показ примеров использования
+    const showUsageExamples = async (proxy) => {
+      try {
+        const examples = await proxyStore.getUsageExamples(proxy.device_id)
+        usageExamples.value = examples
+        showUsageModal.value = true
+      } catch (error) {
+        console.error('Error loading usage examples:', error)
+        alert('Ошибка загрузки примеров: ' + error.message)
+      }
+    }
+
+    // Утилиты
+    const copyToClipboard = async (text) => {
+      try {
+        await navigator.clipboard.writeText(text)
+        alert('Скопировано в буфер обмена!')
+      } catch (error) {
+        console.error('Error copying to clipboard:', error)
+      }
+    }
+
+    const togglePassword = (deviceId) => {
+      showPasswords[deviceId] = !showPasswords[deviceId]
+    }
+
+    const getDeviceStatusClass = (status) => {
+      switch (status) {
+        case 'online': return 'badge-success'
+        case 'offline': return 'badge-error'
+        case 'busy': return 'badge-warning'
+        default: return 'badge-gray'
+      }
+    }
+
+    const closeCreateModal = () => {
+      showCreateModal.value = false
+      Object.assign(newProxy, {
+        device_id: '',
+        port: null,
+        username: '',
+        password: ''
+      })
+    }
+
+    const closeUsageModal = () => {
+      showUsageModal.value = false
+      usageExamples.value = null
+    }
+
+    // Инициализация
+    onMounted(async () => {
+      await loadProxies()
+      await loadAvailableDevices()
+    })
+
+    return {
+      loading,
+      proxies,
+      availableDevices,
+      showCreateModal,
+      showUsageModal,
+      usageExamples,
+      showPasswords,
+      newProxy,
+      loadProxies,
+      createProxy,
+      removeProxy,
+      regenerateCredentials,
+      showUsageExamples,
+      copyToClipboard,
+      togglePassword,
+      getDeviceStatusClass,
+      closeCreateModal,
+      closeUsageModal
+    }
+  }
+}
+</script>
+
+<style scoped>
+.dedicated-proxy-manager {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 30px;
+}
+
+.header h2 {
+  font-size: 24px;
+  font-weight: 600;
+  color: #333;
+}
+
+.proxy-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+  gap: 20px;
+}
+
+.proxy-card {
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 20px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.proxy-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 15px;
+}
+
+.proxy-card-header h3 {
+  font-size: 18px;
+  font-weight: 600;
+  color: #333;
+}
+
+.status-badges {
+  display: flex;
+  gap: 8px;
+}
+
+.badge {
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  text-transform: uppercase;
+}
+
+.badge-success { background: #d1fae5; color: #065f46; }
+.badge-warning { background: #fef3c7; color: #92400e; }
+.badge-error { background: #fee2e2; color: #991b1b; }
+.badge-gray { background: #f3f4f6; color: #6b7280; }
+
+.proxy-info {
+  margin-bottom: 20px;
+}
+
+.info-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.info-row code {
+  background: #f3f4f6;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 14px;
+}
+
+.btn-copy {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.btn-copy:hover {
+  background: #f3f4f6;
+}
+
+.proxy-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.btn-primary, .btn-secondary, .btn-warning, .btn-danger {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.btn-primary { background: #3b82f6; color: white; }
+.btn-secondary { background: #6b7280; color: white; }
+.btn-warning { background: #f59e0b; color: white; }
+.btn-danger { background: #ef4444; color: white; }
+
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+}
+
+.modal {
+  background: white;
+  border-radius: 8px;
+  max-width: 500px;
+  width: 90%;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.modal-large {
+  max-width: 800px;
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 20px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.modal-close {
+  background: none;
+  border: none;
+  font-size: 24px;
+  cursor: pointer;
+}
+
+.modal-body {
+  padding: 20px;
+}
+
+.form-group {
+  margin-bottom: 20px;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 500;
+}
+
+.form-group input, .form-group select {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  font-size: 14px;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+  margin-top: 20px;
+}
+
+.usage-examples {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.example-section h4 {
+  margin-bottom: 12px;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.example-section pre {
+  background: #f8fafc;
+  padding: 16px;
+  border-radius: 4px;
+  overflow-x: auto;
+  margin-bottom: 8px;
+}
+
+.browser-config {
+  background: #f8fafc;
+  padding: 16px;
+  border-radius: 4px;
+}
+
+.browser-config div {
+  margin-bottom: 8px;
+}
+
+.loading, .empty-state {
+  text-align: center;
+  padding: 40px;
+  color: #6b7280;
+}
+</style>

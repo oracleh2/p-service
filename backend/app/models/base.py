@@ -28,6 +28,12 @@ class ProxyDevice(Base):
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
+    # Новые поля для индивидуальных прокси
+    dedicated_port = Column(Integer, unique=True, nullable=True)
+    proxy_username = Column(String(255), nullable=True)
+    proxy_password = Column(String(255), nullable=True)
+    proxy_enabled = Column(Boolean, default=True, nullable=True)
+
 
 class RotationConfig(Base):
     __tablename__ = "rotation_config"
