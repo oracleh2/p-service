@@ -223,6 +223,7 @@
 import { ref, onMounted, reactive } from 'vue'
 import { useProxyStore } from '../stores/proxy'
 import { useDeviceStore } from '../stores/devices'
+import { useAuthStore } from '../stores/auth'
 import api from '../utils/api'
 
 export default {
@@ -329,7 +330,64 @@ export default {
           api_test: null,
           store_state: null,
           device_manager_debug: null,
+          auth_test: null,
           errors: []
+        }
+
+        // 0. Детальный тест авторизации
+        try {
+          console.log('🔑 Testing authentication in detail...')
+
+          // Проверяем локальное хранилище
+          const localToken = localStorage.getItem('token')
+          const localUser = localStorage.getItem('user')
+
+          console.log('💾 Local storage:', {
+            hasToken: !!localToken,
+            tokenLength: localToken?.length || 0,
+            hasUser: !!localUser,
+            user: localUser ? JSON.parse(localUser) : null
+          })
+
+          // Проверяем store
+          const authStore = useAuthStore()
+          console.log('🏪 Auth store:', {
+            isAuthenticated: authStore.isAuthenticated,
+            isAdmin: authStore.isAdmin,
+            user: authStore.user,
+            token: authStore.token ? `${authStore.token.substring(0, 20)}...` : null
+          })
+
+          // Проверяем API запрос
+          const authResponse = await api.get('/auth/me')
+          results.auth_test = {
+            status: 200,
+            authenticated: true,
+            user: authResponse.data,
+            local_storage: {
+              hasToken: !!localToken,
+              hasUser: !!localUser,
+              storedUser: localUser ? JSON.parse(localUser) : null
+            },
+            store_state: {
+              isAuthenticated: authStore.isAuthenticated,
+              isAdmin: authStore.isAdmin,
+              user: authStore.user
+            }
+          }
+          console.log('✅ Auth test passed:', results.auth_test)
+        } catch (error) {
+          console.error('❌ Auth test failed:', error)
+          results.auth_test = {
+            status: error.response?.status || 'unknown',
+            authenticated: false,
+            error: error.response?.data || error.message,
+            local_storage: {
+              hasToken: !!localStorage.getItem('token'),
+              hasUser: !!localStorage.getItem('user')
+            }
+          }
+          results.errors.push(`Auth test: ${error.message}`)
         }
 
         // 1. Тест API устройств
@@ -339,12 +397,35 @@ export default {
           results.api_test = {
             status: 200,
             ok: true,
-            data: response.data
+            data: response.data,
+            device_count: Array.isArray(response.data) ? response.data.length : 0
           }
           console.log('✅ API response:', results.api_test)
         } catch (error) {
           console.error('❌ API test failed:', error)
+          results.api_test = {
+            status: error.response?.status || 'unknown',
+            ok: false,
+            error: error.response?.data || error.message
+          }
           results.errors.push(`API test: ${error.message}`)
+
+          // Попробуем альтернативный путь
+          try {
+            console.log('📡 Trying alternative API path /api/v1/admin/devices...')
+            const altResponse = await api.get('/api/v1/admin/devices')
+            results.api_test.alternative = {
+              status: 200,
+              data: altResponse.data,
+              path: '/api/v1/admin/devices'
+            }
+          } catch (altError) {
+            results.api_test.alternative = {
+              status: altError.response?.status || 'unknown',
+              error: altError.message,
+              path: '/api/v1/admin/devices'
+            }
+          }
         }
 
         // 2. Состояние store
@@ -361,7 +442,7 @@ export default {
           results.errors.push(`Store state: ${error.message}`)
         }
 
-        // 3. Тест device manager debug endpoint (опционально)
+        // 3. Тест device manager debug endpoint (опционально - игнорируем 404)
         try {
           console.log('🔧 Testing device manager debug...')
           const debugResponse = await api.get('/admin/devices/debug')
@@ -371,8 +452,12 @@ export default {
           }
           console.log('🔧 Device manager debug:', results.device_manager_debug)
         } catch (error) {
-          console.error('❌ Device manager debug failed:', error)
-          results.errors.push(`Device manager debug: ${error.message}`)
+          console.log('❌ Device manager debug failed (expected - endpoint may not exist):', error.response?.status || error.message)
+          results.device_manager_debug = {
+            status: error.response?.status || 'unknown',
+            error: error.response?.data || error.message,
+            note: 'This endpoint may not be available - this is normal'
+          }
         }
 
         debugResults.value = results
@@ -388,32 +473,84 @@ export default {
       try {
         console.log('🧪 Testing API endpoints...')
 
-        // Тест 1: Через api utility (с авторизацией)
-        const data1 = await api.get('/admin/devices')
-        console.log('📡 API call result:', data1.data)
+        const testResults = {
+          timestamp: new Date().toISOString(),
+          tests: []
+        }
 
-        // Тест 2: Через device store
-        const data2 = await deviceStore.fetchModems()
-        console.log('🏪 Device store result:', data2)
+        // Тест различных endpoint'ов
+        const endpointsToTest = [
+          { path: '/admin/devices', method: 'GET', description: 'Admin devices (legacy)' },
+          { path: '/api/v1/admin/devices', method: 'GET', description: 'Admin devices (new API)' },
+          { path: '/admin/devices/debug', method: 'GET', description: 'Debug endpoint' },
+          { path: '/auth/me', method: 'GET', description: 'Current user info' },
+          { path: '/admin/devices/discover', method: 'POST', description: 'Device discovery' }
+        ]
 
-        // Тест 3: Принудительное обнаружение (с авторизацией)
+        for (const endpoint of endpointsToTest) {
+          try {
+            console.log(`🔍 Testing ${endpoint.method} ${endpoint.path}...`)
+
+            let response
+            if (endpoint.method === 'GET') {
+              response = await api.get(endpoint.path)
+            } else if (endpoint.method === 'POST') {
+              response = await api.post(endpoint.path)
+            }
+
+            testResults.tests.push({
+              path: endpoint.path,
+              method: endpoint.method,
+              description: endpoint.description,
+              status: response.status,
+              success: true,
+              dataLength: Array.isArray(response.data) ? response.data.length :
+                         typeof response.data === 'object' ? Object.keys(response.data).length :
+                         response.data ? response.data.toString().length : 0
+            })
+
+            console.log(`✅ ${endpoint.path}: ${response.status}`)
+
+          } catch (error) {
+            console.log(`❌ ${endpoint.path}: ${error.response?.status || 'Network Error'}`)
+
+            testResults.tests.push({
+              path: endpoint.path,
+              method: endpoint.method,
+              description: endpoint.description,
+              status: error.response?.status || 'unknown',
+              success: false,
+              error: error.response?.data?.detail || error.message
+            })
+          }
+
+          // Небольшая пауза между запросами
+          await new Promise(resolve => setTimeout(resolve, 100))
+        }
+
+        // Тест через device store
         try {
-          const data3 = await api.post('/admin/devices/discover')
-          console.log('🔍 Discovery result:', data3.data)
-        } catch (discoveryError) {
-          console.log('❌ Discovery failed:', discoveryError.response?.data || discoveryError.message)
+          console.log('🏪 Testing device store...')
+          const storeData = await deviceStore.fetchModems()
+          testResults.store_test = {
+            success: true,
+            devices_count: Array.isArray(storeData) ? storeData.length : 0,
+            first_device: Array.isArray(storeData) && storeData.length > 0 ? storeData[0] : null
+          }
+        } catch (error) {
+          testResults.store_test = {
+            success: false,
+            error: error.message
+          }
         }
 
-        debugResults.value = {
-          direct_api: data1.data,
-          store_result: data2,
-          timestamp: new Date().toISOString()
-        }
+        debugResults.value = testResults
+        console.log('📋 API test results:', testResults)
 
       } catch (error) {
         console.error('❌ API test failed:', error)
         debugResults.value = {
-          api_test_error: error.response?.data || error.message,
+          api_test_error: error.message,
           timestamp: new Date().toISOString()
         }
       }
