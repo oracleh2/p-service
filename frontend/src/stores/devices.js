@@ -1,3 +1,5 @@
+// frontend/src/stores/devices.js - ДОПОЛНЕННАЯ ВЕРСИЯ
+
 import {defineStore} from 'pinia'
 import {ref, computed} from 'vue'
 import api from '@/utils/api'
@@ -52,6 +54,20 @@ export const useDeviceStore = defineStore('modems', () => {
         } finally {
             isLoading.value = false
         }
+    }
+
+    // ДОБАВЛЕН: Алиас для совместимости с другими компонентами
+    const getDevices = async () => {
+        // Если модемы уже загружены и это было недавно, возвращаем кэшированные данные
+        if (modems.value.length > 0 && lastUpdate.value) {
+            const timeSinceUpdate = Date.now() - lastUpdate.value.getTime()
+            if (timeSinceUpdate < 30000) { // 30 секунд
+                return modems.value
+            }
+        }
+
+        // Иначе загружаем заново
+        return await fetchModems()
     }
 
     const getModemById = async (modemId) => {
@@ -209,27 +225,27 @@ export const useDeviceStore = defineStore('modems', () => {
     }
 
     const testModemBak = async (modemId) => {
-    try {
-        // ВРЕМЕННО используем простой тест вместо proxy/test
-        const response = await api.post(`/admin/devices/${modemId}/test`)
+        try {
+            // ВРЕМЕННО используем простой тест вместо proxy/test
+            const response = await api.post(`/admin/devices/${modemId}/test`)
 
-        // Адаптируем ответ под ожидаемый формат
-        const data = response.data
+            // Адаптируем ответ под ожидаемый формат
+            const data = response.data
 
-        return {
-            success: data.overall_success || false,
-            message: data.message || 'Test completed',
-            response_time_ms: data.test_details?.direct_http_test?.response_time_ms || 0,
-            external_ip: data.external_ip || 'Unknown',
-            device_type: data.device_type || 'Unknown',
-            test_details: data.test_details || {},
-            timestamp: data.test_timestamp || Date.now()
+            return {
+                success: data.overall_success || false,
+                message: data.message || 'Test completed',
+                response_time_ms: data.test_details?.direct_http_test?.response_time_ms || 0,
+                external_ip: data.external_ip || 'Unknown',
+                device_type: data.device_type || 'Unknown',
+                test_details: data.test_details || {},
+                timestamp: data.test_timestamp || Date.now()
+            }
+        } catch (err) {
+            console.error('Failed to test modem:', err)
+            throw err
         }
-    } catch (err) {
-        console.error('Failed to test modem:', err)
-        throw err
     }
-}
 
     const getModemsByStatus = (status) => {
         return modems.value.filter(modem => modem.status === status)
@@ -273,6 +289,7 @@ export const useDeviceStore = defineStore('modems', () => {
 
         // Actions
         fetchModems,
+        getDevices, // ДОБАВЛЕНО: алиас для совместимости
         getModemById,
         rotateModemIP,
         rotateAllModems,

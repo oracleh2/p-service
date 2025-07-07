@@ -1,4 +1,4 @@
-<!-- frontend/src/components/DedicatedProxyManager.vue -->
+<!-- frontend/src/components/DedicatedProxyManager.vue - ИСПРАВЛЕННАЯ ВЕРСИЯ -->
 <template>
   <div class="dedicated-proxy-manager">
     <div class="header">
@@ -6,6 +6,26 @@
       <button @click="showCreateModal = true" class="btn-primary">
         Создать прокси
       </button>
+    </div>
+
+    <!-- Временная диагностика устройств -->
+    <div v-if="showDebug" class="debug-panel">
+      <h3>🔍 Диагностика устройств</h3>
+
+      <div class="debug-buttons">
+        <button @click="debugDevices" class="btn-warning">Диагностировать устройства</button>
+        <button @click="testAPI" class="btn-secondary">Тест API</button>
+        <button @click="showDebug = false" class="btn-danger">Скрыть диагностику</button>
+      </div>
+
+      <div v-if="debugResults" class="debug-output">
+        <h4>Результаты диагностики:</h4>
+        <pre>{{ JSON.stringify(debugResults, null, 2) }}</pre>
+      </div>
+    </div>
+
+    <div v-if="!showDebug" class="debug-toggle">
+      <button @click="showDebug = true" class="btn-secondary">Показать диагностику</button>
     </div>
 
     <!-- Список прокси -->
@@ -93,10 +113,13 @@
             <label>Устройство:</label>
             <select v-model="newProxy.device_id" required>
               <option value="">Выберите устройство</option>
-              <option v-for="device in availableDevices" :key="device.id" :value="device.id">
-                {{ device.name }} ({{ device.status }})
+              <option v-for="device in availableDevices" :key="device.modem_id" :value="device.modem_id">
+                {{ device.device_info || device.modem_id }} ({{ device.status }})
               </option>
             </select>
+            <p v-if="availableDevices.length === 0" class="form-help">
+              Нет доступных устройств. Проверьте что устройства подключены и онлайн.
+            </p>
           </div>
 
           <div class="form-group">
@@ -202,6 +225,9 @@ export default {
     const usageExamples = ref(null)
     const showPasswords = reactive({})
 
+    const showDebug = ref(true) // Показываем диагностику по умолчанию
+    const debugResults = ref(null)
+
     const newProxy = reactive({
       device_id: '',
       port: null,
@@ -224,12 +250,143 @@ export default {
 
     const loadAvailableDevices = async () => {
       try {
-        const devices = await deviceStore.getDevices()
+        console.log('🔍 Loading available devices...')
+
+        // ИСПРАВЛЕНО: используем fetchModems вместо getDevices
+        const devices = await deviceStore.fetchModems()
+        console.log('✅ Loaded devices:', devices)
+
         // Фильтрация устройств без прокси
         const proxyDeviceIds = new Set(proxies.value.map(p => p.device_id))
-        availableDevices.value = devices.filter(d => !proxyDeviceIds.has(d.id))
+        console.log('📋 Existing proxy device IDs:', proxyDeviceIds)
+
+        // ИСПРАВЛЕНО: используем modem_id вместо id для сравнения
+        availableDevices.value = devices.filter(d => {
+          const deviceId = d.modem_id || d.id
+          return !proxyDeviceIds.has(deviceId)
+        })
+
+        console.log('✅ Available devices after filter:', availableDevices.value)
       } catch (error) {
-        console.error('Error loading devices:', error)
+        console.error('❌ Error loading devices:', error)
+        // Предпринимаем попытку получить устройства напрямую из store
+        try {
+          console.log('🔄 Trying to fetch from store directly...')
+          await deviceStore.fetchModems()
+          const devices = deviceStore.modems || []
+          console.log('🏪 Store devices:', devices)
+
+          const proxyDeviceIds = new Set(proxies.value.map(p => p.device_id))
+          availableDevices.value = devices.filter(d => {
+            const deviceId = d.modem_id || d.id
+            return !proxyDeviceIds.has(deviceId)
+          })
+          console.log('✅ Final available devices:', availableDevices.value)
+        } catch (secondError) {
+          console.error('❌ Second attempt failed:', secondError)
+          availableDevices.value = []
+        }
+      }
+    }
+
+    // Диагностические функции
+    const debugDevices = async () => {
+      try {
+        console.log('🔍 Starting comprehensive device debug...')
+
+        const results = {
+          timestamp: new Date().toISOString(),
+          api_test: null,
+          store_state: null,
+          device_manager_debug: null,
+          errors: []
+        }
+
+        // 1. Тест API устройств
+        try {
+          console.log('📡 Testing /admin/devices API...')
+          const response = await fetch('http://192.168.1.50:8000/admin/devices')
+          results.api_test = {
+            status: response.status,
+            ok: response.ok,
+            data: await response.json()
+          }
+          console.log('✅ API response:', results.api_test)
+        } catch (error) {
+          console.error('❌ API test failed:', error)
+          results.errors.push(`API test: ${error.message}`)
+        }
+
+        // 2. Состояние store
+        try {
+          results.store_state = {
+            modems: deviceStore.modems,
+            isLoading: deviceStore.isLoading,
+            error: deviceStore.error,
+            lastUpdate: deviceStore.lastUpdate
+          }
+          console.log('🏪 Store state:', results.store_state)
+        } catch (error) {
+          console.error('❌ Store state check failed:', error)
+          results.errors.push(`Store state: ${error.message}`)
+        }
+
+        // 3. Тест device manager debug endpoint
+        try {
+          console.log('🔧 Testing device manager debug...')
+          const debugResponse = await fetch('http://192.168.1.50:8000/admin/devices/debug')
+          results.device_manager_debug = {
+            status: debugResponse.status,
+            data: await debugResponse.json()
+          }
+          console.log('🔧 Device manager debug:', results.device_manager_debug)
+        } catch (error) {
+          console.error('❌ Device manager debug failed:', error)
+          results.errors.push(`Device manager debug: ${error.message}`)
+        }
+
+        debugResults.value = results
+        console.log('📋 Complete debug results:', results)
+
+      } catch (error) {
+        console.error('❌ Debug function failed:', error)
+        debugResults.value = { error: error.message }
+      }
+    }
+
+    const testAPI = async () => {
+      try {
+        console.log('🧪 Testing API endpoints...')
+
+        // Тест 1: Прямой запрос к API
+        const response1 = await fetch('http://192.168.1.50:8000/admin/devices')
+        const data1 = await response1.json()
+        console.log('📡 Direct API call result:', data1)
+
+        // Тест 2: Через device store
+        const data2 = await deviceStore.fetchModems()
+        console.log('🏪 Device store result:', data2)
+
+        // Тест 3: Принудительное обнаружение
+        try {
+          const response3 = await fetch('http://192.168.1.50:8000/admin/devices/discover', {
+            method: 'POST'
+          })
+          const data3 = await response3.json()
+          console.log('🔍 Discovery result:', data3)
+        } catch (discoveryError) {
+          console.log('❌ Discovery failed:', discoveryError.message)
+        }
+
+        debugResults.value = {
+          direct_api: data1,
+          store_result: data2,
+          timestamp: new Date().toISOString()
+        }
+
+      } catch (error) {
+        console.error('❌ API test failed:', error)
+        debugResults.value = { api_test_error: error.message }
       }
     }
 
@@ -349,6 +506,8 @@ export default {
       usageExamples,
       showPasswords,
       newProxy,
+      showDebug,
+      debugResults,
       loadProxies,
       createProxy,
       removeProxy,
@@ -358,7 +517,9 @@ export default {
       togglePassword,
       getDeviceStatusClass,
       closeCreateModal,
-      closeUsageModal
+      closeUsageModal,
+      debugDevices,
+      testAPI
     }
   }
 }
@@ -544,6 +705,13 @@ export default {
   font-size: 14px;
 }
 
+.form-help {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #6b7280;
+  font-style: italic;
+}
+
 .modal-actions {
   display: flex;
   gap: 12px;
@@ -585,5 +753,38 @@ export default {
   text-align: center;
   padding: 40px;
   color: #6b7280;
+}
+
+.debug-panel {
+  background: #fef3c7;
+  border: 2px solid #f59e0b;
+  border-radius: 8px;
+  padding: 20px;
+  margin-bottom: 30px;
+}
+
+.debug-buttons {
+  margin-bottom: 15px;
+}
+
+.debug-buttons button {
+  margin-right: 10px;
+}
+
+.debug-output {
+  background: #f8fafc;
+  padding: 15px;
+  border-radius: 4px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.debug-output pre {
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.debug-toggle {
+  margin-bottom: 20px;
 }
 </style>
