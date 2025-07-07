@@ -759,7 +759,10 @@ export default {
             togglePassword,
             getDeviceStatusClass,
             closeCreateModal,
-            closeUsageModal
+            closeUsageModal,
+            editProxy,
+            showEditModal,
+            editProxyData
         }
     }
 }
