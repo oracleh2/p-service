@@ -640,6 +640,8 @@ export default {
     // Создание прокси
     const createProxy = async () => {
       try {
+        console.log('🎯 Creating dedicated proxy with data:', newProxy)
+
         const proxyData = {
           device_id: newProxy.device_id,
           ...(newProxy.port && { port: newProxy.port }),
@@ -647,13 +649,56 @@ export default {
           ...(newProxy.password && { password: newProxy.password })
         }
 
-        await proxyStore.createDedicatedProxy(proxyData)
+        console.log('📡 Sending request to API:', proxyData)
+
+        const result = await proxyStore.createDedicatedProxy(proxyData)
+        console.log('✅ Proxy created successfully:', result)
+
         await loadProxies()
         await loadAvailableDevices()
         closeCreateModal()
+
+        // Показываем успешное уведомление
+        alert(`Прокси успешно создан!\nПорт: ${result.port}\nЛогин: ${result.username}`)
+
       } catch (error) {
-        console.error('Error creating proxy:', error)
-        alert('Ошибка создания прокси: ' + error.message)
+        console.error('❌ Error creating proxy:', error)
+
+        // Детальная диагностика ошибки
+        let errorMessage = 'Неизвестная ошибка'
+
+        if (error.response) {
+          console.error('📊 Response status:', error.response.status)
+          console.error('📊 Response data:', error.response.data)
+          console.error('📊 Response headers:', error.response.headers)
+
+          if (error.response.status === 500) {
+            errorMessage = `Ошибка сервера (500): ${error.response.data?.detail || 'Внутренняя ошибка сервера'}`
+          } else if (error.response.status === 409) {
+            errorMessage = 'У этого устройства уже есть индивидуальный прокси'
+          } else if (error.response.status === 404) {
+            errorMessage = 'Устройство не найдено'
+          } else {
+            errorMessage = error.response.data?.detail || `HTTP ${error.response.status}`
+          }
+        } else if (error.request) {
+          errorMessage = 'Ошибка сети - сервер не отвечает'
+        } else {
+          errorMessage = error.message || 'Неизвестная ошибка'
+        }
+
+        alert(`Ошибка создания прокси: ${errorMessage}`)
+
+        // Проверяем, создался ли прокси несмотря на ошибку
+        console.log('🔄 Checking if proxy was created despite error...')
+        setTimeout(async () => {
+          try {
+            await loadProxies()
+            console.log('📋 Proxies reloaded after error')
+          } catch (reloadError) {
+            console.error('❌ Failed to reload proxies:', reloadError)
+          }
+        }, 2000)
       }
     }
 
