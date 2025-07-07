@@ -174,39 +174,139 @@
 
                 <div class="modal-body">
                     <div v-if="usageExamples" class="usage-examples">
-                        <div class="example-section">
-                            <h4>cURL</h4>
-                            <pre><code>{{ usageExamples.curl.example }}</code></pre>
-                            <button @click="copyToClipboard(usageExamples.curl.example)" class="btn-copy">
-                                Копировать
-                            </button>
-                        </div>
+                        <!-- Проверяем структуру данных и используем правильный путь -->
+                        <div v-if="usageExamples.usage_examples">
+                            <div class="example-section">
+                                <h4>cURL - Проверка IP</h4>
+                                <pre><code>{{
+                                        usageExamples.usage_examples.curl_check_ip?.example || 'Пример недоступен'
+                                    }}</code></pre>
+                                <button v-if="usageExamples.usage_examples.curl_check_ip?.example"
+                                        @click="copyToClipboard(usageExamples.usage_examples.curl_check_ip.example)"
+                                        class="btn-copy">
+                                    Копировать
+                                </button>
+                            </div>
 
-                        <div class="example-section">
-                            <h4>Python requests</h4>
-                            <pre><code>{{ usageExamples.python_requests.example }}</code></pre>
-                            <button @click="copyToClipboard(usageExamples.python_requests.example)" class="btn-copy">
-                                Копировать
-                            </button>
-                        </div>
+                            <div class="example-section">
+                                <h4>cURL с заголовком авторизации</h4>
+                                <pre><code>{{
+                                        usageExamples.usage_examples.curl_with_auth_header?.example || 'Пример недоступен'
+                                    }}</code></pre>
+                                <button v-if="usageExamples.usage_examples.curl_with_auth_header?.example"
+                                        @click="copyToClipboard(usageExamples.usage_examples.curl_with_auth_header.example)"
+                                        class="btn-copy">
+                                    Копировать
+                                </button>
+                            </div>
 
-                        <div class="example-section">
-                            <h4>Настройки браузера</h4>
-                            <div class="browser-config">
-                                <div><strong>Тип:</strong> HTTP</div>
-                                <div><strong>Хост:</strong> {{ usageExamples.proxy_info.host }}</div>
-                                <div><strong>Порт:</strong> {{ usageExamples.proxy_info.port }}</div>
-                                <div><strong>Логин:</strong> {{ usageExamples.proxy_info.username }}</div>
-                                <div><strong>Пароль:</strong> {{ usageExamples.proxy_info.password }}</div>
+                            <div class="example-section">
+                                <h4>cURL - User-Agent</h4>
+                                <pre><code>{{
+                                        usageExamples.usage_examples.curl_user_agent?.example || 'Пример недоступен'
+                                    }}</code></pre>
+                                <button v-if="usageExamples.usage_examples.curl_user_agent?.example"
+                                        @click="copyToClipboard(usageExamples.usage_examples.curl_user_agent.example)"
+                                        class="btn-copy">
+                                    Копировать
+                                </button>
+                            </div>
+
+                            <div class="example-section">
+                                <h4>cURL - Все заголовки</h4>
+                                <pre><code>{{
+                                        usageExamples.usage_examples.curl_headers?.example || 'Пример недоступен'
+                                    }}</code></pre>
+                                <button v-if="usageExamples.usage_examples.curl_headers?.example"
+                                        @click="copyToClipboard(usageExamples.usage_examples.curl_headers.example)"
+                                        class="btn-copy">
+                                    Копировать
+                                </button>
+                            </div>
+
+                            <div class="example-section">
+                                <h4>Python requests</h4>
+                                <pre><code>{{
+                                        usageExamples.usage_examples.python_requests?.example || 'Пример недоступен'
+                                    }}</code></pre>
+                                <button v-if="usageExamples.usage_examples.python_requests?.example"
+                                        @click="copyToClipboard(usageExamples.usage_examples.python_requests.example)"
+                                        class="btn-copy">
+                                    Копировать
+                                </button>
+                            </div>
+
+                            <div class="example-section">
+                                <h4>JavaScript/Node.js</h4>
+                                <pre><code>{{
+                                        usageExamples.usage_examples.javascript_node?.example || 'Пример недоступен'
+                                    }}</code></pre>
+                                <button v-if="usageExamples.usage_examples.javascript_node?.example"
+                                        @click="copyToClipboard(usageExamples.usage_examples.javascript_node.example)"
+                                        class="btn-copy">
+                                    Копировать
+                                </button>
+                            </div>
+
+                            <div class="example-section">
+                                <h4>PHP</h4>
+                                <pre><code>{{ usageExamples.usage_examples.php?.example || 'Пример недоступен' }}</code></pre>
+                                <button v-if="usageExamples.usage_examples.php?.example"
+                                        @click="copyToClipboard(usageExamples.usage_examples.php.example)"
+                                        class="btn-copy">
+                                    Копировать
+                                </button>
+                            </div>
+
+                            <div class="example-section">
+                                <h4>wget</h4>
+                                <pre><code>{{
+                                        usageExamples.usage_examples.wget?.example || 'Пример недоступен'
+                                    }}</code></pre>
+                                <button v-if="usageExamples.usage_examples.wget?.example"
+                                        @click="copyToClipboard(usageExamples.usage_examples.wget.example)"
+                                        class="btn-copy">
+                                    Копировать
+                                </button>
+                            </div>
+
+                            <div class="example-section">
+                                <h4>Настройки браузера</h4>
+                                <div class="browser-config">
+                                    <div><strong>Тип:</strong>
+                                        {{ usageExamples.usage_examples.browser_config?.example?.type || 'HTTP' }}
+                                    </div>
+                                    <div><strong>Хост:</strong> {{ usageExamples.proxy_info?.host || 'N/A' }}</div>
+                                    <div><strong>Порт:</strong> {{ usageExamples.proxy_info?.port || 'N/A' }}</div>
+                                    <div><strong>Логин:</strong> {{ usageExamples.proxy_info?.username || 'N/A' }}</div>
+                                    <div><strong>Пароль:</strong> {{ usageExamples.proxy_info?.password || 'N/A' }}
+                                    </div>
+                                    <div><strong>Примечание:</strong> {{
+                                            usageExamples.usage_examples.browser_config?.example?.note || 'Включите аутентификацию прокси в настройках браузера'
+                                        }}
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Команды для тестирования -->
+                            <div v-if="usageExamples.usage_examples.testing_commands?.examples" class="example-section">
+                                <h4>Команды тестирования</h4>
+                                <div v-for="test in usageExamples.usage_examples.testing_commands.examples"
+                                     :key="test.name" class="test-command">
+                                    <h5>{{ test.name }}</h5>
+                                    <pre><code>{{ test.command }}</code></pre>
+                                    <button @click="copyToClipboard(test.command)" class="btn-copy">
+                                        Копировать
+                                    </button>
+                                </div>
                             </div>
                         </div>
 
-                        <div class="example-section">
-                            <h4>JavaScript/Node.js</h4>
-                            <pre><code>{{ usageExamples.javascript_node.example }}</code></pre>
-                            <button @click="copyToClipboard(usageExamples.javascript_node.example)" class="btn-copy">
-                                Копировать
-                            </button>
+                        <!-- Если данные не пришли в ожидаемом формате -->
+                        <div v-else class="error-state">
+                            <p>Ошибка загрузки примеров использования</p>
+                            <p>Полученные данные:</p>
+                            <pre><code>{{ JSON.stringify(usageExamples, null, 2) }}</code></pre>
                         </div>
                     </div>
                 </div>
@@ -1031,12 +1131,43 @@ export default {
 .success-close {
     color: #065f46;
 }
+
 .btn-info {
-  background: #06b6d4;
-  color: white;
+    background: #06b6d4;
+    color: white;
 }
 
 .btn-info:hover {
-  background: #0891b2;
+    background: #0891b2;
 }
+
+.test-command {
+  margin-bottom: 16px;
+  border-left: 3px solid #3b82f6;
+  padding-left: 12px;
+}
+
+.test-command h5 {
+  margin: 0 0 8px 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: #374151;
+}
+
+.error-state {
+  padding: 20px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  color: #991b1b;
+}
+
+.error-state pre {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  margin-top: 10px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
 </style>
