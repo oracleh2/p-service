@@ -1704,11 +1704,11 @@ class DeviceManager:
             await result.wait()
 
             # Применение настроек
-            result = await asyncio.create_subprocess_exec(
-                'adb', '-s', device_id, 'shell', 'am', 'broadcast',
-                '-a', 'android.intent.action.AIRPLANE_MODE', '--ez', 'state', 'true'
-            )
-            await result.wait()
+            # result = await asyncio.create_subprocess_exec(
+            #     'adb', '-s', device_id, 'shell', 'am', 'broadcast',
+            #     '-a', 'android.intent.action.AIRPLANE_MODE', '--ez', 'state', 'true'
+            # )
+            # await result.wait()
 
             # Ожидание в режиме полета
             logger.info(f"Device {device_id} in airplane mode, waiting 5 seconds...")
