@@ -33,7 +33,7 @@ class DedicatedProxyServer:
         self._running = False
 
     async def start(self):
-        """Запуск индивидуального прокси-сервера"""
+        """Запуск индивидуального прокси-сервера с исправленной обработкой CONNECT"""
         if self._running:
             logger.info(f"Dedicated proxy server for {self.device_id} already running on port {self.port}")
             return
@@ -41,7 +41,7 @@ class DedicatedProxyServer:
         try:
             logger.info(f"🚀 Starting dedicated proxy server for device {self.device_id} on port {self.port}")
 
-            # Проверяем доступность порта перед запуском
+            # Проверяем доступность порта
             import socket
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 try:
@@ -51,34 +51,123 @@ class DedicatedProxyServer:
                     logger.error(f"❌ Port {self.port} is not available: {e}")
                     raise
 
-            # Создание веб-приложения
+            # СОЗДАЕМ КАСТОМНЫЙ HTTP PROTOCOL для обработки CONNECT
+            class CustomHTTPProtocol(aiohttp.web_protocol.RequestHandler):
+                def __init__(self, manager, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    self.proxy_manager = manager
+
+                async def parse_request(self, *args, **kwargs):
+                    # Стандартный парсинг
+                    message, payload = await super().parse_request(*args, **kwargs)
+
+                    # Специальная обработка для CONNECT
+                    if message.method == 'CONNECT':
+                        # Извлекаем цель из URL или path
+                        target = message.path if message.path else message.url.path
+                        logger.info(f"🔗 CONNECT request parsed: target='{target}'")
+
+                        # Сохраняем цель в сообщении для дальнейшего использования
+                        message._connect_target = target
+
+                    return message, payload
+
+            # Создаем приложение
             self.app = web.Application()
 
-            # Добавление middleware для аутентификации
-            self.app.middlewares.append(self.auth_middleware)
+            # УЛУЧШЕННЫЙ AUTH MIDDLEWARE с обработкой CONNECT
+            @web.middleware
+            async def auth_and_connect_middleware(request, handler):
+                # Логируем входящий запрос
+                logger.info(f"🎯 REQUEST: {request.method} {request.path_qs}")
+                logger.info(f"🎯 URL: {request.url}")
+                logger.info(f"🎯 Headers: {dict(request.headers)}")
 
-            # РАДИКАЛЬНОЕ ИСПРАВЛЕНИЕ: Регистрируем ВСЕ возможные варианты CONNECT
+                # Проверяем аутентификацию
+                auth_header = request.headers.get('Proxy-Authorization')
+                if not auth_header:
+                    return web.Response(
+                        status=407,
+                        headers={'Proxy-Authenticate': 'Basic realm="Proxy"'},
+                        text="Proxy Authentication Required"
+                    )
 
-            # 1. CONNECT к корню
-            self.app.router.add_route('CONNECT', '', self.proxy_handler)
-            self.app.router.add_route('CONNECT', '/', self.proxy_handler)
+                try:
+                    # Парсинг Basic Auth
+                    if not auth_header.startswith('Basic '):
+                        raise ValueError("Invalid auth method")
 
-            # 2. CONNECT с любым путем
-            self.app.router.add_route('CONNECT', '/{path:.*}', self.proxy_handler)
+                    encoded_credentials = auth_header[6:]
+                    decoded_credentials = base64.b64decode(encoded_credentials).decode('utf-8')
+                    username, password = decoded_credentials.split(':', 1)
 
-            # 3. Универсальный обработчик который ловит все остальное
-            self.app.router.add_route('*', '/{path:.*}', self.proxy_handler)
+                    # Проверка учетных данных
+                    if username != self.username or password != self.password:
+                        return web.Response(
+                            status=407,
+                            headers={'Proxy-Authenticate': 'Basic realm="Proxy"'},
+                            text="Invalid credentials"
+                        )
 
-            # 4. Добавляем отдельный обработчик для корня
-            self.app.router.add_route('GET', '/', self.proxy_handler)
-            self.app.router.add_route('POST', '/', self.proxy_handler)
+                except Exception as e:
+                    return web.Response(
+                        status=407,
+                        headers={'Proxy-Authenticate': 'Basic realm="Proxy"'},
+                        text="Authentication error"
+                    )
 
-            # Логируем зарегистрированные роуты
-            logger.info(f"📋 Registered routes for dedicated proxy {self.device_id}:")
-            for resource in self.app.router.resources():
-                logger.info(f"   Route: {resource}")
+                # СПЕЦИАЛЬНАЯ ОБРАБОТКА CONNECT на уровне middleware
+                if request.method == 'CONNECT':
+                    logger.info(f"🔗 CONNECT request in middleware")
 
-            # Запуск сервера
+                    # Извлекаем цель разными способами
+                    target = None
+
+                    # 1. Из Host заголовка
+                    if request.headers.get('Host'):
+                        target = request.headers.get('Host')
+
+                    # 2. Из path_qs
+                    elif request.path_qs and request.path_qs != '/':
+                        target = request.path_qs.lstrip('/')
+
+                    # 3. Из URL path
+                    elif request.url.path and request.url.path != '/':
+                        target = request.url.path.lstrip('/')
+
+                    # 4. Попробуем получить из оригинального request message
+                    if not target and hasattr(request, '_connect_target'):
+                        target = getattr(request, '_connect_target')
+
+                    if target:
+                        logger.info(f"🎯 CONNECT target found: '{target}'")
+                        # Добавляем target в request для handler
+                        request._connect_target = target
+                    else:
+                        logger.error(f"❌ No target found for CONNECT")
+                        return web.Response(
+                            status=400,
+                            text="Bad Request: No target for CONNECT"
+                        )
+
+                # Передаем управление handler
+                return await handler(request)
+
+            # Добавляем middleware
+            self.app.middlewares.append(auth_and_connect_middleware)
+
+            # ПРОСТАЯ РЕГИСТРАЦИЯ РОУТОВ
+            # Один универсальный обработчик для всех запросов
+            async def universal_handler(request):
+                return await self.proxy_handler(request)
+
+            # Регистрируем для всех методов
+            for method in ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS', 'CONNECT']:
+                self.app.router.add_route(method, '/{path:.*}', universal_handler)
+                self.app.router.add_route(method, '/', universal_handler)
+                self.app.router.add_route(method, '', universal_handler)
+
+            # Запускаем сервер
             self.runner = web.AppRunner(self.app)
             await self.runner.setup()
 
@@ -87,10 +176,8 @@ class DedicatedProxyServer:
 
             self._running = True
 
-            # Проверяем, что сервер действительно слушает
-            await asyncio.sleep(0.1)  # Даем время серверу запуститься
-
-            # Тестируем подключение
+            # Проверяем запуск
+            await asyncio.sleep(0.1)
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 result = s.connect_ex(('127.0.0.1', self.port))
                 if result == 0:
@@ -148,42 +235,7 @@ class DedicatedProxyServer:
 
     @web.middleware
     async def auth_middleware(self, request, handler):
-        """Middleware для проверки аутентификации"""
-        # Получение заголовка авторизации
-        auth_header = request.headers.get('Proxy-Authorization')
-
-        if not auth_header:
-            return web.Response(
-                status=407,
-                headers={'Proxy-Authenticate': 'Basic realm="Proxy"'},
-                text="Proxy Authentication Required"
-            )
-
-        try:
-            # Парсинг Basic Auth
-            if not auth_header.startswith('Basic '):
-                raise ValueError("Invalid auth method")
-
-            encoded_credentials = auth_header[6:]
-            decoded_credentials = base64.b64decode(encoded_credentials).decode('utf-8')
-            username, password = decoded_credentials.split(':', 1)
-
-            # Проверка учетных данных
-            if username != self.username or password != self.password:
-                return web.Response(
-                    status=407,
-                    headers={'Proxy-Authenticate': 'Basic realm="Proxy"'},
-                    text="Invalid credentials"
-                )
-
-        except Exception as e:
-            return web.Response(
-                status=407,
-                headers={'Proxy-Authenticate': 'Basic realm="Proxy"'},
-                text="Authentication error"
-            )
-
-        # Передача управления дальше
+        """Этот метод больше не используется - аутентификация перенесена в start()"""
         return await handler(request)
 
     async def handle_http(self, request, device):
@@ -462,16 +514,9 @@ class DedicatedProxyServer:
         return self._running
 
     async def proxy_handler(self, request):
-        """ИСПРАВЛЕННЫЙ обработчик прокси-запросов для конкретного устройства"""
+        """УПРОЩЕННЫЙ обработчик - аутентификация уже пройдена в middleware"""
         try:
-            # ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ для диагностики
-            logger.info(f"🎯 DEDICATED PROXY REQUEST RECEIVED!")
-            logger.info(f"🎯 Method: {request.method}")
-            logger.info(f"🎯 Path: '{request.path}'")
-            logger.info(f"🎯 Path_qs: '{request.path_qs}'")
-            logger.info(f"🎯 URL: {request.url}")
-            logger.info(f"🎯 Headers: {dict(request.headers)}")
-            logger.info(f"🎯 Device ID: {self.device_id}")
+            logger.info(f"🎯 PROXY HANDLER: {request.method} {request.path_qs}")
 
             # Получение информации об устройстве
             device = await self.device_manager.get_device_by_id(self.device_id)
@@ -482,62 +527,24 @@ class DedicatedProxyServer:
                     text="Device not available"
                 )
 
-            # ИСПРАВЛЕНО: Специальная обработка CONNECT запросов
+            # Обработка CONNECT запросов
             if request.method == 'CONNECT':
                 logger.info(f"🔗 Processing CONNECT request")
 
-                # Для CONNECT запросов цель может быть в разных местах
-                target = None
-
-                # 1. Проверяем Host заголовок (наиболее вероятно для CONNECT)
-                if request.headers.get('Host'):
-                    target = request.headers.get('Host').strip()
-                    logger.info(f"🎯 Target from Host header: '{target}'")
-
-                # 2. Проверяем path_qs (если есть)
-                elif request.path_qs and request.path_qs.strip() and request.path_qs != '/':
-                    target = request.path_qs.strip()
-                    logger.info(f"🎯 Target from path_qs: '{target}'")
-
-                # 3. Проверяем path (без query string)
-                elif request.path and request.path.strip() and request.path != '/':
-                    target = request.path.strip().lstrip('/')
-                    logger.info(f"🎯 Target from path: '{target}'")
-
-                # 4. Проверяем полный URL
-                elif str(request.url) != f"http://192.168.1.50:{self.port}/":
-                    target_url = str(request.url)
-                    # Извлекаем хост из URL
-                    from urllib.parse import urlparse
-                    parsed = urlparse(target_url)
-                    if parsed.netloc and parsed.netloc != f"192.168.1.50:{self.port}":
-                        target = parsed.netloc
-                        logger.info(f"🎯 Target from URL netloc: '{target}'")
+                # Получаем target из middleware
+                target = getattr(request, '_connect_target', None)
 
                 if not target:
                     logger.error(f"❌ No target for CONNECT request")
-                    logger.error(f"❌ Host header: {request.headers.get('Host')}")
-                    logger.error(f"❌ path: '{request.path}'")
-                    logger.error(f"❌ path_qs: '{request.path_qs}'")
-                    logger.error(f"❌ URL: {request.url}")
-
-                    # ПОПЫТКА ЭКСТРЕННОГО ИЗВЛЕЧЕНИЯ ЦЕЛИ ИЗ ПЕРВОЙ СТРОКИ HTTP
-                    # Попробуем прочитать raw запрос
-                    raw_data = getattr(request, '_raw_data', None)
-                    if raw_data:
-                        logger.info(f"🔍 Raw request data: {raw_data}")
-
                     return web.Response(
                         status=400,
                         text="Bad Request: No target specified for CONNECT"
                     )
 
                 logger.info(f"🔗 CONNECT request for target: '{target}'")
-
-                # Напрямую вызываем handle_connect с правильным target
                 return await self.handle_connect_direct(request, device, target)
 
-            # Для остальных методов получаем полный URL
+            # Обработка HTTP запросов
             target_url = self._get_target_url_from_request(request)
             if not target_url:
                 logger.error(f"❌ Could not determine target URL for {request.method} {request.path_qs}")
@@ -547,8 +554,6 @@ class DedicatedProxyServer:
                 )
 
             logger.info(f"🌐 HTTP request: {request.method} {target_url} via device {self.device_id}")
-
-            # HTTP прокси с использованием логики из proxy_server.py
             return await self.handle_http_via_device_interface(request, target_url, device)
 
         except Exception as e:
