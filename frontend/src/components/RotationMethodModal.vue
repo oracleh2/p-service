@@ -167,8 +167,9 @@
   </div>
 </template>
 
+
 <script>
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch } from 'vue'
 import {
   XMarkIcon,
   ArrowPathIcon,
@@ -207,15 +208,32 @@ export default {
 
     const isProcessing = computed(() => isRotating.value || isTesting.value)
 
+    // ИСПРАВЛЕНО: Функция для получения правильного device_id
+    const getDeviceId = () => {
+      // Используем modem_id если есть, иначе device_id, иначе id
+      return props.deviceInfo?.modem_id ||
+             props.deviceInfo?.device_id ||
+             props.deviceInfo?.id ||
+             ''
+    }
+
     // Load available rotation methods when modal opens
     const loadRotationMethods = async () => {
-      if (!props.deviceInfo?.modem_id) return
+      const deviceId = getDeviceId()
+      if (!deviceId) {
+        console.error('No device ID found in deviceInfo:', props.deviceInfo)
+        errorMessage.value = 'Device ID не найден'
+        return
+      }
 
       try {
         loadingMethods.value = true
         errorMessage.value = ''
 
-        const response = await api.get(`/admin/devices/${props.deviceInfo.modem_id}/rotation-methods`)
+        console.log('Loading rotation methods for device:', deviceId)
+
+        // ИСПРАВЛЕНО: Используем admin endpoint вместо обычного devices endpoint
+        const response = await api.get(`/admin/devices/${deviceId}/rotation-methods`)
 
         availableMethods.value = response.data.available_methods || []
 
@@ -227,9 +245,19 @@ export default {
           selectedMethod.value = availableMethods.value[0].method
         }
 
+        console.log('Available methods loaded:', availableMethods.value)
+
       } catch (error) {
         console.error('Failed to load rotation methods:', error)
-        errorMessage.value = 'Failed to load rotation methods'
+
+        // Более детальная обработка ошибок
+        if (error.response?.status === 404) {
+          errorMessage.value = 'Устройство не найдено или методы ротации недоступны'
+        } else if (error.response?.status === 500) {
+          errorMessage.value = 'Ошибка сервера при загрузке методов ротации'
+        } else {
+          errorMessage.value = 'Не удалось загрузить методы ротации'
+        }
       } finally {
         loadingMethods.value = false
       }
@@ -239,20 +267,37 @@ export default {
     const testMethod = async () => {
       if (!selectedMethod.value) return
 
+      const deviceId = getDeviceId()
+      if (!deviceId) {
+        errorMessage.value = 'Device ID не найден'
+        return
+      }
+
       try {
         isTesting.value = true
         testResult.value = null
         errorMessage.value = ''
 
-        const response = await api.post(`/admin/devices/${props.deviceInfo.modem_id}/test-rotation`, {
+        console.log('Testing rotation method:', selectedMethod.value, 'for device:', deviceId)
+
+        // ИСПРАВЛЕНО: Используем admin endpoint
+        const response = await api.post(`/admin/devices/${deviceId}/test-rotation`, {
           method: selectedMethod.value
         })
 
         testResult.value = response.data
+        console.log('Test result:', response.data)
 
       } catch (error) {
         console.error('Test rotation failed:', error)
-        errorMessage.value = 'Test rotation failed: ' + (error.response?.data?.detail || error.message)
+
+        if (error.response?.status === 404) {
+          errorMessage.value = 'Устройство не найдено'
+        } else if (error.response?.status === 500) {
+          errorMessage.value = 'Ошибка сервера при тестировании ротации'
+        } else {
+          errorMessage.value = 'Тестирование ротации завершилось с ошибкой: ' + (error.response?.data?.detail || error.message)
+        }
       } finally {
         isTesting.value = false
       }
@@ -262,29 +307,49 @@ export default {
     const executeRotation = async () => {
       if (!selectedMethod.value) return
 
+      const deviceId = getDeviceId()
+      if (!deviceId) {
+        errorMessage.value = 'Device ID не найден'
+        return
+      }
+
       try {
         isRotating.value = true
         errorMessage.value = ''
 
-        const response = await api.post(`/admin/devices/${props.deviceInfo.modem_id}/rotate`, {
-          force_method: selectedMethod.value
-        })
+        console.log('Executing rotation with method:', selectedMethod.value, 'for device:', deviceId)
+
+        // ИСПРАВЛЕНО: Используем admin endpoint с правильными параметрами
+        const requestBody = selectedMethod.value ?
+          { force_method: selectedMethod.value } :
+          {}
+
+        const response = await api.post(`/admin/devices/${deviceId}/rotate`, requestBody)
+
+        console.log('Rotation response:', response.data)
 
         if (response.data.success) {
           emit('rotation-success', {
-            device_id: props.deviceInfo.modem_id,
+            device_id: deviceId,
             method: selectedMethod.value,
             new_ip: response.data.new_ip,
             message: response.data.message
           })
           closeModal()
         } else {
-          errorMessage.value = response.data.message || 'Rotation failed'
+          errorMessage.value = response.data.message || 'Ротация завершилась с ошибкой'
         }
 
       } catch (error) {
         console.error('Rotation failed:', error)
-        errorMessage.value = 'Rotation failed: ' + (error.response?.data?.detail || error.message)
+
+        if (error.response?.status === 404) {
+          errorMessage.value = 'Устройство не найдено'
+        } else if (error.response?.status === 500) {
+          errorMessage.value = 'Ошибка сервера при выполнении ротации'
+        } else {
+          errorMessage.value = 'Ротация завершилась с ошибкой: ' + (error.response?.data?.detail || error.message)
+        }
       } finally {
         isRotating.value = false
       }
@@ -298,7 +363,7 @@ export default {
       errorMessage.value = ''
     }
 
-    // Utility functions
+    // Utility functions (остаются без изменений)
     const formatDeviceType = (type) => {
       const types = {
         'android': 'Android Device',
@@ -339,6 +404,7 @@ export default {
     // Load methods when modal becomes visible
     watch(() => props.isVisible, (newValue) => {
       if (newValue) {
+        console.log('Modal opened with device info:', props.deviceInfo)
         loadRotationMethods()
       }
     })
@@ -358,7 +424,8 @@ export default {
       formatDeviceType,
       formatRiskLevel,
       getRiskLevelClass,
-      getStatusBadgeClass
+      getStatusBadgeClass,
+      getDeviceId
     }
   }
 }

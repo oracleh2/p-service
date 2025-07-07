@@ -19,6 +19,9 @@ from ..models.base import ProxyDevice, RotationConfig, SystemConfig, RequestLog,
 from ..api.auth import get_admin_user
 from ..core.managers import get_device_manager, get_proxy_server, get_rotation_manager
 from ..config import DEFAULT_SYSTEM_CONFIG
+from pydantic import BaseModel
+from typing import Optional
+
 
 router = APIRouter()
 # logger = None  # Будет импортирован из main
@@ -63,6 +66,12 @@ class DeviceManagementResponse(BaseModel):
     auto_rotation: bool
     total_requests: int
     success_rate: float
+
+class RotationRequest(BaseModel):
+    force_method: Optional[str] = None
+
+class TestRotationRequest(BaseModel):
+    method: str
 
 
 # Системная конфигурация
@@ -260,11 +269,16 @@ async def test_discovery(current_user=Depends(get_admin_user)):
 @router.post("/devices/{device_id}/rotate")
 async def rotate_device_ip_enhanced(
     device_id: str,
-    force_method: Optional[str] = None,  # Принудительный метод ротации
+    rotation_request: Optional[RotationRequest] = None,
     current_user=Depends(get_admin_user)
 ):
     """Улучшенная принудительная ротация IP устройства"""
     try:
+        # Извлекаем force_method если передан
+        force_method = None
+        if rotation_request:
+            force_method = rotation_request.force_method
+
         # Используем функцию из managers.py
         from ..core.managers import perform_device_rotation
 
@@ -297,6 +311,34 @@ async def rotate_device_ip_enhanced(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to rotate IP: {str(e)}"
+        )
+
+@router.get("/devices/{device_id}/rotation-methods")
+async def get_device_rotation_methods(
+    device_id: str,
+    current_user=Depends(get_admin_user)
+):
+    """Получение доступных методов ротации для устройства"""
+    try:
+        from ..core.managers import get_device_rotation_methods
+
+        result = await get_device_rotation_methods(device_id)
+
+        if "error" in result:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=result["error"]
+            )
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting rotation methods: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get rotation methods: {str(e)}"
         )
 
 
@@ -424,16 +466,16 @@ async def get_device_rotation_methods(
 @router.post("/devices/{device_id}/test-rotation")
 async def test_device_rotation(
     device_id: str,
-    method: str,
+    test_request: TestRotationRequest,
     current_user=Depends(get_admin_user)
 ):
     """Тестирование метода ротации для устройства"""
     try:
         from ..core.managers import test_device_rotation
 
-        logger.info(f"Testing rotation method '{method}' for device {device_id}")
+        logger.info(f"Testing rotation method '{test_request.method}' for device {device_id}")
 
-        result = await test_device_rotation(device_id, method)
+        result = await test_device_rotation(device_id, test_request.method)
 
         if "error" in result:
             raise HTTPException(
