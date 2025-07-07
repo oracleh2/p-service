@@ -57,31 +57,62 @@ class DedicatedProxyServer:
 
             # ОТЛАДОЧНЫЙ MIDDLEWARE для логирования всех запросов
             @web.middleware
-            async def debug_middleware(request, handler):
-                logger.info(f"🔥 RAW REQUEST DEBUG:")
-                logger.info(f"   Method: {request.method}")
-                logger.info(f"   Path: '{request.path}'")
-                logger.info(f"   Path_qs: '{request.path_qs}'")
-                logger.info(f"   URL: {request.url}")
-                logger.info(f"   Query string: '{request.query_string}'")
-                logger.info(f"   Headers: {dict(request.headers)}")
+            async def auth_and_connect_middleware(request, handler):
+                # Проверяем аутентификацию
+                auth_header = request.headers.get('Proxy-Authorization')
+                if not auth_header:
+                    logger.info("❌ No Proxy-Authorization header")
+                    return web.Response(
+                        status=407,
+                        headers={'Proxy-Authenticate': 'Basic realm="Proxy"'},
+                        text="Proxy Authentication Required"
+                    )
 
-                # Попробуем получить raw данные
                 try:
-                    if hasattr(request, 'transport') and request.transport:
-                        transport = request.transport
-                        logger.info(f"   Transport: {type(transport)}")
-                        if hasattr(transport, 'get_extra_info'):
-                            socket_info = transport.get_extra_info('socket')
-                            logger.info(f"   Socket: {socket_info}")
+                    # Парсинг Basic Auth
+                    if not auth_header.startswith('Basic '):
+                        raise ValueError("Invalid auth method")
+
+                    encoded_credentials = auth_header[6:]
+                    decoded_credentials = base64.b64decode(encoded_credentials).decode('utf-8')
+                    username, password = decoded_credentials.split(':', 1)
+
+                    # Проверка учетных данных
+                    if username != self.username or password != self.password:
+                        logger.info(f"❌ Invalid credentials: {username}")
+                        return web.Response(
+                            status=407,
+                            headers={'Proxy-Authenticate': 'Basic realm="Proxy"'},
+                            text="Invalid credentials"
+                        )
+
+                    logger.info(f"✅ Authentication successful for: {username}")
+
                 except Exception as e:
-                    logger.info(f"   Transport info error: {e}")
+                    logger.info(f"❌ Authentication error: {e}")
+                    return web.Response(
+                        status=407,
+                        headers={'Proxy-Authenticate': 'Basic realm="Proxy"'},
+                        text="Authentication error"
+                    )
 
-                # Вызываем следующий middleware/handler
-                response = await handler(request)
+                # 🔥 ГЛАВНОЕ ИСПРАВЛЕНИЕ: Перехватываем CONNECT на уровне middleware
+                if request.method == 'CONNECT':
+                    logger.info(f"🔗 CONNECT intercepted in middleware - bypassing router!")
 
-                logger.info(f"   Response status: {response.status}")
-                return response
+                    # Вызываем proxy_handler напрямую, минуя роутер
+                    response = await self.proxy_handler(request)
+
+                    # ВАЖНО: Если response None (туннель запущен), не возвращаем ничего
+                    if response is None:
+                        logger.info("🔄 CONNECT tunnel started, no HTTP response needed")
+                        # Возвращаем пустой ответ или поднимаем исключение чтобы остановить обработку
+                        raise web.HTTPException()
+
+                    return response
+
+                # Для остальных запросов передаем в роутер
+                return await handler(request)
 
             # Добавляем отладочный middleware первым
             self.app.middlewares.append(debug_middleware)
@@ -645,7 +676,7 @@ class DedicatedProxyServer:
         return self._running
 
     async def handle_connect_direct(self, request, device, target: str):
-        """Прямая обработка CONNECT запросов через RAW сокет"""
+        """Прямая обработка CONNECT запросов через RAW сокет с правильным SSL туннелем"""
         try:
             # Парсим хост и порт из target
             if ':' in target:
@@ -688,39 +719,149 @@ class DedicatedProxyServer:
                 target_sock.close()
                 return web.Response(status=502, text="No client transport")
 
-            # КРИТИЧНО: Отправляем ответ напрямую через транспорт, минуя aiohttp
-            success_response = b"HTTP/1.1 200 Connection established\r\n\r\n"
-            client_transport.write(success_response)
-
-            # Ждем отправки
-            await asyncio.sleep(0.1)
-
-            # Получаем клиентский сокет
+            # КРИТИЧНО: Отправляем ответ 200 напрямую через сокет, МИНУЯ aiohttp
             client_sock = client_transport.get_extra_info('socket')
             if not client_sock:
                 target_sock.close()
                 return web.Response(status=502, text="No client socket")
 
+            # Отправляем ответ напрямую через raw сокет
+            success_response = b"HTTP/1.1 200 Connection established\r\n\r\n"
+            await asyncio.get_event_loop().sock_sendall(client_sock, success_response)
+
             logger.info(f"🚀 Starting RAW tunnel relay")
 
-            # ГЛАВНОЕ ИСПРАВЛЕНИЕ: Запускаем туннель и закрываем HTTP соединение
-            # Это заставляет aiohttp прекратить парсинг HTTP
-            asyncio.create_task(self.run_raw_tunnel(client_sock, target_sock, host, port, client_transport))
+            # ГЛАВНОЕ ИСПРАВЛЕНИЕ: Немедленно запускаем туннель без возврата Response
+            # Это предотвращает обработку SSL данных как HTTP
+            await self.run_raw_tunnel_immediate(client_sock, target_sock, host, port, client_transport)
 
-            # ВАЖНО: Возвращаем Response без тела, который закроет HTTP-парсер
-            response = web.Response(status=200, text="")
-
-            # Эти заголовки заставляют aiohttp закрыть HTTP-парсер
-            response.headers['Connection'] = 'close'
-            response.headers['Content-Length'] = '0'
-
-            return response
+            # НЕ ВОЗВРАЩАЕМ Response! aiohttp не должен ничего обрабатывать после этого
+            return None
 
         except Exception as e:
             logger.error(f"❌ RAW CONNECT error: {e}")
             import traceback
             logger.error(f"❌ Traceback: {traceback.format_exc()}")
             return web.Response(status=502, text="Bad Gateway")
+
+    async def run_raw_tunnel_immediate(self, client_sock, target_sock, host: str, port: int, client_transport):
+        """Немедленный запуск сырого TCP туннеля без HTTP обработки"""
+        try:
+            logger.info(f"🔄 Starting IMMEDIATE RAW TCP tunnel to {host}:{port}")
+
+            # КРИТИЧНО: Закрываем HTTP транспорт, чтобы освободить сокет
+            try:
+                # Отключаем протокол HTTP, но оставляем сокет
+                if hasattr(client_transport, '_protocol'):
+                    protocol = client_transport._protocol
+                    # Останавливаем HTTP парсер
+                    protocol.close()
+                    logger.info("🔧 HTTP protocol closed, socket released")
+            except Exception as e:
+                logger.warning(f"⚠️  Failed to close HTTP protocol: {e}")
+
+            # Устанавливаем сокеты в неблокирующий режим
+            client_sock.setblocking(False)
+            target_sock.setblocking(False)
+
+            # Запускаем передачу данных в обе стороны БЕЗ задержек
+            async def forward_data_immediate(from_sock, to_sock, direction):
+                try:
+                    total_bytes = 0
+                    buffer_size = 8192
+
+                    while True:
+                        try:
+                            # Читаем данные
+                            data = await asyncio.get_event_loop().sock_recv(from_sock, buffer_size)
+                            if not data:
+                                logger.debug(f"📤 {direction}: EOF")
+                                break
+
+                            # Отправляем данные НЕМЕДЛЕННО
+                            await asyncio.get_event_loop().sock_sendall(to_sock, data)
+                            total_bytes += len(data)
+
+                            # Логируем прогресс для отладки SSL handshake
+                            if total_bytes < 1024:  # Первые 1KB (SSL handshake)
+                                logger.debug(f"🔐 SSL {direction}: {len(data)} bytes, total: {total_bytes}")
+
+                        except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                            if e.errno in (9, 104, 32):  # EBADF, ECONNRESET, EPIPE
+                                logger.debug(f"📤 {direction}: connection closed ({e})")
+                            else:
+                                logger.warning(f"📤 {direction}: socket error {e}")
+                            break
+
+                    logger.info(f"✅ {direction}: finished, {total_bytes} bytes total")
+
+                except asyncio.CancelledError:
+                    logger.debug(f"🚫 {direction}: cancelled")
+                except Exception as e:
+                    logger.error(f"❌ {direction}: error {e}")
+                finally:
+                    # Закрываем сокеты
+                    try:
+                        from_sock.close()
+                    except:
+                        pass
+
+            # Создаем задачи для передачи в обе стороны
+            client_to_server = asyncio.create_task(
+                forward_data_immediate(client_sock, target_sock, f"client -> {host}:{port}")
+            )
+            server_to_client = asyncio.create_task(
+                forward_data_immediate(target_sock, client_sock, f"{host}:{port} -> client")
+            )
+
+            # Ждем завершения любой из задач
+            try:
+                done, pending = await asyncio.wait(
+                    [client_to_server, server_to_client],
+                    return_when=asyncio.FIRST_COMPLETED,
+                    timeout=600  # 10 минут таймаут
+                )
+
+                logger.info(f"🔚 Immediate tunnel completed for {host}:{port}")
+
+            except asyncio.TimeoutError:
+                logger.info(f"⏰ Immediate tunnel timeout for {host}:{port}")
+            finally:
+                # Отменяем оставшиеся задачи
+                for task in [client_to_server, server_to_client]:
+                    if not task.done():
+                        task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+
+                # Закрываем все соединения
+                try:
+                    client_sock.close()
+                except:
+                    pass
+                try:
+                    target_sock.close()
+                except:
+                    pass
+
+            logger.info(f"🏁 Immediate tunnel ended for {host}:{port}")
+
+        except Exception as e:
+            logger.error(f"❌ Immediate tunnel error: {e}")
+            import traceback
+            logger.error(f"❌ Traceback: {traceback.format_exc()}")
+
+            # Закрываем сокеты при ошибке
+            try:
+                client_sock.close()
+            except:
+                pass
+            try:
+                target_sock.close()
+            except:
+                pass
 
     async def run_raw_tunnel(self, client_sock, target_sock, host: str, port: int, client_transport):
         """Запуск сырого TCP туннеля без HTTP обработки"""
