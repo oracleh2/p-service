@@ -57,62 +57,31 @@ class DedicatedProxyServer:
 
             # ОТЛАДОЧНЫЙ MIDDLEWARE для логирования всех запросов
             @web.middleware
-            async def auth_and_connect_middleware(request, handler):
-                # Проверяем аутентификацию
-                auth_header = request.headers.get('Proxy-Authorization')
-                if not auth_header:
-                    logger.info("❌ No Proxy-Authorization header")
-                    return web.Response(
-                        status=407,
-                        headers={'Proxy-Authenticate': 'Basic realm="Proxy"'},
-                        text="Proxy Authentication Required"
-                    )
+            async def debug_middleware(request, handler):
+                logger.info(f"🔥 RAW REQUEST DEBUG:")
+                logger.info(f"   Method: {request.method}")
+                logger.info(f"   Path: '{request.path}'")
+                logger.info(f"   Path_qs: '{request.path_qs}'")
+                logger.info(f"   URL: {request.url}")
+                logger.info(f"   Query string: '{request.query_string}'")
+                logger.info(f"   Headers: {dict(request.headers)}")
 
+                # Попробуем получить raw данные
                 try:
-                    # Парсинг Basic Auth
-                    if not auth_header.startswith('Basic '):
-                        raise ValueError("Invalid auth method")
-
-                    encoded_credentials = auth_header[6:]
-                    decoded_credentials = base64.b64decode(encoded_credentials).decode('utf-8')
-                    username, password = decoded_credentials.split(':', 1)
-
-                    # Проверка учетных данных
-                    if username != self.username or password != self.password:
-                        logger.info(f"❌ Invalid credentials: {username}")
-                        return web.Response(
-                            status=407,
-                            headers={'Proxy-Authenticate': 'Basic realm="Proxy"'},
-                            text="Invalid credentials"
-                        )
-
-                    logger.info(f"✅ Authentication successful for: {username}")
-
+                    if hasattr(request, 'transport') and request.transport:
+                        transport = request.transport
+                        logger.info(f"   Transport: {type(transport)}")
+                        if hasattr(transport, 'get_extra_info'):
+                            socket_info = transport.get_extra_info('socket')
+                            logger.info(f"   Socket: {socket_info}")
                 except Exception as e:
-                    logger.info(f"❌ Authentication error: {e}")
-                    return web.Response(
-                        status=407,
-                        headers={'Proxy-Authenticate': 'Basic realm="Proxy"'},
-                        text="Authentication error"
-                    )
+                    logger.info(f"   Transport info error: {e}")
 
-                # 🔥 ГЛАВНОЕ ИСПРАВЛЕНИЕ: Перехватываем CONNECT на уровне middleware
-                if request.method == 'CONNECT':
-                    logger.info(f"🔗 CONNECT intercepted in middleware - bypassing router!")
+                # Вызываем следующий middleware/handler
+                response = await handler(request)
 
-                    # Вызываем proxy_handler напрямую, минуя роутер
-                    response = await self.proxy_handler(request)
-
-                    # ВАЖНО: Если response None (туннель запущен), не возвращаем ничего
-                    if response is None:
-                        logger.info("🔄 CONNECT tunnel started, no HTTP response needed")
-                        # Возвращаем пустой ответ или поднимаем исключение чтобы остановить обработку
-                        raise web.HTTPException()
-
-                    return response
-
-                # Для остальных запросов передаем в роутер
-                return await handler(request)
+                logger.info(f"   Response status: {response.status}")
+                return response
 
             # Добавляем отладочный middleware первым
             self.app.middlewares.append(debug_middleware)
@@ -235,7 +204,15 @@ class DedicatedProxyServer:
                     logger.info(f"🔗 CONNECT intercepted in middleware - bypassing router!")
 
                     # Вызываем proxy_handler напрямую, минуя роутер
-                    return await self.proxy_handler(request)
+                    response = await self.proxy_handler(request)
+
+                    # ВАЖНО: Если response None (туннель запущен), не возвращаем ничего
+                    if response is None:
+                        logger.info("🔄 CONNECT tunnel started, no HTTP response needed")
+                        # Возвращаем пустой ответ или поднимаем исключение чтобы остановить обработку
+                        raise web.HTTPException()
+
+                    return response
 
                 # Для остальных запросов передаем в роутер
                 return await handler(request)
