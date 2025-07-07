@@ -423,9 +423,17 @@ class DedicatedProxyManager:
         """Сохранение конфигурации прокси в базу данных"""
         try:
             async with AsyncSessionLocal() as db:
-                device_uuid = uuid.UUID(device_id)
+                # ИСПРАВЛЕНИЕ: Ищем устройство по name, а не пытаемся преобразовать device_id в UUID
+                stmt = select(ProxyDevice).where(ProxyDevice.name == device_id)
+                result = await db.execute(stmt)
+                device = result.scalar_one_or_none()
+
+                if not device:
+                    raise ValueError(f"Device with name {device_id} not found in database")
+
+                # Используем реальный UUID устройства
                 stmt = update(ProxyDevice).where(
-                    ProxyDevice.id == device_uuid
+                    ProxyDevice.id == device.id  # Используем найденный UUID
                 ).values(
                     dedicated_port=port,
                     proxy_username=username,
@@ -447,9 +455,16 @@ class DedicatedProxyManager:
         """Удаление конфигурации прокси из базы данных"""
         try:
             async with AsyncSessionLocal() as db:
-                device_uuid = uuid.UUID(device_id)
+                # ИСПРАВЛЕНИЕ: Ищем устройство по name
+                stmt = select(ProxyDevice).where(ProxyDevice.name == device_id)
+                result = await db.execute(stmt)
+                device = result.scalar_one_or_none()
+
+                if not device:
+                    raise ValueError(f"Device with name {device_id} not found in database")
+
                 stmt = update(ProxyDevice).where(
-                    ProxyDevice.id == device_uuid
+                    ProxyDevice.id == device.id  # Используем найденный UUID
                 ).values(
                     dedicated_port=None,
                     proxy_username=None,
