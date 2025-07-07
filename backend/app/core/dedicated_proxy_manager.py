@@ -118,25 +118,27 @@ class DedicatedProxyServer:
                         text="Authentication error"
                     )
 
-                # 🔥 ГЛАВНОЕ ИСПРАВЛЕНИЕ: Перехватываем CONNECT на уровне middleware
+                # 🔥 ГЛАВНОЕ ИСПРАВЛЕНИЕ: Специальная обработка CONNECT
                 if request.method == 'CONNECT':
-                    logger.info(f"🔗 CONNECT intercepted in middleware - bypassing router!")
+                    logger.info(f"🔗 CONNECT intercepted in middleware - hijacking connection!")
 
                     try:
-                        # Вызываем proxy_handler напрямую, минуя роутер
-                        response = await self.proxy_handler(request)
+                        # Вызываем proxy_handler для CONNECT
+                        # Он возвращает None после захвата соединения
+                        await self.proxy_handler(request)
 
-                        # ВАЖНО: Если response None (туннель запущен), прерываем обработку
-                        if response is None:
-                            logger.info("🔄 CONNECT tunnel started, connection hijacked")
-                            # Для CONNECT туннелей мы не возвращаем обычный HTTP response
-                            # Соединение захвачено туннелем
-                            return web.Response(status=200, text="")
+                        # Для CONNECT мы никогда не возвращаем обычный HTTP response
+                        # Соединение захвачено туннелем, aiohttp должен прекратить обработку
+                        logger.info("🔄 CONNECT tunnel hijacked, terminating HTTP processing")
 
-                        return response
+                        # Поднимаем специальное исключение для остановки HTTP обработки
+                        raise web.HTTPException(text="Connection hijacked for tunnel")
 
+                    except web.HTTPException:
+                        # Ожидаемое исключение для остановки обработки
+                        raise
                     except Exception as e:
-                        logger.error(f"❌ CONNECT handler error: {e}")
+                        logger.error(f"❌ CONNECT hijack error: {e}")
                         return web.Response(status=502, text="Bad Gateway")
 
                 # Для остальных запросов передаем в роутер
@@ -284,7 +286,7 @@ class DedicatedProxyServer:
             )
 
     async def handle_connect_direct(self, request, device, target: str):
-        """Прямая обработка CONNECT запросов с правильным SSL туннелем через transport"""
+        """Прямая обработка CONNECT запросов с полным отключением HTTP протокола"""
         try:
             # Парсим хост и порт из target
             if ':' in target:
@@ -327,21 +329,16 @@ class DedicatedProxyServer:
                 target_sock.close()
                 return web.Response(status=502, text="No client transport")
 
-            # ИСПРАВЛЕНИЕ: Используем transport.write() вместо sock_sendall()
+            # КРИТИЧНО: Отправляем ответ 200 напрямую через transport
             success_response = b"HTTP/1.1 200 Connection established\r\n\r\n"
             client_transport.write(success_response)
 
-            # Ждем отправки ответа
-            await asyncio.sleep(0.1)
-
             logger.info(f"🚀 Starting RAW tunnel relay")
 
-            # Запускаем туннель в отдельной задаче
-            asyncio.create_task(
-                self.run_raw_tunnel_transport(client_transport, target_sock, host, port)
-            )
+            # ГЛАВНОЕ ИСПРАВЛЕНИЕ: Немедленно отключаем HTTP протокол
+            await self.hijack_connection_for_tunnel(client_transport, target_sock, host, port)
 
-            # ВАЖНО: Возвращаем None чтобы aiohttp не обрабатывал дальше
+            # ВАЖНО: Возвращаем None чтобы aiohttp прекратил обработку
             return None
 
         except Exception as e:
@@ -349,6 +346,162 @@ class DedicatedProxyServer:
             import traceback
             logger.error(f"❌ Traceback: {traceback.format_exc()}")
             return web.Response(status=502, text="Bad Gateway")
+
+    async def hijack_connection_for_tunnel(self, client_transport, target_sock, host: str, port: int):
+        """Захват соединения и отключение HTTP протокола для raw туннеля"""
+        try:
+            logger.info(f"🔧 Hijacking connection for tunnel to {host}:{port}")
+
+            # Получаем сокет из транспорта
+            client_sock = client_transport.get_extra_info('socket')
+            if not client_sock:
+                raise Exception("No client socket in transport")
+
+            logger.info(f"✅ Client socket extracted: {client_sock}")
+
+            # КРИТИЧНО: Полностью отключаем HTTP протокол
+            try:
+                # Останавливаем transport и освобождаем сокет
+                if hasattr(client_transport, '_protocol'):
+                    protocol = client_transport._protocol
+
+                    # Отключаем все HTTP парсеры
+                    if hasattr(protocol, '_request_parser'):
+                        protocol._request_parser = None
+                    if hasattr(protocol, '_upgrade'):
+                        protocol._upgrade = True
+                    if hasattr(protocol, '_message_tail'):
+                        protocol._message_tail = b''
+
+                    # Отключаем протокол от сокета (но не закрываем сокет)
+                    if hasattr(protocol, 'transport'):
+                        protocol.transport = None
+
+                    logger.info("🔧 HTTP protocol completely disabled")
+
+            except Exception as e:
+                logger.warning(f"⚠️  Error disabling HTTP protocol: {e}")
+
+            # Ждем немного чтобы aiohttp завершил текущую обработку
+            await asyncio.sleep(0.1)
+
+            # Устанавливаем сокеты в неблокирующий режим
+            client_sock.setblocking(False)
+            target_sock.setblocking(False)
+
+            logger.info(f"🚀 Starting raw TCP tunnel")
+
+            # Запускаем чистый TCP туннель БЕЗ участия aiohttp
+            await self.run_pure_tcp_tunnel(client_sock, target_sock, host, port)
+
+        except Exception as e:
+            logger.error(f"❌ Connection hijack error: {e}")
+            import traceback
+            logger.error(f"❌ Traceback: {traceback.format_exc()}")
+
+            # Закрываем сокеты при ошибке
+            try:
+                target_sock.close()
+            except:
+                pass
+
+    async def run_pure_tcp_tunnel(self, client_sock, target_sock, host: str, port: int):
+        """Чистый TCP туннель без участия aiohttp"""
+        try:
+            logger.info(f"🔄 Starting PURE TCP tunnel to {host}:{port}")
+
+            # Функция передачи данных
+            async def forward_data_pure(from_sock, to_sock, direction):
+                try:
+                    total_bytes = 0
+                    buffer_size = 8192
+
+                    while True:
+                        try:
+                            # Читаем данные через asyncio loop
+                            data = await asyncio.get_event_loop().sock_recv(from_sock, buffer_size)
+                            if not data:
+                                logger.debug(f"📤 PURE {direction}: EOF")
+                                break
+
+                            # Отправляем данные через asyncio loop
+                            await asyncio.get_event_loop().sock_sendall(to_sock, data)
+                            total_bytes += len(data)
+
+                            # Логируем SSL handshake
+                            if total_bytes < 1024:  # Первые 1KB (SSL handshake)
+                                logger.debug(f"🔐 SSL {direction}: {len(data)} bytes, total: {total_bytes}")
+
+                        except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                            if e.errno in (9, 104, 32, 107):  # EBADF, ECONNRESET, EPIPE, ENOTCONN
+                                logger.debug(f"📤 PURE {direction}: connection closed ({e})")
+                            else:
+                                logger.warning(f"📤 PURE {direction}: socket error {e}")
+                            break
+
+                    logger.info(f"✅ PURE {direction}: finished, {total_bytes} bytes total")
+
+                except asyncio.CancelledError:
+                    logger.debug(f"🚫 PURE {direction}: cancelled")
+                except Exception as e:
+                    logger.error(f"❌ PURE {direction}: error {e}")
+
+            # Создаем задачи для передачи в обе стороны
+            client_to_server = asyncio.create_task(
+                forward_data_pure(client_sock, target_sock, f"client -> {host}:{port}")
+            )
+            server_to_client = asyncio.create_task(
+                forward_data_pure(target_sock, client_sock, f"{host}:{port} -> client")
+            )
+
+            # Ждем завершения любой из задач
+            try:
+                done, pending = await asyncio.wait(
+                    [client_to_server, server_to_client],
+                    return_when=asyncio.FIRST_COMPLETED,
+                    timeout=600  # 10 минут таймаут
+                )
+
+                logger.info(f"🔚 Pure TCP tunnel completed for {host}:{port}")
+
+            except asyncio.TimeoutError:
+                logger.info(f"⏰ Pure TCP tunnel timeout for {host}:{port}")
+            finally:
+                # Отменяем оставшиеся задачи
+                for task in [client_to_server, server_to_client]:
+                    if not task.done():
+                        task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+
+                # Закрываем сокеты
+                try:
+                    client_sock.close()
+                except:
+                    pass
+                try:
+                    target_sock.close()
+                except:
+                    pass
+
+            logger.info(f"🏁 Pure TCP tunnel ended for {host}:{port}")
+
+        except Exception as e:
+            logger.error(f"❌ Pure TCP tunnel error: {e}")
+            import traceback
+            logger.error(f"❌ Traceback: {traceback.format_exc()}")
+
+            # Закрываем сокеты при ошибке
+            try:
+                client_sock.close()
+            except:
+                pass
+            try:
+                target_sock.close()
+            except:
+                pass
 
     async def run_raw_tunnel_transport(self, client_transport, target_sock, host: str, port: int):
         """Запуск сырого TCP туннеля используя transport напрямую"""
