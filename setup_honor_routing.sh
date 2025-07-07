@@ -4,7 +4,7 @@
 set -e
 
 HONOR_DEVICE_ID="AH3SCP4B11207250"
-USB_INTERFACE="enx7a859934e22a"
+USB_INTERFACE="enx566cf3eaaf4b"
 PROXY_PORT="8080"
 
 echo "🔧 Setting up routing for proxy through HONOR phone..."
