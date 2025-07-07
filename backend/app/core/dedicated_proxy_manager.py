@@ -488,7 +488,8 @@ class DedicatedProxyServer:
     async def proxy_handler(self, request):
         """ИСПРАВЛЕННЫЙ обработчик прокси-запросов для конкретного устройства"""
         try:
-            logger.info(f"🎯 Dedicated proxy request: {request.method} {request.path_qs} via device {self.device_id}")
+            logger.info(f"🎯 Dedicated proxy request: {request.method} '{request.path_qs}' via device {self.device_id}")
+            logger.info(f"🎯 Request headers: {dict(request.headers)}")
 
             # Получение информации об устройстве
             device = await self.device_manager.get_device_by_id(self.device_id)
@@ -499,10 +500,26 @@ class DedicatedProxyServer:
                     text="Device not available"
                 )
 
-            # ИСПРАВЛЕНО: Обрабатываем CONNECT запросы отдельно
+            # ИСПРАВЛЕНО: Специальная обработка CONNECT запросов
             if request.method == 'CONNECT':
-                logger.info(f"🔗 CONNECT request for {request.path_qs}")
-                return await self.handle_connect(request, device)
+                # Для CONNECT запросов цель НЕ в path_qs, а в заголовке Host
+                target = request.headers.get('Host', '').strip()
+
+                # Также проверяем path_qs на случай если есть
+                if not target and request.path_qs:
+                    target = request.path_qs.strip()
+
+                if not target:
+                    logger.error(f"❌ No target for CONNECT request. Headers: {dict(request.headers)}")
+                    return web.Response(
+                        status=400,
+                        text="Bad Request: No target specified"
+                    )
+
+                logger.info(f"🔗 CONNECT request for '{target}'")
+
+                # Напрямую вызываем handle_connect с правильным target
+                return await self.handle_connect_direct(request, device, target)
 
             # Для остальных методов получаем полный URL
             target_url = self._get_target_url_from_request(request)
@@ -530,6 +547,127 @@ class DedicatedProxyServer:
                 status=500,
                 text="Internal proxy error"
             )
+
+    async def handle_connect_direct(self, request, device, target: str):
+        """Прямая обработка CONNECT запросов с указанным target"""
+        try:
+            # Парсим хост и порт из target
+            if ':' in target:
+                host, port = target.rsplit(':', 1)
+                port = int(port)
+            else:
+                host = target
+                port = 443
+
+            logger.info(f"🔗 CONNECT tunnel: {host}:{port} via device {self.device_id}")
+
+            # Получаем интерфейс устройства для туннелирования
+            interface = device.get('interface') or device.get('usb_interface')
+
+            if interface and interface != 'unknown':
+                logger.info(f"🔧 Creating tunnel via interface: {interface}")
+                return await self.create_interface_tunnel_direct(request, host, port, interface)
+            else:
+                logger.info("🔧 Creating standard tunnel (no specific interface)")
+                return await self.create_standard_tunnel_direct(request, host, port)
+
+        except Exception as e:
+            logger.error(f"❌ CONNECT direct error: {e}")
+            import traceback
+            logger.error(f"❌ Traceback: {traceback.format_exc()}")
+            return web.Response(
+                status=502,
+                text="Bad Gateway"
+            )
+
+    async def create_interface_tunnel_direct(self, request, host: str, port: int, interface: str):
+        """Создание туннеля через конкретный интерфейс (прямая версия)"""
+        try:
+            # Создаем сокет с привязкой к интерфейсу
+            target_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            target_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+            # Привязываем к интерфейсу (только на Linux)
+            try:
+                target_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, interface.encode())
+                logger.info(f"✅ Socket bound to interface: {interface}")
+            except OSError as e:
+                logger.warning(f"⚠️  Failed to bind to interface {interface}: {e}, using standard connection")
+
+            # Делаем сокет неблокирующим
+            target_sock.setblocking(False)
+
+            # Подключаемся к целевому серверу
+            try:
+                await asyncio.get_event_loop().sock_connect(target_sock, (host, port))
+                logger.info(f"✅ Connected to {host}:{port} via interface {interface}")
+            except OSError as e:
+                target_sock.close()
+                logger.error(f"❌ Failed to connect to {host}:{port}: {e}")
+                return web.Response(status=502, text="Connection failed")
+
+            # Получаем транспорт клиента
+            client_transport = request.transport
+            if not client_transport:
+                target_sock.close()
+                return web.Response(status=502, text="No client transport")
+
+            # Отправляем клиенту подтверждение установки туннеля
+            success_response = b"HTTP/1.1 200 Connection established\r\n\r\n"
+            client_transport.write(success_response)
+            await asyncio.sleep(0.1)  # Даем время на отправку
+
+            logger.info(f"🚀 Starting bidirectional tunnel for {host}:{port}")
+
+            # Запускаем bidirectional туннель
+            await self.run_tunnel(client_transport, target_sock, host, port)
+
+            return web.Response(status=200, text="")
+
+        except Exception as e:
+            logger.error(f"❌ Interface tunnel direct error: {e}")
+            if 'target_sock' in locals():
+                target_sock.close()
+            return web.Response(status=502, text="Tunnel creation failed")
+
+    async def create_standard_tunnel_direct(self, request, host: str, port: int):
+        """Создание стандартного туннеля (прямая версия)"""
+        try:
+            # Создаем соединение с целевым сервером
+            target_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            target_sock.setblocking(False)
+
+            try:
+                await asyncio.get_event_loop().sock_connect(target_sock, (host, port))
+                logger.info(f"✅ Connected to {host}:{port} (standard)")
+            except OSError as e:
+                target_sock.close()
+                logger.error(f"❌ Failed to connect to {host}:{port}: {e}")
+                return web.Response(status=502, text="Connection failed")
+
+            # Получаем транспорт клиента
+            client_transport = request.transport
+            if not client_transport:
+                target_sock.close()
+                return web.Response(status=502, text="No client transport")
+
+            # Отправляем подтверждение
+            success_response = b"HTTP/1.1 200 Connection established\r\n\r\n"
+            client_transport.write(success_response)
+            await asyncio.sleep(0.1)
+
+            logger.info(f"🚀 Starting standard tunnel for {host}:{port}")
+
+            # Запускаем туннель
+            await self.run_tunnel(client_transport, target_sock, host, port)
+
+            return web.Response(status=200, text="")
+
+        except Exception as e:
+            logger.error(f"❌ Standard tunnel direct error: {e}")
+            if 'target_sock' in locals():
+                target_sock.close()
+            return web.Response(status=502, text="Connection failed")
 
     def _get_target_url_from_request(self, request):
         """Получение целевого URL из запроса"""
