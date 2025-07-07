@@ -14,7 +14,7 @@ import psutil
 import random
 import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func
 from ..models.database import AsyncSessionLocal
 from ..models.base import ProxyDevice
 
@@ -111,7 +111,7 @@ class DeviceManager:
                 external_ip = await self.get_device_external_ip(device_id)
 
                 if existing_device:
-                    # Обновляем существующее устройство
+                    # Обновляем существующее устройство (порт не меняем)
                     stmt = update(ProxyDevice).where(
                         ProxyDevice.name == device_id
                     ).values(
@@ -125,12 +125,14 @@ class DeviceManager:
                     await db.execute(stmt)
                     logger.info(f"Updated device {device_id} in database")
                 else:
-                    # Создаем новое устройство
+                    # Создаем новое устройство с уникальным портом
+                    unique_port = await self.get_next_available_port(db)
+
                     new_device = ProxyDevice(
                         name=device_id,
                         device_type=device_type,
                         ip_address=ip_address,
-                        port=0,  # Заглушка для основного порта
+                        port=unique_port,  # Уникальный порт для каждого устройства
                         status=device_info.get('status', 'offline'),
                         current_external_ip=external_ip,
                         operator=device_info.get('operator', 'Unknown'),
@@ -138,7 +140,7 @@ class DeviceManager:
                         rotation_interval=600  # По умолчанию 10 минут
                     )
                     db.add(new_device)
-                    logger.info(f"Created new device {device_id} in database")
+                    logger.info(f"Created new device {device_id} in database with port {unique_port}")
 
                 await db.commit()
 
@@ -151,6 +153,45 @@ class DeviceManager:
             # Не прерываем работу, если не удалось сохранить в БД
             import traceback
             logger.error(f"Database save traceback: {traceback.format_exc()}")
+
+    async def get_next_available_port(self, db: AsyncSession, start_port: int = 9000, max_port: int = 65535) -> int:
+        """Получение следующего доступного порта с проверкой доступности"""
+        try:
+            # Получаем максимальный используемый порт
+            stmt = select(func.max(ProxyDevice.port)).where(
+                ProxyDevice.port.between(start_port, max_port)
+            )
+            result = await db.execute(stmt)
+            max_used_port = result.scalar()
+
+            if max_used_port is None:
+                # Если нет устройств, начинаем с start_port
+                return start_port
+
+            # Начинаем поиск с max_used_port + 1
+            candidate_port = max(max_used_port + 1, start_port)
+
+            # Проверяем доступность портов
+            for port in range(candidate_port, max_port + 1):
+                if not await self.is_port_used(db, port):
+                    logger.info(f"Selected next available port: {port}")
+                    return port
+
+            # Если не нашли свободный порт после максимального, ищем пропуски в начале
+            for port in range(start_port, max_used_port):
+                if not await self.is_port_used(db, port):
+                    logger.info(f"Found gap in port range, using: {port}")
+                    return port
+
+            raise RuntimeError(f"No available ports in range {start_port}-{max_port}")
+
+        except Exception as e:
+            logger.error(f"Error finding available port: {e}")
+            # Генерируем случайный порт и надеемся на лучшее
+            import random
+            fallback_port = random.randint(start_port, max_port)
+            logger.warning(f"Using fallback random port: {fallback_port}")
+            return fallback_port
 
     async def discover_android_devices_with_interfaces(self) -> Dict[str, dict]:
         """Обнаружение Android устройств с обнаружением USB интерфейсов"""
@@ -1295,3 +1336,13 @@ class DeviceManager:
                 }
 
         return None
+
+    async def is_port_used(self, db: AsyncSession, port: int) -> bool:
+        """Проверка, используется ли порт другим устройством"""
+        try:
+            stmt = select(ProxyDevice.id).where(ProxyDevice.port == port)
+            result = await db.execute(stmt)
+            return result.scalar_one_or_none() is not None
+        except Exception as e:
+            logger.error(f"Error checking port usage: {e}")
+            return True  # В случае ошибки считаем порт занятым
