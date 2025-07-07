@@ -35,7 +35,7 @@ class DedicatedProxyServer:
         self._running = False
 
     async def start(self):
-        """Запуск индивидуального прокси-сервера с улучшенной обработкой портов"""
+        """Запуск индивидуального прокси-сервера с правильной настройкой middleware"""
         if self._running:
             logger.info(f"Dedicated proxy server for {self.device_id} already running on port {self.port}")
             return
@@ -46,7 +46,117 @@ class DedicatedProxyServer:
             # Создание веб-приложения
             self.app = web.Application()
 
-            # ... (middleware остается тот же) ...
+            # ОТЛАДОЧНЫЙ MIDDLEWARE для логирования всех запросов
+            @web.middleware
+            async def debug_middleware(request, handler):
+                logger.info(f"🔥 RAW REQUEST DEBUG:")
+                logger.info(f"   Method: {request.method}")
+                logger.info(f"   Path: '{request.path}'")
+                logger.info(f"   Path_qs: '{request.path_qs}'")
+                logger.info(f"   URL: {request.url}")
+                logger.info(f"   Query string: '{request.query_string}'")
+                logger.info(f"   Headers: {dict(request.headers)}")
+
+                # Попробуем получить raw данные
+                try:
+                    if hasattr(request, 'transport') and request.transport:
+                        transport = request.transport
+                        logger.info(f"   Transport: {type(transport)}")
+                        if hasattr(transport, 'get_extra_info'):
+                            socket_info = transport.get_extra_info('socket')
+                            logger.info(f"   Socket: {socket_info}")
+                except Exception as e:
+                    logger.info(f"   Transport info error: {e}")
+
+                # Вызываем следующий middleware/handler
+                response = await handler(request)
+
+                logger.info(f"   Response status: {response.status}")
+                return response
+
+            # Добавляем отладочный middleware первым
+            self.app.middlewares.append(debug_middleware)
+
+            # ГЛАВНЫЙ MIDDLEWARE для аутентификации и CONNECT обработки
+            @web.middleware
+            async def auth_and_connect_middleware(request, handler):
+                # Проверяем аутентификацию
+                auth_header = request.headers.get('Proxy-Authorization')
+                if not auth_header:
+                    logger.info("❌ No Proxy-Authorization header")
+                    return web.Response(
+                        status=407,
+                        headers={'Proxy-Authenticate': 'Basic realm="Proxy"'},
+                        text="Proxy Authentication Required"
+                    )
+
+                try:
+                    # Парсинг Basic Auth
+                    if not auth_header.startswith('Basic '):
+                        raise ValueError("Invalid auth method")
+
+                    encoded_credentials = auth_header[6:]
+                    decoded_credentials = base64.b64decode(encoded_credentials).decode('utf-8')
+                    username, password = decoded_credentials.split(':', 1)
+
+                    # Проверка учетных данных
+                    if username != self.username or password != self.password:
+                        logger.info(f"❌ Invalid credentials: {username}")
+                        return web.Response(
+                            status=407,
+                            headers={'Proxy-Authenticate': 'Basic realm="Proxy"'},
+                            text="Invalid credentials"
+                        )
+
+                    logger.info(f"✅ Authentication successful for: {username}")
+
+                except Exception as e:
+                    logger.info(f"❌ Authentication error: {e}")
+                    return web.Response(
+                        status=407,
+                        headers={'Proxy-Authenticate': 'Basic realm="Proxy"'},
+                        text="Authentication error"
+                    )
+
+                # 🔥 ГЛАВНОЕ ИСПРАВЛЕНИЕ: Перехватываем CONNECT на уровне middleware
+                if request.method == 'CONNECT':
+                    logger.info(f"🔗 CONNECT intercepted in middleware - bypassing router!")
+
+                    try:
+                        # Вызываем proxy_handler напрямую, минуя роутер
+                        response = await self.proxy_handler(request)
+
+                        # ВАЖНО: Если response None (туннель запущен), прерываем обработку
+                        if response is None:
+                            logger.info("🔄 CONNECT tunnel started, connection hijacked")
+                            # Для CONNECT туннелей мы не возвращаем обычный HTTP response
+                            # Соединение захвачено туннелем
+                            return web.Response(status=200, text="")
+
+                        return response
+
+                    except Exception as e:
+                        logger.error(f"❌ CONNECT handler error: {e}")
+                        return web.Response(status=502, text="Bad Gateway")
+
+                # Для остальных запросов передаем в роутер
+                return await handler(request)
+
+            # КРИТИЧНО: Добавляем middleware в правильном порядке
+            self.app.middlewares.append(auth_and_connect_middleware)
+
+            # МАКСИМАЛЬНО ПРОСТЫЕ РОУТЫ
+            # Один универсальный обработчик
+            async def universal_handler(request):
+                logger.info(f"🎯 UNIVERSAL HANDLER: {request.method} '{request.path_qs}'")
+                return await self.proxy_handler(request)
+
+            # Регистрируем роуты для всех HTTP методов
+            for method in ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS']:
+                self.app.router.add_route(method, '/{path:.*}', universal_handler)
+                self.app.router.add_route(method, '/', universal_handler)
+
+            logger.info(f"📋 Registered universal route for {self.device_id}")
 
             # Запуск сервера с улучшенными настройками сокета
             self.runner = web.AppRunner(self.app)
