@@ -17,7 +17,7 @@ import structlog
 
 from ..models.database import AsyncSessionLocal
 from ..models.base import ProxyDevice, RotationConfig, IpHistory
-from ..utils.device_utils import detect_device_capabilities, get_device_interfaces
+# from ..utils.device_utils import detect_device_capabilities, get_device_interfaces
 
 logger = structlog.get_logger()
 
@@ -596,3 +596,219 @@ class EnhancedRotationManager:
         """Мониторинг состояния задач ротации - заглушка"""
         # Реализация мониторинга
         pass
+
+    async def _rotate_raspberry_pi(self, device: ProxyDevice, method: str) -> Tuple[bool, str]:
+        """Ротация IP для Raspberry Pi"""
+        try:
+            if method == 'ppp_restart':
+                return await self._rpi_ppp_restart(device)
+            elif method == 'gpio_reset':
+                return await self._rpi_gpio_reset(device)
+            else:
+                return False, f"Unknown Raspberry Pi rotation method: {method}"
+        except Exception as e:
+            return False, f"Raspberry Pi rotation error: {str(e)}"
+
+    async def _rpi_ppp_restart(self, device: ProxyDevice) -> Tuple[bool, str]:
+        """Перезапуск PPP на Raspberry Pi"""
+        try:
+            # Остановка PPP
+            result = await asyncio.create_subprocess_exec(
+                'sudo', 'poff', 'provider',
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            await result.communicate()
+
+            await asyncio.sleep(5)
+
+            # Запуск PPP
+            result = await asyncio.create_subprocess_exec(
+                'sudo', 'pon', 'provider',
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            await result.communicate()
+
+            await asyncio.sleep(20)
+            return True, "PPP restart completed successfully"
+
+        except Exception as e:
+            return False, f"PPP restart error: {str(e)}"
+
+    async def _rpi_gpio_reset(self, device: ProxyDevice) -> Tuple[bool, str]:
+        """Сброс модема через GPIO на Raspberry Pi"""
+        try:
+            # Простой сброс через usbreset
+            result = await asyncio.create_subprocess_exec(
+                'sudo', 'usbreset', '/dev/ttyUSB0',
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            await result.communicate()
+
+            await asyncio.sleep(30)
+            return True, "GPIO reset completed successfully"
+
+        except Exception as e:
+            return False, f"GPIO reset error: {str(e)}"
+
+    async def _rotate_network_device(self, device: ProxyDevice, method: str) -> Tuple[bool, str]:
+        """Ротация IP для сетевого устройства"""
+        try:
+            if method == 'interface_restart':
+                return await self._network_interface_restart(device)
+            elif method == 'dhcp_renew':
+                return await self._network_dhcp_renew(device)
+            else:
+                return False, f"Unknown network device rotation method: {method}"
+        except Exception as e:
+            return False, f"Network device rotation error: {str(e)}"
+
+    async def _network_interface_restart(self, device: ProxyDevice) -> Tuple[bool, str]:
+        """Перезапуск сетевого интерфейса"""
+        try:
+            interface = device.name  # Используем name как интерфейс
+
+            # Отключение интерфейса
+            result = await asyncio.create_subprocess_exec(
+                'sudo', 'ifdown', interface,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            await result.communicate()
+
+            await asyncio.sleep(3)
+
+            # Включение интерфейса
+            result = await asyncio.create_subprocess_exec(
+                'sudo', 'ifup', interface,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            await result.communicate()
+
+            await asyncio.sleep(10)
+            return True, "Interface restart completed successfully"
+
+        except Exception as e:
+            return False, f"Interface restart error: {str(e)}"
+
+    async def _network_dhcp_renew(self, device: ProxyDevice) -> Tuple[bool, str]:
+        """Обновление DHCP для сетевого устройства"""
+        try:
+            interface = device.name
+
+            # Освобождение IP
+            result = await asyncio.create_subprocess_exec(
+                'sudo', 'dhclient', '-r', interface,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            await result.communicate()
+
+            await asyncio.sleep(2)
+
+            # Получение нового IP
+            result = await asyncio.create_subprocess_exec(
+                'sudo', 'dhclient', interface,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            await result.communicate()
+
+            await asyncio.sleep(8)
+            return True, "DHCP renew completed successfully"
+
+        except Exception as e:
+            return False, f"DHCP renew error: {str(e)}"
+
+    async def _usb_modem_usb_reset(self, device: ProxyDevice) -> Tuple[bool, str]:
+        """USB сброс модема"""
+        try:
+            port = device.name
+
+            # Попытка USB reset
+            result = await asyncio.create_subprocess_exec(
+                'sudo', 'usbreset', port,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            await result.communicate()
+
+            await asyncio.sleep(25)
+            return True, "USB reset completed successfully"
+
+        except Exception as e:
+            return False, f"USB reset error: {str(e)}"
+
+    async def _usb_modem_interface_restart(self, device: ProxyDevice) -> Tuple[bool, str]:
+        """Перезапуск интерфейса USB модема"""
+        try:
+            # Находим сетевой интерфейс модема
+            interface = await self._find_modem_network_interface(device)
+
+            if not interface:
+                return False, "Could not find network interface for modem"
+
+            # Отключение интерфейса
+            result = await asyncio.create_subprocess_exec(
+                'sudo', 'ifdown', interface,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            await result.communicate()
+
+            await asyncio.sleep(5)
+
+            # Включение интерфейса
+            result = await asyncio.create_subprocess_exec(
+                'sudo', 'ifup', interface,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            await result.communicate()
+
+            await asyncio.sleep(15)
+            return True, "Interface restart completed successfully"
+
+        except Exception as e:
+            return False, f"Interface restart error: {str(e)}"
+
+    async def _usb_modem_serial_reconnect(self, device: ProxyDevice) -> Tuple[bool, str]:
+        """Переподключение серийного порта USB модема"""
+        try:
+            port = device.name
+
+            # Попытка переподключения через модули ядра
+            result = await asyncio.create_subprocess_exec(
+                'sudo', 'modprobe', '-r', 'option',
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            await result.communicate()
+
+            await asyncio.sleep(3)
+
+            result = await asyncio.create_subprocess_exec(
+                'sudo', 'modprobe', 'option',
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            await result.communicate()
+
+            await asyncio.sleep(20)
+            return True, "Serial reconnect completed successfully"
+
+        except Exception as e:
+            return False, f"Serial reconnect error: {str(e)}"
+
+    def _find_modem_network_interface(self, device: ProxyDevice) -> Optional[str]:
+        """Поиск сетевого интерфейса модема (синхронная версия)"""
+        try:
+            import netifaces
+            interfaces = netifaces.interfaces()
+
+            # Проверяем типичные интерфейсы модемов
+            for interface in interfaces:
+                if interface.startswith(('wwan', 'ppp', 'usb')):
+                    try:
+                        addrs = netifaces.ifaddresses(interface)
+                        if netifaces.AF_INET in addrs:
+                            return interface
+                    except:
+                        continue
+
+        except Exception as e:
+            logger.debug(f"Error finding modem interface: {e}")
+
+        return None
+
