@@ -1,11 +1,15 @@
 import {createRouter, createWebHistory} from 'vue-router'
 import {useAuthStore} from '../stores/auth'
+import dedicatedProxyManager from "../components/DedicatedProxyManager.vue";
 
 // Lazy load components
 const Dashboard = () => import('../views/Dashboard.vue')
 const Login = () => import('../views/Login.vue')
 const Modems = () => import('../views/Modems.vue')
 const ModemDetail = () => import('../views/ModemDetail.vue')
+const DedicatedProxies = () => import('../components/DedicatedProxyManager.vue')
+const DeviceDebugView = () => import('../views/DeviceDebugView.vue')  // НОВОЕ
+
 const Statistics = () => import('../views/Statistics.vue')
 const Logs = () => import('../views/Logs.vue')
 const Settings = () => import('../views/Settings.vue')
@@ -38,7 +42,8 @@ const routes = [
     {
         path: '/dedicated-proxies',
         name: 'DedicatedProxies',
-        component: () => import('../components/DedicatedProxyManager.vue'),
+        // component: () => import('../components/DedicatedProxyManager.vue'),
+        component: DedicatedProxies,
         meta: {requiresAuth: true, requiresAdmin: true}
     },
     {
@@ -57,6 +62,16 @@ const routes = [
         meta: {
             requiresAuth: true,
             title: 'Modem Details'
+        }
+    },
+    {
+        path: '/device-debug',
+        name: 'DeviceDebug',
+        component: DeviceDebugView,
+        meta: {
+            requiresAuth: true,
+            requiresAdmin: true,
+            title: 'Отладка устройств'
         }
     },
     {
