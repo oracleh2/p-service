@@ -15,6 +15,8 @@
       <div class="debug-buttons">
         <button @click="debugDevices" class="btn-warning">Диагностировать устройства</button>
         <button @click="testAPI" class="btn-secondary">Тест API</button>
+        <button @click="simpleTest" class="btn-primary">Простой тест</button>
+        <button @click="forceRefresh" class="btn-success">Принудительное обновление</button>
         <button @click="showDebug = false" class="btn-danger">Скрыть диагностику</button>
       </div>
 
@@ -113,13 +115,24 @@
             <label>Устройство:</label>
             <select v-model="newProxy.device_id" required>
               <option value="">Выберите устройство</option>
-              <option v-for="device in availableDevices" :key="device.modem_id" :value="device.modem_id">
-                {{ device.device_info || device.modem_id }} ({{ device.status }})
+              <option v-for="device in availableDevices" :key="device.modem_id || device.id" :value="device.modem_id || device.id">
+                {{ device.device_info || device.name || device.modem_id || device.id }} ({{ device.status }})
               </option>
             </select>
-            <p v-if="availableDevices.length === 0" class="form-help">
-              Нет доступных устройств. Проверьте что устройства подключены и онлайн.
-            </p>
+
+            <!-- Отладочная информация -->
+            <div class="debug-devices" v-if="showDebug">
+              <p><strong>Всего доступных устройств:</strong> {{ availableDevices.length }}</p>
+              <p><strong>Устройства:</strong></p>
+              <ul>
+                <li v-for="device in availableDevices" :key="device.modem_id || device.id">
+                  ID: {{ device.modem_id || device.id }}, Название: {{ device.device_info || device.name }}, Статус: {{ device.status }}
+                </li>
+              </ul>
+              <p v-if="availableDevices.length === 0" class="form-help error">
+                ❌ Нет доступных устройств для создания прокси
+              </p>
+            </div>
           </div>
 
           <div class="form-group">
@@ -210,6 +223,7 @@
 import { ref, onMounted, reactive } from 'vue'
 import { useProxyStore } from '../stores/proxy'
 import { useDeviceStore } from '../stores/devices'
+import api from '../utils/api'
 
 export default {
   name: 'DedicatedProxyManager',
@@ -256,19 +270,33 @@ export default {
         const devices = await deviceStore.fetchModems()
         console.log('✅ Loaded devices:', devices)
 
+        // Убеждаемся что получили массив
+        const devicesArray = Array.isArray(devices) ? devices : []
+        console.log('📦 Devices array:', devicesArray)
+
         // Фильтрация устройств без прокси
         const proxyDeviceIds = new Set(proxies.value.map(p => p.device_id))
         console.log('📋 Existing proxy device IDs:', proxyDeviceIds)
 
-        // ИСПРАВЛЕНО: используем modem_id вместо id для сравнения
-        availableDevices.value = devices.filter(d => {
+        // ИСПРАВЛЕНО: используем modem_id или id для сравнения
+        availableDevices.value = devicesArray.filter(d => {
           const deviceId = d.modem_id || d.id
-          return !proxyDeviceIds.has(deviceId)
+          const hasProxy = proxyDeviceIds.has(deviceId)
+          console.log(`📱 Device ${deviceId}: hasProxy = ${hasProxy}`)
+          return !hasProxy
         })
 
         console.log('✅ Available devices after filter:', availableDevices.value)
+        console.log('📊 Total available devices count:', availableDevices.value.length)
+
+        // Дополнительная проверка структуры устройств
+        if (availableDevices.value.length > 0) {
+          console.log('🔍 First device structure:', availableDevices.value[0])
+        }
+
       } catch (error) {
         console.error('❌ Error loading devices:', error)
+
         // Предпринимаем попытку получить устройства напрямую из store
         try {
           console.log('🔄 Trying to fetch from store directly...')
@@ -276,11 +304,14 @@ export default {
           const devices = deviceStore.modems || []
           console.log('🏪 Store devices:', devices)
 
+          const devicesArray = Array.isArray(devices) ? devices : []
           const proxyDeviceIds = new Set(proxies.value.map(p => p.device_id))
-          availableDevices.value = devices.filter(d => {
+
+          availableDevices.value = devicesArray.filter(d => {
             const deviceId = d.modem_id || d.id
             return !proxyDeviceIds.has(deviceId)
           })
+
           console.log('✅ Final available devices:', availableDevices.value)
         } catch (secondError) {
           console.error('❌ Second attempt failed:', secondError)
@@ -358,35 +389,113 @@ export default {
       try {
         console.log('🧪 Testing API endpoints...')
 
-        // Тест 1: Прямой запрос к API
-        const response1 = await fetch('http://192.168.1.50:8000/admin/devices')
-        const data1 = await response1.json()
-        console.log('📡 Direct API call result:', data1)
+        // Тест 1: Через api utility (с авторизацией)
+        const data1 = await api.get('/admin/devices')
+        console.log('📡 API call result:', data1.data)
 
         // Тест 2: Через device store
         const data2 = await deviceStore.fetchModems()
         console.log('🏪 Device store result:', data2)
 
-        // Тест 3: Принудительное обнаружение
+        // Тест 3: Принудительное обнаружение (с авторизацией)
         try {
-          const response3 = await fetch('http://192.168.1.50:8000/admin/devices/discover', {
-            method: 'POST'
-          })
-          const data3 = await response3.json()
-          console.log('🔍 Discovery result:', data3)
+          const data3 = await api.post('/admin/devices/discover')
+          console.log('🔍 Discovery result:', data3.data)
         } catch (discoveryError) {
-          console.log('❌ Discovery failed:', discoveryError.message)
+          console.log('❌ Discovery failed:', discoveryError.response?.data || discoveryError.message)
         }
 
         debugResults.value = {
-          direct_api: data1,
+          direct_api: data1.data,
           store_result: data2,
           timestamp: new Date().toISOString()
         }
 
       } catch (error) {
         console.error('❌ API test failed:', error)
-        debugResults.value = { api_test_error: error.message }
+        debugResults.value = {
+          api_test_error: error.response?.data || error.message,
+          timestamp: new Date().toISOString()
+        }
+      }
+    }
+      console.log('🧪 Simple device test...')
+
+      try {
+        // Используем api utility с авторизацией
+        const response = await api.get('/admin/devices')
+        console.log('📡 API response:', response.data)
+
+        const devices = response.data
+        if (Array.isArray(devices) && devices.length > 0) {
+          // Обновляем доступные устройства напрямую
+          const proxyDeviceIds = new Set(proxies.value.map(p => p.device_id))
+          availableDevices.value = devices.filter(d => {
+            const deviceId = d.modem_id || d.id
+            return !proxyDeviceIds.has(deviceId)
+          })
+
+          console.log('🎯 Updated available devices:', availableDevices.value)
+
+          debugResults.value = {
+            simple_test: {
+              success: true,
+              total_devices: devices.length,
+              available_devices: availableDevices.value.length,
+              devices: devices,
+              available: availableDevices.value
+            }
+          }
+        } else {
+          console.log('❌ No devices found')
+          debugResults.value = {
+            simple_test: {
+              success: false,
+              message: 'No devices found in API response',
+              response: devices
+            }
+          }
+        }
+
+      } catch (error) {
+        console.error('❌ Simple test failed:', error)
+        debugResults.value = {
+          simple_test: {
+            success: false,
+            error: error.message,
+            details: error
+          }
+        }
+      }
+    }
+
+    const forceRefresh = async () => {
+      console.log('🔄 Force refresh...')
+      try {
+        // Очищаем все состояния
+        availableDevices.value = []
+        proxies.value = []
+
+        // Принудительно загружаем данные
+        await loadProxies()
+        await loadAvailableDevices()
+
+        console.log('✅ Force refresh completed')
+        debugResults.value = {
+          force_refresh: {
+            success: true,
+            proxies_count: proxies.value.length,
+            available_devices_count: availableDevices.value.length
+          }
+        }
+      } catch (error) {
+        console.error('❌ Force refresh failed:', error)
+        debugResults.value = {
+          force_refresh: {
+            success: false,
+            error: error.message
+          }
+        }
       }
     }
 
@@ -519,7 +628,9 @@ export default {
       closeCreateModal,
       closeUsageModal,
       debugDevices,
-      testAPI
+      testAPI,
+      simpleTest,
+      forceRefresh
     }
   }
 }
@@ -628,7 +739,7 @@ export default {
   flex-wrap: wrap;
 }
 
-.btn-primary, .btn-secondary, .btn-warning, .btn-danger {
+.btn-primary, .btn-secondary, .btn-warning, .btn-danger, .btn-success {
   padding: 8px 16px;
   border: none;
   border-radius: 4px;
@@ -641,6 +752,7 @@ export default {
 .btn-secondary { background: #6b7280; color: white; }
 .btn-warning { background: #f59e0b; color: white; }
 .btn-danger { background: #ef4444; color: white; }
+.btn-success { background: #10b981; color: white; }
 
 .modal-overlay {
   position: fixed;
@@ -786,5 +898,28 @@ export default {
 
 .debug-toggle {
   margin-bottom: 20px;
+}
+
+.debug-devices {
+  margin-top: 10px;
+  padding: 10px;
+  background: #f8fafc;
+  border-radius: 4px;
+  border: 1px solid #e5e7eb;
+}
+
+.debug-devices ul {
+  margin: 5px 0;
+  padding-left: 20px;
+}
+
+.debug-devices li {
+  margin-bottom: 5px;
+  font-size: 12px;
+}
+
+.form-help.error {
+  color: #dc2626;
+  font-weight: 500;
 }
 </style>
