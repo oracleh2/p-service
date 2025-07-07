@@ -113,9 +113,17 @@ export const useProxyStore = defineStore('proxy', () => {
         }
     }
 
+    /**
+     * Обновление индивидуального прокси
+     */
     const updateDedicatedProxy = async (deviceId, updateData) => {
-        const response = await api.put(`/admin/dedicated-proxy/${deviceId}/update`, updateData)
-        return response.data
+        try {
+            const response = await api.put(`/admin/dedicated-proxy/${deviceId}/update`, updateData)
+            return response.data
+        } catch (error) {
+            console.error('Error updating dedicated proxy:', error)
+            throw error
+        }
     }
 
     return {

@@ -142,36 +142,6 @@ class DedicatedProxyServer:
         # Передача управления дальше
         return await handler(request)
 
-    async def proxy_handler(self, request):
-        """Обработчик прокси-запросов для конкретного устройства"""
-        try:
-            # Получение информации об устройстве
-            device = await self.device_manager.get_device_by_id(self.device_id)
-            if not device or device['status'] != 'online':
-                return web.Response(
-                    status=503,
-                    text="Device not available"
-                )
-
-            # Подготовка целевого URL
-            if request.method == 'CONNECT':
-                # HTTPS туннелирование
-                return await self.handle_connect(request, device)
-            else:
-                # HTTP прокси
-                return await self.handle_http(request, device)
-
-        except Exception as e:
-            logger.error(
-                "Error in dedicated proxy handler",
-                device_id=self.device_id,
-                error=str(e)
-            )
-            return web.Response(
-                status=500,
-                text="Internal proxy error"
-            )
-
     async def handle_http(self, request, device):
         """Обработка HTTP запросов"""
         # Получение целевого URL из пути запроса
@@ -225,6 +195,258 @@ class DedicatedProxyServer:
     def is_running(self):
         """Проверка статуса работы сервера"""
         return self._running
+
+    async def proxy_handler(self, request):
+        """ИСПРАВЛЕННЫЙ обработчик прокси-запросов для конкретного устройства"""
+        try:
+            # Получение информации об устройстве
+            device = await self.device_manager.get_device_by_id(self.device_id)
+            if not device or device.get('status') != 'online':
+                logger.error(f"Device {self.device_id} not available or offline")
+                return web.Response(
+                    status=503,
+                    text="Device not available"
+                )
+
+            # Получение целевого URL
+            target_url = self._get_target_url_from_request(request)
+            if not target_url:
+                return web.Response(
+                    status=400,
+                    text="Bad Request: Invalid target URL"
+                )
+
+            logger.info(f"Dedicated proxy request: {request.method} {target_url} via device {self.device_id}")
+
+            # Подготовка целевого URL
+            if request.method == 'CONNECT':
+                # HTTPS туннелирование (пока упрощенная реализация)
+                return await self.handle_connect(request, device)
+            else:
+                # HTTP прокси с использованием логики из proxy_server.py
+                return await self.handle_http_via_device_interface(request, target_url, device)
+
+        except Exception as e:
+            logger.error(
+                "Error in dedicated proxy handler",
+                device_id=self.device_id,
+                error=str(e)
+            )
+            return web.Response(
+                status=500,
+                text="Internal proxy error"
+            )
+
+    def _get_target_url_from_request(self, request):
+        """Получение целевого URL из запроса"""
+        try:
+            # Для прямых HTTP запросов через прокси
+            if request.path_qs.startswith('http://') or request.path_qs.startswith('https://'):
+                return request.path_qs
+
+            # Для запросов с Host заголовком
+            host = request.headers.get('Host')
+            if host:
+                # Исключаем запросы к самому прокси-серверу
+                proxy_hosts = [
+                    f'192.168.1.50:{self.port}',
+                    f'127.0.0.1:{self.port}',
+                    f'localhost:{self.port}'
+                ]
+
+                if host not in proxy_hosts:
+                    scheme = 'https' if request.secure else 'http'
+                    return f"{scheme}://{host}{request.path_qs}"
+
+            return None
+
+        except Exception as e:
+            logger.error(f"Error getting target URL: {e}")
+            return None
+
+    async def handle_http_via_device_interface(self, request, target_url, device):
+        """Обработка HTTP запросов с использованием интерфейса устройства"""
+        try:
+            device_type = device.get('type')
+            interface = device.get('interface') or device.get('usb_interface')
+
+            logger.info(f"Processing via device type: {device_type}, interface: {interface}")
+
+            # Если Android устройство с USB интерфейсом - используем curl
+            if device_type == 'android' and interface and interface != 'unknown':
+                logger.info(f"Using Android interface routing via {interface}")
+
+                # Используем ту же логику curl что и в proxy_server.py
+                curl_result = await self.force_curl_via_interface(request, target_url, interface)
+
+                if curl_result:
+                    return web.Response(
+                        text=curl_result.get('body', ''),
+                        status=curl_result.get('status', 200),
+                        headers={
+                            **curl_result.get('headers', {}),
+                            'X-Dedicated-Proxy-Device': self.device_id,
+                            'X-Dedicated-Proxy-Interface': interface
+                        }
+                    )
+
+            # Fallback к обычному HTTP запросу
+            logger.info("Using fallback HTTP client")
+            return await self.handle_http_fallback(request, target_url)
+
+        except Exception as e:
+            logger.error(f"Error in handle_http_via_device_interface: {e}")
+            return await self.handle_http_fallback(request, target_url)
+
+    async def force_curl_via_interface(self, request, target_url: str, interface_name: str):
+        """Копия метода из proxy_server.py для выполнения запроса через интерфейс"""
+        try:
+            logger.info(f"🔧 DEDICATED PROXY: curl via interface: {interface_name}")
+            logger.info(f"🎯 Target URL: {target_url}")
+
+            # Получаем данные запроса
+            method = request.method
+            headers = dict(request.headers)
+
+            # Получаем тело запроса если есть
+            body = None
+            if method in ['POST', 'PUT', 'PATCH']:
+                body = await request.read()
+
+            # Убираем проблемные заголовки
+            headers.pop('Host', None)
+            headers.pop('Content-Length', None)
+            headers.pop('Proxy-Authorization', None)
+
+            # Базовая команда curl
+            cmd = [
+                "curl",
+                "--interface", interface_name,
+                "--silent",
+                "--show-error",
+                "--fail-with-body",
+                "--max-time", "30",
+                "--connect-timeout", "10",
+                "--location",
+                "--compressed",
+                "--header", "Accept: application/json, text/plain, */*",
+                "--header", "User-Agent: Dedicated-Proxy-Interface/1.0",
+                "--write-out", "\\nHTTPSTATUS:%{http_code}\\nTIME:%{time_total}\\n"
+            ]
+
+            # Добавляем HTTP метод
+            if method.upper() != "GET":
+                cmd.extend(["-X", method.upper()])
+
+            # Добавляем заголовки
+            for key, value in headers.items():
+                if key.lower() not in ['host', 'content-length', 'connection', 'proxy-authorization']:
+                    cmd.extend(["--header", f"{key}: {value}"])
+
+            # Добавляем данные для POST/PUT
+            if body:
+                cmd.extend(["--data-binary", "@-"])
+
+            cmd.append(target_url)
+
+            logger.info(f"🔧 Executing dedicated proxy curl command...")
+
+            # Выполняем команду
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE if body else None,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+
+            # Отправляем данные если есть
+            stdout, stderr = await process.communicate(input=body)
+
+            if process.returncode != 0:
+                logger.error(f"❌ Dedicated proxy curl FAILED! Return code: {process.returncode}")
+                logger.error(f"❌ stderr: {stderr.decode()}")
+                return None
+
+            # Декодируем результат
+            output = stdout.decode().strip()
+            logger.info(f"🎉 Dedicated proxy curl SUCCESS! Output length: {len(output)}")
+
+            # Парсим результат
+            lines = output.split('\n')
+            status_code = 200
+            response_time = 0.0
+            body_lines = []
+
+            # Извлекаем метаданные и тело ответа
+            for line in lines:
+                if line.startswith('HTTPSTATUS:'):
+                    status_code = int(line.split(':')[1])
+                elif line.startswith('TIME:'):
+                    response_time = float(line.split(':')[1])
+                elif line.strip():  # Пропускаем пустые строки
+                    body_lines.append(line)
+
+            response_body = '\n'.join(body_lines)
+
+            logger.info(f"🎉 SUCCESS! Dedicated proxy interface {interface_name} -> Status {status_code}")
+
+            return {
+                'body': response_body,
+                'status': status_code,
+                'headers': {
+                    'Content-Type': 'application/json',
+                    'X-Proxy-Interface': interface_name,
+                    'X-Proxy-Via': 'dedicated-curl'
+                },
+                'response_time': response_time
+            }
+
+        except Exception as e:
+            logger.error(f"❌ Exception in dedicated proxy force_curl_via_interface: {e}")
+            import traceback
+            logger.error(f"❌ Traceback: {traceback.format_exc()}")
+            return None
+
+    async def handle_http_fallback(self, request, target_url):
+        """Fallback HTTP обработчик"""
+        try:
+            # Подготовка заголовков
+            headers = dict(request.headers)
+            headers.pop('Proxy-Authorization', None)
+            headers.pop('Host', None)
+
+            # Выполнение запроса через обычный HTTP клиент
+            async with aiohttp.ClientSession() as session:
+                async with session.request(
+                    method=request.method,
+                    url=target_url,
+                    headers=headers,
+                    data=await request.read() if request.content_length else None
+                ) as response:
+                    # Подготовка ответа
+                    body = await response.read()
+
+                    return web.Response(
+                        status=response.status,
+                        headers={
+                            **dict(response.headers),
+                            'X-Dedicated-Proxy-Device': self.device_id,
+                            'X-Dedicated-Proxy-Fallback': 'true'
+                        },
+                        body=body
+                    )
+
+        except Exception as e:
+            logger.error(
+                "Error in dedicated proxy fallback",
+                device_id=self.device_id,
+                target_url=target_url,
+                error=str(e)
+            )
+            return web.Response(
+                status=502,
+                text="Bad Gateway"
+            )
 
 
 class DedicatedProxyManager:
@@ -490,3 +712,26 @@ class DedicatedProxyManager:
                 error=str(e)
             )
             raise
+
+    async def verify_proxy_server_running(self, device_id: str) -> bool:
+        """Проверка, что dedicated proxy сервер запущен и отвечает"""
+        try:
+            proxy_server = self.proxy_servers.get(device_id)
+            if not proxy_server or not proxy_server.is_running():
+                logger.error(f"Proxy server for {device_id} not running")
+                return False
+
+            # Проверяем, что порт слушается
+            import socket
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                result = s.connect_ex(('192.168.1.50', proxy_server.port))
+                if result != 0:
+                    logger.error(f"Proxy server port {proxy_server.port} not listening")
+                    return False
+
+            logger.info(f"Proxy server for {device_id} is running on port {proxy_server.port}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error verifying proxy server: {e}")
+            return False

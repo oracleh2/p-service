@@ -12,6 +12,9 @@ from ..api.auth import get_admin_user, get_current_active_user
 from ..core.managers import get_device_manager, get_dedicated_proxy_manager
 import structlog
 from pydantic import BaseModel, validator
+from ..models.database import AsyncSessionLocal
+from ..models.base import ProxyDevice
+from sqlalchemy import select, update, func
 
 router = APIRouter()
 logger = structlog.get_logger()
@@ -108,20 +111,34 @@ async def create_dedicated_proxy(
         )
 
         # ИСПРАВЛЕНО: Правильная обработка данных устройства
-        device_name = None
-        device_status = None
+        device_name = "Unknown"
+        device_status = "unknown"
 
         if device:
+            # Логируем структуру устройства для отладки
+            logger.info(f"Device data structure: {device}")
+
             # Пробуем разные возможные ключи для имени устройства
             device_name = (device.get("device_info") or
                            device.get("name") or
+                           device.get("friendly_name") or
                            device.get("device_name") or
-                           f"Device {request.device_id}")
+                           device.get("id", f"Device {request.device_id}"))
 
             # Пробуем разные возможные ключи для статуса
             device_status = (device.get("status") or
                              device.get("device_status") or
                              "unknown")
+        else:
+            # Если устройство не найдено в DeviceManager, получаем из БД
+            async with AsyncSessionLocal() as db:
+                stmt = select(ProxyDevice).where(ProxyDevice.name == request.device_id)
+                result = await db.execute(stmt)
+                db_device = result.scalar_one_or_none()
+
+                if db_device:
+                    device_name = db_device.name
+                    device_status = db_device.status
 
         return DedicatedProxyResponse(
             device_id=proxy_info["device_id"],
