@@ -227,247 +227,247 @@ import api from '../utils/api'
 
 export default {
   name: 'DedicatedProxyManager',
-  setup() {
-    const proxyStore = useProxyStore()
-    const deviceStore = useDeviceStore()
+  async setup() {
+      const proxyStore = useProxyStore()
+      const deviceStore = useDeviceStore()
 
-    const loading = ref(false)
-    const proxies = ref([])
-    const availableDevices = ref([])
-    const showCreateModal = ref(false)
-    const showUsageModal = ref(false)
-    const usageExamples = ref(null)
-    const showPasswords = reactive({})
+      const loading = ref(false)
+      const proxies = ref([])
+      const availableDevices = ref([])
+      const showCreateModal = ref(false)
+      const showUsageModal = ref(false)
+      const usageExamples = ref(null)
+      const showPasswords = reactive({})
 
-    const showDebug = ref(true) // Показываем диагностику по умолчанию
-    const debugResults = ref(null)
+      const showDebug = ref(true) // Показываем диагностику по умолчанию
+      const debugResults = ref(null)
 
-    const newProxy = reactive({
-      device_id: '',
-      port: null,
-      username: '',
-      password: ''
-    })
+      const newProxy = reactive({
+          device_id: '',
+          port: null,
+          username: '',
+          password: ''
+      })
 
-    // Загрузка данных
-    const loadProxies = async () => {
-      loading.value = true
-      try {
-        const response = await proxyStore.getDedicatedProxies()
-        proxies.value = response.proxies
-      } catch (error) {
-        console.error('Error loading proxies:', error)
-      } finally {
-        loading.value = false
-      }
-    }
-
-    const loadAvailableDevices = async () => {
-      try {
-        console.log('🔍 Loading available devices...')
-
-        // ИСПРАВЛЕНО: используем fetchModems вместо getDevices
-        const devices = await deviceStore.fetchModems()
-        console.log('✅ Loaded devices:', devices)
-
-        // Убеждаемся что получили массив
-        const devicesArray = Array.isArray(devices) ? devices : []
-        console.log('📦 Devices array:', devicesArray)
-
-        // Фильтрация устройств без прокси
-        const proxyDeviceIds = new Set(proxies.value.map(p => p.device_id))
-        console.log('📋 Existing proxy device IDs:', proxyDeviceIds)
-
-        // ИСПРАВЛЕНО: используем modem_id или id для сравнения
-        availableDevices.value = devicesArray.filter(d => {
-          const deviceId = d.modem_id || d.id
-          const hasProxy = proxyDeviceIds.has(deviceId)
-          console.log(`📱 Device ${deviceId}: hasProxy = ${hasProxy}`)
-          return !hasProxy
-        })
-
-        console.log('✅ Available devices after filter:', availableDevices.value)
-        console.log('📊 Total available devices count:', availableDevices.value.length)
-
-        // Дополнительная проверка структуры устройств
-        if (availableDevices.value.length > 0) {
-          console.log('🔍 First device structure:', availableDevices.value[0])
-        }
-
-      } catch (error) {
-        console.error('❌ Error loading devices:', error)
-
-        // Предпринимаем попытку получить устройства напрямую из store
-        try {
-          console.log('🔄 Trying to fetch from store directly...')
-          await deviceStore.fetchModems()
-          const devices = deviceStore.modems || []
-          console.log('🏪 Store devices:', devices)
-
-          const devicesArray = Array.isArray(devices) ? devices : []
-          const proxyDeviceIds = new Set(proxies.value.map(p => p.device_id))
-
-          availableDevices.value = devicesArray.filter(d => {
-            const deviceId = d.modem_id || d.id
-            return !proxyDeviceIds.has(deviceId)
-          })
-
-          console.log('✅ Final available devices:', availableDevices.value)
-        } catch (secondError) {
-          console.error('❌ Second attempt failed:', secondError)
-          availableDevices.value = []
-        }
-      }
-    }
-
-    // Диагностические функции
-    const debugDevices = async () => {
-      try {
-        console.log('🔍 Starting comprehensive device debug...')
-
-        const results = {
-          timestamp: new Date().toISOString(),
-          api_test: null,
-          store_state: null,
-          device_manager_debug: null,
-          errors: []
-        }
-
-        // 1. Тест API устройств
-        try {
-          console.log('📡 Testing /admin/devices API...')
-          const response = await fetch('http://192.168.1.50:8000/admin/devices')
-          results.api_test = {
-            status: response.status,
-            ok: response.ok,
-            data: await response.json()
+      // Загрузка данных
+      const loadProxies = async () => {
+          loading.value = true
+          try {
+              const response = await proxyStore.getDedicatedProxies()
+              proxies.value = response.proxies
+          } catch (error) {
+              console.error('Error loading proxies:', error)
+          } finally {
+              loading.value = false
           }
-          console.log('✅ API response:', results.api_test)
-        } catch (error) {
-          console.error('❌ API test failed:', error)
-          results.errors.push(`API test: ${error.message}`)
-        }
-
-        // 2. Состояние store
-        try {
-          results.store_state = {
-            modems: deviceStore.modems,
-            isLoading: deviceStore.isLoading,
-            error: deviceStore.error,
-            lastUpdate: deviceStore.lastUpdate
-          }
-          console.log('🏪 Store state:', results.store_state)
-        } catch (error) {
-          console.error('❌ Store state check failed:', error)
-          results.errors.push(`Store state: ${error.message}`)
-        }
-
-        // 3. Тест device manager debug endpoint
-        try {
-          console.log('🔧 Testing device manager debug...')
-          const debugResponse = await fetch('http://192.168.1.50:8000/admin/devices/debug')
-          results.device_manager_debug = {
-            status: debugResponse.status,
-            data: await debugResponse.json()
-          }
-          console.log('🔧 Device manager debug:', results.device_manager_debug)
-        } catch (error) {
-          console.error('❌ Device manager debug failed:', error)
-          results.errors.push(`Device manager debug: ${error.message}`)
-        }
-
-        debugResults.value = results
-        console.log('📋 Complete debug results:', results)
-
-      } catch (error) {
-        console.error('❌ Debug function failed:', error)
-        debugResults.value = { error: error.message }
       }
-    }
 
-    const testAPI = async () => {
-      try {
-        console.log('🧪 Testing API endpoints...')
+      const loadAvailableDevices = async () => {
+          try {
+              console.log('🔍 Loading available devices...')
 
-        // Тест 1: Через api utility (с авторизацией)
-        const data1 = await api.get('/admin/devices')
-        console.log('📡 API call result:', data1.data)
+              // ИСПРАВЛЕНО: используем fetchModems вместо getDevices
+              const devices = await deviceStore.fetchModems()
+              console.log('✅ Loaded devices:', devices)
 
-        // Тест 2: Через device store
-        const data2 = await deviceStore.fetchModems()
-        console.log('🏪 Device store result:', data2)
+              // Убеждаемся что получили массив
+              const devicesArray = Array.isArray(devices) ? devices : []
+              console.log('📦 Devices array:', devicesArray)
 
-        // Тест 3: Принудительное обнаружение (с авторизацией)
-        try {
-          const data3 = await api.post('/admin/devices/discover')
-          console.log('🔍 Discovery result:', data3.data)
-        } catch (discoveryError) {
-          console.log('❌ Discovery failed:', discoveryError.response?.data || discoveryError.message)
-        }
+              // Фильтрация устройств без прокси
+              const proxyDeviceIds = new Set(proxies.value.map(p => p.device_id))
+              console.log('📋 Existing proxy device IDs:', proxyDeviceIds)
 
-        debugResults.value = {
-          direct_api: data1.data,
-          store_result: data2,
-          timestamp: new Date().toISOString()
-        }
+              // ИСПРАВЛЕНО: используем modem_id или id для сравнения
+              availableDevices.value = devicesArray.filter(d => {
+                  const deviceId = d.modem_id || d.id
+                  const hasProxy = proxyDeviceIds.has(deviceId)
+                  console.log(`📱 Device ${deviceId}: hasProxy = ${hasProxy}`)
+                  return !hasProxy
+              })
 
-      } catch (error) {
-        console.error('❌ API test failed:', error)
-        debugResults.value = {
-          api_test_error: error.response?.data || error.message,
-          timestamp: new Date().toISOString()
-        }
+              console.log('✅ Available devices after filter:', availableDevices.value)
+              console.log('📊 Total available devices count:', availableDevices.value.length)
+
+              // Дополнительная проверка структуры устройств
+              if (availableDevices.value.length > 0) {
+                  console.log('🔍 First device structure:', availableDevices.value[0])
+              }
+
+          } catch (error) {
+              console.error('❌ Error loading devices:', error)
+
+              // Предпринимаем попытку получить устройства напрямую из store
+              try {
+                  console.log('🔄 Trying to fetch from store directly...')
+                  await deviceStore.fetchModems()
+                  const devices = deviceStore.modems || []
+                  console.log('🏪 Store devices:', devices)
+
+                  const devicesArray = Array.isArray(devices) ? devices : []
+                  const proxyDeviceIds = new Set(proxies.value.map(p => p.device_id))
+
+                  availableDevices.value = devicesArray.filter(d => {
+                      const deviceId = d.modem_id || d.id
+                      return !proxyDeviceIds.has(deviceId)
+                  })
+
+                  console.log('✅ Final available devices:', availableDevices.value)
+              } catch (secondError) {
+                  console.error('❌ Second attempt failed:', secondError)
+                  availableDevices.value = []
+              }
+          }
       }
-    }
+
+      // Диагностические функции
+      const debugDevices = async () => {
+          try {
+              console.log('🔍 Starting comprehensive device debug...')
+
+              const results = {
+                  timestamp: new Date().toISOString(),
+                  api_test: null,
+                  store_state: null,
+                  device_manager_debug: null,
+                  errors: []
+              }
+
+              // 1. Тест API устройств
+              try {
+                  console.log('📡 Testing /admin/devices API...')
+                  const response = await fetch('http://192.168.1.50:8000/admin/devices')
+                  results.api_test = {
+                      status: response.status,
+                      ok: response.ok,
+                      data: await response.json()
+                  }
+                  console.log('✅ API response:', results.api_test)
+              } catch (error) {
+                  console.error('❌ API test failed:', error)
+                  results.errors.push(`API test: ${error.message}`)
+              }
+
+              // 2. Состояние store
+              try {
+                  results.store_state = {
+                      modems: deviceStore.modems,
+                      isLoading: deviceStore.isLoading,
+                      error: deviceStore.error,
+                      lastUpdate: deviceStore.lastUpdate
+                  }
+                  console.log('🏪 Store state:', results.store_state)
+              } catch (error) {
+                  console.error('❌ Store state check failed:', error)
+                  results.errors.push(`Store state: ${error.message}`)
+              }
+
+              // 3. Тест device manager debug endpoint
+              try {
+                  console.log('🔧 Testing device manager debug...')
+                  const debugResponse = await fetch('http://192.168.1.50:8000/admin/devices/debug')
+                  results.device_manager_debug = {
+                      status: debugResponse.status,
+                      data: await debugResponse.json()
+                  }
+                  console.log('🔧 Device manager debug:', results.device_manager_debug)
+              } catch (error) {
+                  console.error('❌ Device manager debug failed:', error)
+                  results.errors.push(`Device manager debug: ${error.message}`)
+              }
+
+              debugResults.value = results
+              console.log('📋 Complete debug results:', results)
+
+          } catch (error) {
+              console.error('❌ Debug function failed:', error)
+              debugResults.value = {error: error.message}
+          }
+      }
+
+      const testAPI = async () => {
+          try {
+              console.log('🧪 Testing API endpoints...')
+
+              // Тест 1: Через api utility (с авторизацией)
+              const data1 = await api.get('/admin/devices')
+              console.log('📡 API call result:', data1.data)
+
+              // Тест 2: Через device store
+              const data2 = await deviceStore.fetchModems()
+              console.log('🏪 Device store result:', data2)
+
+              // Тест 3: Принудительное обнаружение (с авторизацией)
+              try {
+                  const data3 = await api.post('/admin/devices/discover')
+                  console.log('🔍 Discovery result:', data3.data)
+              } catch (discoveryError) {
+                  console.log('❌ Discovery failed:', discoveryError.response?.data || discoveryError.message)
+              }
+
+              debugResults.value = {
+                  direct_api: data1.data,
+                  store_result: data2,
+                  timestamp: new Date().toISOString()
+              }
+
+          } catch (error) {
+              console.error('❌ API test failed:', error)
+              debugResults.value = {
+                  api_test_error: error.response?.data || error.message,
+                  timestamp: new Date().toISOString()
+              }
+          }
+      }
       console.log('🧪 Simple device test...')
 
       try {
-        // Используем api utility с авторизацией
-        const response = await api.get('/admin/devices')
-        console.log('📡 API response:', response.data)
+          // Используем api utility с авторизацией
+          const response = await api.get('/admin/devices')
+          console.log('📡 API response:', response.data)
 
-        const devices = response.data
-        if (Array.isArray(devices) && devices.length > 0) {
-          // Обновляем доступные устройства напрямую
-          const proxyDeviceIds = new Set(proxies.value.map(p => p.device_id))
-          availableDevices.value = devices.filter(d => {
-            const deviceId = d.modem_id || d.id
-            return !proxyDeviceIds.has(deviceId)
-          })
+          const devices = response.data
+          if (Array.isArray(devices) && devices.length > 0) {
+              // Обновляем доступные устройства напрямую
+              const proxyDeviceIds = new Set(proxies.value.map(p => p.device_id))
+              availableDevices.value = devices.filter(d => {
+                  const deviceId = d.modem_id || d.id
+                  return !proxyDeviceIds.has(deviceId)
+              })
 
-          console.log('🎯 Updated available devices:', availableDevices.value)
+              console.log('🎯 Updated available devices:', availableDevices.value)
 
-          debugResults.value = {
-            simple_test: {
-              success: true,
-              total_devices: devices.length,
-              available_devices: availableDevices.value.length,
-              devices: devices,
-              available: availableDevices.value
-            }
+              debugResults.value = {
+                  simple_test: {
+                      success: true,
+                      total_devices: devices.length,
+                      available_devices: availableDevices.value.length,
+                      devices: devices,
+                      available: availableDevices.value
+                  }
+              }
+          } else {
+              console.log('❌ No devices found')
+              debugResults.value = {
+                  simple_test: {
+                      success: false,
+                      message: 'No devices found in API response',
+                      response: devices
+                  }
+              }
           }
-        } else {
-          console.log('❌ No devices found')
-          debugResults.value = {
-            simple_test: {
-              success: false,
-              message: 'No devices found in API response',
-              response: devices
-            }
-          }
-        }
 
       } catch (error) {
-        console.error('❌ Simple test failed:', error)
-        debugResults.value = {
-          simple_test: {
-            success: false,
-            error: error.message,
-            details: error
+          console.error('❌ Simple test failed:', error)
+          debugResults.value = {
+              simple_test: {
+                  success: false,
+                  error: error.message,
+                  details: error
+              }
           }
-        }
       }
-    }
+  }
 
     const forceRefresh = async () => {
       console.log('🔄 Force refresh...')
