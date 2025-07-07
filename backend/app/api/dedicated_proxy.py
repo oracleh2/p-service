@@ -11,6 +11,7 @@ from ..models.database import get_db
 from ..api.auth import get_admin_user, get_current_active_user
 from ..core.managers import get_device_manager, get_dedicated_proxy_manager
 import structlog
+from pydantic import BaseModel, validator
 
 router = APIRouter()
 logger = structlog.get_logger()
@@ -21,6 +22,25 @@ class DedicatedProxyRequest(BaseModel):
     username: Optional[str] = None
     password: Optional[str] = None
 
+    # Добавляем валидацию порта
+    @validator('port')
+    def validate_port(cls, v):
+        if v is not None:
+            if not (6000 <= v <= 7000):
+                raise ValueError('Port must be between 6000 and 7000')
+        return v
+
+class DedicatedProxyUpdateRequest(BaseModel):
+    port: Optional[int] = None
+    username: Optional[str] = None
+    password: Optional[str] = None
+
+    @validator('port')
+    def validate_port(cls, v):
+        if v is not None:
+            if not (6000 <= v <= 7000):
+                raise ValueError('Port must be between 6000 and 7000')
+        return v
 
 class DedicatedProxyResponse(BaseModel):
     device_id: str
@@ -133,6 +153,76 @@ async def create_dedicated_proxy(
             detail=f"Failed to create dedicated proxy: {str(e)}"
         )
 
+@router.put("/{device_id}/update", response_model=DedicatedProxyResponse)
+async def update_dedicated_proxy(
+    device_id: str,
+    request: DedicatedProxyUpdateRequest,
+    current_user=Depends(get_admin_user)
+):
+    """Обновление конфигурации индивидуального прокси"""
+    try:
+        dedicated_proxy_manager = get_dedicated_proxy_manager()
+        device_manager = get_device_manager()
+
+        if not dedicated_proxy_manager or not device_manager:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Required managers not available"
+            )
+
+        # Проверка существования прокси
+        existing_proxy = await dedicated_proxy_manager.get_device_proxy_info(device_id)
+        if not existing_proxy:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Dedicated proxy not found for this device"
+            )
+
+        # Подготовка новых параметров
+        new_port = request.port if request.port is not None else existing_proxy["port"]
+        new_username = request.username if request.username else existing_proxy["username"]
+        new_password = request.password if request.password else existing_proxy["password"]
+
+        # Проверка уникальности нового порта (если он изменился)
+        if new_port != existing_proxy["port"]:
+            if not await dedicated_proxy_manager.is_port_available(new_port):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Port {new_port} is already in use"
+                )
+
+        # Удаление старого прокси
+        await dedicated_proxy_manager.remove_dedicated_proxy(device_id)
+
+        # Создание нового с обновленными параметрами
+        updated_proxy = await dedicated_proxy_manager.create_dedicated_proxy(
+            device_id=device_id,
+            port=new_port,
+            username=new_username,
+            password=new_password
+        )
+
+        # Получение информации об устройстве
+        device = await device_manager.get_device_by_id(device_id)
+
+        return DedicatedProxyResponse(
+            device_id=updated_proxy["device_id"],
+            port=updated_proxy["port"],
+            username=updated_proxy["username"],
+            password=updated_proxy["password"],
+            proxy_url=updated_proxy["proxy_url"],
+            status=updated_proxy["status"],
+            device_name=device.get("device_info") if device else "Unknown",
+            device_status=device.get("status") if device else "offline"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update dedicated proxy: {str(e)}"
+        )
 
 @router.delete("/{device_id}")
 async def remove_dedicated_proxy(
@@ -355,7 +445,9 @@ async def get_usage_examples(
                 detail="Dedicated proxy not found for this device"
             )
 
+        # Формирование URL прокси
         proxy_url = f"http://{proxy_info['username']}:{proxy_info['password']}@192.168.1.50:{proxy_info['port']}"
+        proxy_url_without_auth = f"http://192.168.1.50:{proxy_info['port']}"
 
         return {
             "device_id": device_id,
@@ -364,39 +456,66 @@ async def get_usage_examples(
                 "port": proxy_info["port"],
                 "username": proxy_info["username"],
                 "password": proxy_info["password"],
-                "url": proxy_url
+                "url": proxy_url,
+                "url_without_auth": proxy_url_without_auth
             },
             "usage_examples": {
-                "curl": {
-                    "description": "Использование через cURL",
+                "curl_check_ip": {
+                    "description": "Проверка внешнего IP через прокси",
                     "example": f"curl -x {proxy_url} https://httpbin.org/ip"
+                },
+                "curl_with_auth_header": {
+                    "description": "Использование cURL с заголовком авторизации",
+                    "example": f"""curl -x {proxy_url_without_auth} \\
+  -H "Proxy-Authorization: Basic $(echo -n '{proxy_info['username']}:{proxy_info['password']}' | base64)" \\
+  https://httpbin.org/ip"""
+                },
+                "curl_user_agent": {
+                    "description": "Проверка User-Agent через прокси",
+                    "example": f"curl -x {proxy_url} -A 'MyBot/1.0' https://httpbin.org/user-agent"
+                },
+                "curl_headers": {
+                    "description": "Проверка всех заголовков",
+                    "example": f"curl -x {proxy_url} https://httpbin.org/headers"
                 },
                 "python_requests": {
                     "description": "Использование через Python requests",
-                    "example": f"""
-import requests
+                    "example": f"""import requests
 
 proxies = {{
     'http': '{proxy_url}',
     'https': '{proxy_url}'
 }}
 
+# Проверка IP
 response = requests.get('https://httpbin.org/ip', proxies=proxies)
 print(response.json())
-"""
+
+# Проверка с кастомными заголовками
+headers = {{'User-Agent': 'MyBot/1.0'}}
+response = requests.get('https://httpbin.org/headers',
+                       proxies=proxies, headers=headers)
+print(response.json())"""
                 },
                 "javascript_node": {
                     "description": "Использование через Node.js",
-                    "example": f"""
-const fetch = require('node-fetch');
+                    "example": f"""const fetch = require('node-fetch');
 const HttpsProxyAgent = require('https-proxy-agent');
 
 const agent = new HttpsProxyAgent('{proxy_url}');
 
+// Проверка IP
 fetch('https://httpbin.org/ip', {{ agent }})
     .then(response => response.json())
-    .then(data => console.log(data));
-"""
+    .then(data => console.log('IP:', data));
+
+// Проверка с заголовками
+fetch('https://httpbin.org/headers', {{
+    agent,
+    headers: {{ 'User-Agent': 'MyBot/1.0' }}
+}})
+    .then(response => response.json())
+    .then(data => console.log('Headers:', data));"""
                 },
                 "browser_config": {
                     "description": "Настройка браузера",
@@ -405,8 +524,66 @@ fetch('https://httpbin.org/ip', {{ agent }})
                         "port": proxy_info["port"],
                         "username": proxy_info["username"],
                         "password": proxy_info["password"],
-                        "type": "HTTP"
+                        "type": "HTTP",
+                        "note": "Включите аутентификацию прокси в настройках браузера"
                     }
+                },
+                "wget": {
+                    "description": "Использование wget",
+                    "example": f"""# Настройка через переменные окружения
+export http_proxy='{proxy_url}'
+export https_proxy='{proxy_url}'
+wget https://httpbin.org/ip
+
+# Или напрямую
+wget --proxy-user='{proxy_info['username']}' \\
+     --proxy-password='{proxy_info['password']}' \\
+     --proxy=on \\
+     -e use_proxy=yes \\
+     -e http_proxy=192.168.1.50:{proxy_info['port']} \\
+     https://httpbin.org/ip"""
+                },
+                "php": {
+                    "description": "Использование через PHP",
+                    "example": f"""<?php
+$context = stream_context_create([
+    'http' => [
+        'proxy' => 'tcp://192.168.1.50:{proxy_info["port"]}',
+        'request_fulluri' => true,
+        'header' => [
+            'Proxy-Authorization: Basic ' . base64_encode('{proxy_info["username"]}:{proxy_info["password"]}')
+        ]
+    ]
+]);
+
+$response = file_get_contents('https://httpbin.org/ip', false, $context);
+echo $response;
+?>"""
+                },
+                "testing_commands": {
+                    "description": "Команды для тестирования прокси",
+                    "examples": [
+                        {
+                            "name": "Проверка IP",
+                            "command": f"curl -x {proxy_url} https://httpbin.org/ip"
+                        },
+                        {
+                            "name": "Проверка скорости",
+                            "command": f"curl -x {proxy_url} -w '%{{time_total}}' -o /dev/null -s https://httpbin.org/delay/1"
+                        },
+                        {
+                            "name": "Проверка HTTPS",
+                            "command": f"curl -x {proxy_url} https://httpbin.org/get"
+                        },
+                        {
+                            "name": "Проверка User-Agent",
+                            "command": f"curl -x {proxy_url} -A 'Test-Agent' https://httpbin.org/user-agent"
+                        },
+                        {
+                            "name": "Проверка заголовков",
+                            "command": f"curl -x {proxy_url} -H 'Custom-Header: test' https://httpbin.org/headers"
+                        }
+                    ]
                 }
             }
         }

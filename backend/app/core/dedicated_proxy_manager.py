@@ -294,6 +294,15 @@ class DedicatedProxyManager:
                                      username: Optional[str] = None, password: Optional[str] = None):
         """Создание индивидуального прокси для устройства"""
         try:
+            # Валидация порта
+            if port is not None:
+                if not (self.port_range_start <= port <= self.port_range_end):
+                    raise ValueError(f"Port must be in range {self.port_range_start}-{self.port_range_end}")
+
+                # Проверка уникальности порта
+                if port in self.used_ports or not await self.is_port_available(port):
+                    raise ValueError(f"Port {port} is already in use")
+
             # Генерация параметров если не указаны
             if port is None:
                 port = await self.allocate_port()
@@ -305,7 +314,7 @@ class DedicatedProxyManager:
                 import secrets
                 password = secrets.token_urlsafe(16)
 
-            # Проверка доступности порта
+            # Проверка доступности порта (повторная проверка для автоматически выделенного)
             if port in self.used_ports or not await self.is_port_available(port):
                 raise ValueError(f"Port {port} is not available")
 
