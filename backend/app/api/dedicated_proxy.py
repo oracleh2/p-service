@@ -10,9 +10,10 @@ import uuid
 from ..models.database import get_db
 from ..api.auth import get_admin_user, get_current_active_user
 from ..core.managers import get_device_manager, get_dedicated_proxy_manager
+import structlog
 
 router = APIRouter()
-
+logger = structlog.get_logger()
 
 class DedicatedProxyRequest(BaseModel):
     device_id: str
@@ -86,6 +87,22 @@ async def create_dedicated_proxy(
             password=request.password
         )
 
+        # ИСПРАВЛЕНО: Правильная обработка данных устройства
+        device_name = None
+        device_status = None
+
+        if device:
+            # Пробуем разные возможные ключи для имени устройства
+            device_name = (device.get("device_info") or
+                           device.get("name") or
+                           device.get("device_name") or
+                           f"Device {request.device_id}")
+
+            # Пробуем разные возможные ключи для статуса
+            device_status = (device.get("status") or
+                             device.get("device_status") or
+                             "unknown")
+
         return DedicatedProxyResponse(
             device_id=proxy_info["device_id"],
             port=proxy_info["port"],
@@ -93,13 +110,24 @@ async def create_dedicated_proxy(
             password=proxy_info["password"],
             proxy_url=proxy_info["proxy_url"],
             status=proxy_info["status"],
-            device_name=device.get("name"),
-            device_status=device.get("status")
+            device_name=device_name,
+            device_status=device_status
         )
 
     except HTTPException:
         raise
     except Exception as e:
+        # ИСПРАВЛЕНО: Добавляем детальное логирование ошибки
+        import traceback
+        error_details = traceback.format_exc()
+
+        # Логируем полную ошибку для диагностики
+        logger.error(f"Failed to create dedicated proxy: {str(e)}")
+        logger.error(f"Full traceback: {error_details}")
+        logger.error(f"Request data: device_id={request.device_id}, port={request.port}")
+        logger.error(f"Device data: {device if 'device' in locals() else 'Not retrieved'}")
+        logger.error(f"Proxy info: {proxy_info if 'proxy_info' in locals() else 'Not created'}")
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create dedicated proxy: {str(e)}"
