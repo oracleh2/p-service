@@ -763,7 +763,9 @@ export default {
             editProxy,
             showEditModal,
             editProxyData,
-            closeEditModal
+            closeEditModal,
+            editingProxy,
+            updateProxy,
         }
     }
 }
