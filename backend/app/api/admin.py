@@ -1089,3 +1089,218 @@ async def get_system_health(current_user=Depends(get_admin_user)):
             detail=f"Failed to get system health: {str(e)}"
         )
 
+
+@router.get("/modems/diagnostics")
+async def get_modems_diagnostics(current_user=Depends(get_admin_user)):
+    """Диагностика модемов Huawei E3372h"""
+    try:
+        from ..core.managers import get_modem_manager
+
+        modem_manager = get_modem_manager()
+        if not modem_manager:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Modem manager not available"
+            )
+
+        # Получаем все модемы
+        all_modems = await modem_manager.get_all_devices()
+
+        # Быстрая проверка здоровья
+        health_results = await modem_manager.quick_health_check()
+
+        # Сводка обнаружения
+        discovery_summary = await modem_manager.get_discovery_summary()
+
+        diagnostics = {
+            "timestamp": datetime.now().isoformat(),
+            "discovery_summary": discovery_summary,
+            "modems_count": len(all_modems),
+            "health_results": health_results,
+            "modems": []
+        }
+
+        # Детальная информация о каждом модеме
+        for modem_id, modem_info in all_modems.items():
+            # Валидация конфигурации
+            validation = await modem_manager.validate_modem_configuration(modem_id)
+
+            modem_diagnostic = {
+                "modem_id": modem_id,
+                "interface": modem_info.get('interface'),
+                "interface_ip": modem_info.get('interface_ip'),
+                "web_interface": modem_info.get('web_interface'),
+                "subnet_number": modem_info.get('subnet_number'),
+                "mac_address": modem_info.get('mac_address'),
+                "status": modem_info.get('status'),
+                "external_ip": modem_info.get('external_ip'),
+                "web_accessible": modem_info.get('web_accessible'),
+                "health": health_results.get(modem_id, {}),
+                "validation": validation,
+                "addressing_scheme": {
+                    "interface_expected": f"192.168.{modem_info.get('subnet_number', 'XXX')}.100",
+                    "web_expected": f"192.168.{modem_info.get('subnet_number', 'XXX')}.1",
+                    "interface_actual": modem_info.get('interface_ip'),
+                    "web_actual": modem_info.get('web_interface'),
+                    "scheme_valid": (
+                        modem_info.get('interface_ip', '').endswith('.100') and
+                        modem_info.get('web_interface', '').endswith('.1')
+                    )
+                }
+            }
+
+            diagnostics["modems"].append(modem_diagnostic)
+
+        return diagnostics
+
+    except Exception as e:
+        logger.error(f"Error getting modem diagnostics: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Modem diagnostics failed: {str(e)}"
+        )
+
+
+@router.post("/modems/quick-health-check")
+async def quick_health_check_modems(current_user=Depends(get_admin_user)):
+    """Быстрая проверка здоровья всех модемов"""
+    try:
+        from ..core.managers import get_modem_manager
+
+        modem_manager = get_modem_manager()
+        if not modem_manager:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Modem manager not available"
+            )
+
+        # Выполняем быструю проверку здоровья
+        health_results = await modem_manager.quick_health_check()
+
+        # Подсчитываем статистику
+        total_modems = len(health_results)
+        healthy_modems = len([r for r in health_results.values() if r.get('overall_health')])
+        unhealthy_modems = total_modems - healthy_modems
+
+        return {
+            "success": True,
+            "timestamp": datetime.now().isoformat(),
+            "summary": {
+                "total_modems": total_modems,
+                "healthy_modems": healthy_modems,
+                "unhealthy_modems": unhealthy_modems,
+                "health_percentage": (healthy_modems / total_modems * 100) if total_modems > 0 else 0
+            },
+            "health_results": health_results
+        }
+
+    except Exception as e:
+        logger.error(f"Error during quick health check: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Quick health check failed: {str(e)}"
+        )
+
+
+@router.get("/modems/discovery-summary")
+async def get_modems_discovery_summary(current_user=Depends(get_admin_user)):
+    """Сводка обнаружения модемов"""
+    try:
+        from ..core.managers import get_modem_manager
+
+        modem_manager = get_modem_manager()
+        if not modem_manager:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Modem manager not available"
+            )
+
+        # Получаем сводку обнаружения
+        summary = await modem_manager.get_discovery_summary()
+
+        return {
+            "success": True,
+            "summary": summary
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting discovery summary: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Discovery summary failed: {str(e)}"
+        )
+
+
+@router.post("/modems/validate/{modem_id}")
+async def validate_modem_configuration(
+    modem_id: str,
+    current_user=Depends(get_admin_user)
+):
+    """Валидация конфигурации конкретного модема"""
+    try:
+        from ..core.managers import get_modem_manager
+
+        modem_manager = get_modem_manager()
+        if not modem_manager:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Modem manager not available"
+            )
+
+        # Валидируем конфигурацию модема
+        validation_result = await modem_manager.validate_modem_configuration(modem_id)
+
+        if not validation_result.get("valid"):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=validation_result.get("error", "Modem validation failed")
+            )
+
+        return {
+            "success": True,
+            "modem_id": modem_id,
+            "validation": validation_result
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error validating modem {modem_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Modem validation failed: {str(e)}"
+        )
+
+
+@router.post("/modems/force-refresh/{modem_id}")
+async def force_refresh_modem_ip(
+    modem_id: str,
+    current_user=Depends(get_admin_user)
+):
+    """Принудительное обновление внешнего IP модема"""
+    try:
+        from ..core.managers import get_modem_manager
+
+        modem_manager = get_modem_manager()
+        if not modem_manager:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Modem manager not available"
+            )
+
+        # Принудительно обновляем внешний IP
+        external_ip = await modem_manager.force_refresh_external_ip(modem_id)
+
+        return {
+            "success": True,
+            "modem_id": modem_id,
+            "external_ip": external_ip,
+            "message": f"External IP refreshed: {external_ip}" if external_ip else "Could not refresh external IP"
+        }
+
+    except Exception as e:
+        logger.error(f"Error force refreshing IP for modem {modem_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Force refresh failed: {str(e)}"
+        )
