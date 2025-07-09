@@ -204,7 +204,8 @@ async def perform_device_rotation(device_id: str, method: str = None) -> tuple[b
     Выполнение ротации устройства с использованием EnhancedRotationManager
 
     Args:
-        device_id: ID устройства (строковый ID из DeviceManager или ModemManager)
+        device_id: ID устройства (строковый ID из DeviceManager или ModemManager,
+                   который является полем 'name' в таблице proxy_devices)
         method: Принудительный метод ротации
 
     Returns:
@@ -217,19 +218,58 @@ async def perform_device_rotation(device_id: str, method: str = None) -> tuple[b
     try:
         logger.info(f"Performing rotation for device: {device_id} with method: {method}")
 
-        # Используем EnhancedRotationManager для ротации
-        success, result = await rotation_manager.rotate_device_ip(device_id)
+        # Получаем UUID устройства по его имени из базы данных
+        device_uuid = await _get_device_uuid_by_name(device_id)
+        if not device_uuid:
+            logger.error(f"Device not found in database: {device_id}")
+            return False, f"Device not found in database: {device_id}"
+
+        logger.info(f"Found device UUID: {device_uuid} for device name: {device_id}")
+
+        # Используем EnhancedRotationManager для ротации с UUID
+        success, result = await rotation_manager.rotate_device_ip(str(device_uuid))
 
         if success:
-            logger.info(f"✅ Rotation successful for {device_id}: {result}")
+            logger.info(f"✅ Rotation successful for {device_id} (UUID: {device_uuid}): {result}")
             return True, result
         else:
-            logger.error(f"❌ Rotation failed for {device_id}: {result}")
+            logger.error(f"❌ Rotation failed for {device_id} (UUID: {device_uuid}): {result}")
             return False, result
 
     except Exception as e:
         logger.error(f"Error in device rotation: {e}")
         return False, f"Rotation error: {str(e)}"
+
+
+async def _get_device_uuid_by_name(device_name: str) -> Optional[str]:
+    """
+    Получение UUID устройства по его имени из базы данных
+
+    Args:
+        device_name: Имя устройства (поле 'name' в таблице proxy_devices)
+
+    Returns:
+        Optional[str]: UUID устройства или None если не найдено
+    """
+    try:
+        from ..models.database import AsyncSessionLocal
+        from ..models.base import ProxyDevice
+        from sqlalchemy import select
+
+        async with AsyncSessionLocal() as db:
+            stmt = select(ProxyDevice.id).where(ProxyDevice.name == device_name)
+            result = await db.execute(stmt)
+            device_uuid = result.scalar_one_or_none()
+
+            if device_uuid:
+                return str(device_uuid)
+            else:
+                logger.warning(f"Device not found in database: {device_name}")
+                return None
+
+    except Exception as e:
+        logger.error(f"Error getting device UUID by name: {e}")
+        return None
 
 
 async def get_device_rotation_methods(device_id: str) -> dict:
@@ -361,6 +401,11 @@ async def test_device_rotation(device_id: str, method: str) -> dict:
         if not device_info:
             return {"error": "Device not found"}
 
+        # Получаем UUID устройства
+        device_uuid = await _get_device_uuid_by_name(device_id)
+        if not device_uuid:
+            return {"error": "Device not found in database"}
+
         # Получаем текущий IP
         current_ip = None
         if device_type == "android" and device_manager:
@@ -372,7 +417,7 @@ async def test_device_rotation(device_id: str, method: str) -> dict:
         import time
         start_time = time.time()
 
-        logger.info(f"Testing rotation method '{method}' for device {device_id}")
+        logger.info(f"Testing rotation method '{method}' for device {device_id} (UUID: {device_uuid})")
 
         # Используем perform_device_rotation для тестирования
         success, result = await perform_device_rotation(device_id, method)
@@ -394,6 +439,7 @@ async def test_device_rotation(device_id: str, method: str) -> dict:
             "success": success,
             "method": method,
             "device_id": device_id,
+            "device_uuid": device_uuid,
             "device_type": device_type,
             "execution_time_seconds": round(execution_time, 2),
             "current_ip_before": current_ip,
@@ -538,3 +584,233 @@ async def get_devices_summary_combined() -> Dict[str, Any]:
             "total_offline": 0,
             "error": str(e)
         }
+
+
+async def get_device_uuid_by_name(device_name: str) -> Optional[str]:
+    """
+    Получение UUID устройства по его имени из базы данных
+
+    Args:
+        device_name: Имя устройства (поле 'name' в таблице proxy_devices)
+
+    Returns:
+        Optional[str]: UUID устройства или None если не найдено
+    """
+    try:
+        from ..models.database import AsyncSessionLocal
+        from ..models.base import ProxyDevice
+        from sqlalchemy import select
+
+        async with AsyncSessionLocal() as db:
+            stmt = select(ProxyDevice.id).where(ProxyDevice.name == device_name)
+            result = await db.execute(stmt)
+            device_uuid = result.scalar_one_or_none()
+
+            if device_uuid:
+                return str(device_uuid)
+            else:
+                logger.warning(f"Device not found in database: {device_name}")
+                return None
+
+    except Exception as e:
+        logger.error(f"Error getting device UUID by name: {e}")
+        return None
+
+
+async def get_device_name_by_uuid(device_uuid: str) -> Optional[str]:
+    """
+    Получение имени устройства по его UUID из базы данных
+
+    Args:
+        device_uuid: UUID устройства из таблицы proxy_devices
+
+    Returns:
+        Optional[str]: Имя устройства или None если не найдено
+    """
+    try:
+        from ..models.database import AsyncSessionLocal
+        from ..models.base import ProxyDevice
+        from sqlalchemy import select
+        import uuid
+
+        async with AsyncSessionLocal() as db:
+            stmt = select(ProxyDevice.name).where(ProxyDevice.id == uuid.UUID(device_uuid))
+            result = await db.execute(stmt)
+            device_name = result.scalar_one_or_none()
+
+            if device_name:
+                return device_name
+            else:
+                logger.warning(f"Device not found in database by UUID: {device_uuid}")
+                return None
+
+    except Exception as e:
+        logger.error(f"Error getting device name by UUID: {e}")
+        return None
+
+
+async def get_device_by_id_combined_with_uuid(device_id: str) -> Optional[dict]:
+    """
+    Получение устройства по ID из любого менеджера с добавлением UUID
+
+    Args:
+        device_id: ID устройства (имя устройства)
+
+    Returns:
+        Optional[dict]: Информация об устройстве с UUID или None если не найдено
+    """
+    try:
+        # Получаем базовую информацию об устройстве
+        device_info = await get_device_by_id_combined(device_id)
+
+        if device_info:
+            # Добавляем UUID к информации об устройстве
+            device_uuid = await get_device_uuid_by_name(device_id)
+            if device_uuid:
+                device_info['uuid'] = device_uuid
+                device_info['database_id'] = device_uuid
+
+        return device_info
+
+    except Exception as e:
+        logger.error(f"Error getting device by ID with UUID: {e}")
+        return None
+
+
+async def sync_device_managers_with_database():
+    """
+    Синхронизация данных из менеджеров устройств с базой данных
+    Обновляет статус устройств в БД на основе данных из менеджеров
+    """
+    try:
+        from ..models.database import AsyncSessionLocal
+        from ..models.base import ProxyDevice
+        from sqlalchemy import select, update
+
+        logger.info("Starting device managers sync with database...")
+
+        # Получаем все устройства из менеджеров
+        all_devices = await get_all_devices_combined()
+
+        # Синхронизируем с базой данных
+        async with AsyncSessionLocal() as db:
+            for device_name, device_info in all_devices.items():
+                # Проверяем, есть ли устройство в БД
+                stmt = select(ProxyDevice).where(ProxyDevice.name == device_name)
+                result = await db.execute(stmt)
+                db_device = result.scalar_one_or_none()
+
+                if db_device:
+                    # Обновляем статус и внешний IP
+                    update_data = {
+                        'status': device_info.get('status', 'unknown'),
+                        'last_heartbeat': datetime.now(timezone.utc)
+                    }
+
+                    # Обновляем внешний IP если есть
+                    external_ip = device_info.get('external_ip')
+                    if external_ip:
+                        update_data['current_external_ip'] = external_ip
+
+                    stmt = update(ProxyDevice).where(
+                        ProxyDevice.name == device_name
+                    ).values(**update_data)
+
+                    await db.execute(stmt)
+                    logger.debug(f"Updated device {device_name} in database")
+                else:
+                    logger.warning(f"Device {device_name} found in managers but not in database")
+
+            await db.commit()
+            logger.info("✅ Device managers sync completed")
+
+    except Exception as e:
+        logger.error(f"Error syncing device managers with database: {e}")
+
+
+async def get_all_devices_with_uuid() -> Dict[str, dict]:
+    """
+    Получение всех устройств из обоих менеджеров с добавлением UUID
+
+    Returns:
+        Dict[str, dict]: Словарь устройств с UUID
+    """
+    try:
+        # Получаем все устройства
+        all_devices = await get_all_devices_combined()
+
+        # Добавляем UUID к каждому устройству
+        for device_name, device_info in all_devices.items():
+            device_uuid = await get_device_uuid_by_name(device_name)
+            if device_uuid:
+                device_info['uuid'] = device_uuid
+                device_info['database_id'] = device_uuid
+
+        return all_devices
+
+    except Exception as e:
+        logger.error(f"Error getting all devices with UUID: {e}")
+        return {}
+
+
+async def perform_device_rotation_by_uuid(device_uuid: str, method: str = None) -> tuple[bool, str]:
+    """
+    Выполнение ротации устройства по UUID
+
+    Args:
+        device_uuid: UUID устройства из таблицы proxy_devices
+        method: Принудительный метод ротации
+
+    Returns:
+        tuple[bool, str]: (успех, сообщение/новый_IP)
+    """
+    try:
+        # Получаем имя устройства по UUID
+        device_name = await get_device_name_by_uuid(device_uuid)
+        if not device_name:
+            return False, f"Device not found by UUID: {device_uuid}"
+
+        # Выполняем ротацию через имя устройства
+        return await perform_device_rotation(device_name, method)
+
+    except Exception as e:
+        logger.error(f"Error in device rotation by UUID: {e}")
+        return False, f"Rotation error: {str(e)}"
+
+
+async def get_device_rotation_methods_by_uuid(device_uuid: str) -> dict:
+    """Получение доступных методов ротации для устройства по UUID"""
+    try:
+        # Получаем имя устройства по UUID
+        device_name = await get_device_name_by_uuid(device_uuid)
+        if not device_name:
+            return {"error": "Device not found by UUID"}
+
+        # Получаем методы ротации через имя устройства
+        return await get_device_rotation_methods(device_name)
+
+    except Exception as e:
+        logger.error(f"Error getting rotation methods by UUID: {e}")
+        return {"error": str(e)}
+
+
+async def test_device_rotation_by_uuid(device_uuid: str, method: str) -> dict:
+    """Тестирование метода ротации устройства по UUID"""
+    try:
+        # Получаем имя устройства по UUID
+        device_name = await get_device_name_by_uuid(device_uuid)
+        if not device_name:
+            return {"error": "Device not found by UUID"}
+
+        # Выполняем тест через имя устройства
+        result = await test_device_rotation(device_name, method)
+
+        # Добавляем UUID к результату
+        if isinstance(result, dict) and 'error' not in result:
+            result['device_uuid'] = device_uuid
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Error testing rotation by UUID: {e}")
+        return {"error": str(e)}

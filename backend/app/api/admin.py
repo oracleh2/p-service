@@ -325,16 +325,30 @@ async def rotate_device_ip(
 ):
     """Принудительная ротация IP устройства"""
     try:
-        from ..core.managers import perform_device_rotation
+        from ..core.managers import perform_device_rotation, get_device_uuid_by_name, perform_device_rotation_by_uuid
+        import uuid
 
         logger.info(f"Starting IP rotation for device: {device_id}")
         logger.info(f"Rotation request: {rotation_request.dict()}")
 
-        # Выполняем ротацию
-        success, result = await perform_device_rotation(
-            device_id,
-            rotation_request.force_method
-        )
+        # Проверяем, передан ли UUID или имя устройства
+        try:
+            # Пытаемся интерпретировать как UUID
+            device_uuid = uuid.UUID(device_id)
+            # Если успешно, используем ротацию по UUID
+            success, result = await perform_device_rotation_by_uuid(
+                str(device_uuid),
+                rotation_request.force_method
+            )
+            logger.info(f"Used UUID-based rotation for device UUID: {device_uuid}")
+
+        except ValueError:
+            # Если не UUID, значит это имя устройства
+            success, result = await perform_device_rotation(
+                device_id,
+                rotation_request.force_method
+            )
+            logger.info(f"Used name-based rotation for device name: {device_id}")
 
         if success:
             logger.info(f"✅ IP rotation successful for {device_id}: {result}")
@@ -370,12 +384,23 @@ async def test_rotation_method(
 ):
     """Тестирование метода ротации IP для устройства"""
     try:
-        from ..core.managers import test_device_rotation
+        from ..core.managers import test_device_rotation, test_device_rotation_by_uuid
+        import uuid
 
         logger.info(f"Testing rotation method '{test_request.method}' for device: {device_id}")
 
-        # Выполняем тест ротации
-        test_result = await test_device_rotation(device_id, test_request.method)
+        # Проверяем, передан ли UUID или имя устройства
+        try:
+            # Пытаемся интерпретировать как UUID
+            device_uuid = uuid.UUID(device_id)
+            # Если успешно, используем тестирование по UUID
+            test_result = await test_device_rotation_by_uuid(str(device_uuid), test_request.method)
+            logger.info(f"Used UUID-based test rotation for device UUID: {device_uuid}")
+
+        except ValueError:
+            # Если не UUID, значит это имя устройства
+            test_result = await test_device_rotation(device_id, test_request.method)
+            logger.info(f"Used name-based test rotation for device name: {device_id}")
 
         if "error" in test_result:
             raise HTTPException(
@@ -413,7 +438,11 @@ async def test_rotation_method(
 async def rotate_all_devices(current_user=Depends(get_admin_user)):
     """Ротация IP для всех онлайн устройств"""
     try:
-        from ..core.managers import get_online_devices_combined, perform_device_rotation
+        from ..core.managers import get_online_devices_combined, perform_device_rotation, \
+            sync_device_managers_with_database
+
+        # Синхронизируем данные перед ротацией
+        await sync_device_managers_with_database()
 
         # Получаем все онлайн устройства
         online_devices = await get_online_devices_combined()
@@ -431,26 +460,28 @@ async def rotate_all_devices(current_user=Depends(get_admin_user)):
         successful_rotations = 0
 
         # Выполняем ротацию для каждого устройства
-        for device in online_devices:
-            device_id = device.get('id') or device.get('device_id') or device.get('modem_id')
+        for device_name, device_info in online_devices.items():
+            try:
+                # Используем имя устройства для ротации
+                success, result = await perform_device_rotation(device_name)
+                results[device_name] = {
+                    "success": success,
+                    "message": result,
+                    "new_ip": result if success else None,
+                    "device_name": device_name,
+                    "device_uuid": device_info.get('uuid', 'unknown')
+                }
 
-            if device_id:
-                try:
-                    success, result = await perform_device_rotation(device_id)
-                    results[device_id] = {
-                        "success": success,
-                        "message": result,
-                        "new_ip": result if success else None
-                    }
+                if success:
+                    successful_rotations += 1
 
-                    if success:
-                        successful_rotations += 1
-
-                except Exception as e:
-                    results[device_id] = {
-                        "success": False,
-                        "message": f"Error: {str(e)}"
-                    }
+            except Exception as e:
+                results[device_name] = {
+                    "success": False,
+                    "message": f"Error: {str(e)}",
+                    "device_name": device_name,
+                    "device_uuid": device_info.get('uuid', 'unknown')
+                }
 
         return {
             "success": successful_rotations > 0,
@@ -588,6 +619,7 @@ async def update_rotation_interval(
             detail=f"Rotation interval update failed: {str(e)}"
         )
 
+
 @router.get("/devices/{device_id}/rotation-methods")
 async def get_device_rotation_methods(
     device_id: str,
@@ -595,9 +627,21 @@ async def get_device_rotation_methods(
 ):
     """Получение доступных методов ротации для устройства"""
     try:
-        from ..core.managers import get_device_rotation_methods
+        from ..core.managers import get_device_rotation_methods, get_device_rotation_methods_by_uuid
+        import uuid
 
-        result = await get_device_rotation_methods(device_id)
+        # Проверяем, передан ли UUID или имя устройства
+        try:
+            # Пытаемся интерпретировать как UUID
+            device_uuid = uuid.UUID(device_id)
+            # Если успешно, используем получение методов по UUID
+            result = await get_device_rotation_methods_by_uuid(str(device_uuid))
+            logger.info(f"Used UUID-based rotation methods for device UUID: {device_uuid}")
+
+        except ValueError:
+            # Если не UUID, значит это имя устройства
+            result = await get_device_rotation_methods(device_id)
+            logger.info(f"Used name-based rotation methods for device name: {device_id}")
 
         if "error" in result:
             raise HTTPException(
@@ -614,6 +658,66 @@ async def get_device_rotation_methods(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get rotation methods: {str(e)}"
+        )
+
+
+@router.post("/devices/sync-managers")
+async def sync_device_managers(current_user=Depends(get_admin_user)):
+    """Синхронизация менеджеров устройств с базой данных"""
+    try:
+        from ..core.managers import sync_device_managers_with_database
+
+        await sync_device_managers_with_database()
+
+        return {
+            "success": True,
+            "message": "Device managers synchronized with database successfully",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"Error syncing device managers: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to sync device managers: {str(e)}"
+        )
+
+@router.get("/devices/with-uuid")
+async def get_devices_with_uuid(current_user=Depends(get_admin_user)):
+    """Получение всех устройств с UUID"""
+    try:
+        from ..core.managers import get_all_devices_with_uuid
+
+        devices = await get_all_devices_with_uuid()
+
+        # Преобразуем в список для удобства
+        devices_list = []
+        for device_name, device_info in devices.items():
+            device_data = {
+                "name": device_name,
+                "uuid": device_info.get('uuid'),
+                "database_id": device_info.get('database_id'),
+                "type": device_info.get('type', 'unknown'),
+                "status": device_info.get('status', 'unknown'),
+                "external_ip": device_info.get('external_ip'),
+                "interface": device_info.get('interface'),
+                "device_info": device_info.get('device_info'),
+                "last_seen": device_info.get('last_seen')
+            }
+            devices_list.append(device_data)
+
+        return {
+            "success": True,
+            "message": "Devices retrieved with UUID successfully",
+            "total_devices": len(devices_list),
+            "devices": devices_list
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting devices with UUID: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get devices with UUID: {str(e)}"
         )
 
 @router.get("/devices/{device_id}")
@@ -944,3 +1048,4 @@ async def get_system_health(current_user=Depends(get_admin_user)):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get system health: {str(e)}"
         )
+

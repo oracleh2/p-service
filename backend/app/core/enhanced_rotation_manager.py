@@ -198,6 +198,9 @@ class EnhancedRotationManager:
         method = config.rotation_method
 
         try:
+            logger.info(
+                f"Executing rotation for device UUID: {device.id}, name: {device.name}, type: {device_type}, method: {method}")
+
             if device_type == 'android':
                 return await self._rotate_android_device(device, method)
             elif device_type == 'usb_modem':
@@ -209,6 +212,7 @@ class EnhancedRotationManager:
             else:
                 return False, f"Unsupported device type: {device_type}"
         except Exception as e:
+            logger.error(f"Rotation execution error for device UUID {device.id}: {str(e)}")
             return False, f"Rotation execution error: {str(e)}"
 
     async def _rotate_android_device(self, device: ProxyDevice, method: str) -> Tuple[bool, str]:
@@ -378,7 +382,9 @@ class EnhancedRotationManager:
         """Проверка изменения IP адреса устройства"""
         for attempt in range(max_attempts):
             try:
-                new_ip = await self._get_device_external_ip(device)
+                # Используем UUID для получения нового IP
+                new_ip = await self._get_device_external_ip_by_uuid(str(device.id))
+
                 if new_ip and new_ip != old_ip:
                     return new_ip
 
@@ -407,11 +413,8 @@ class EnhancedRotationManager:
                             data = await response.json()
                             return data.get('origin', '').split(',')[0].strip()
 
-            # Альтернативный способ для Android устройств
-            if device.device_type == 'android':
-                return await self._get_android_external_ip(device.name)
-
-            return None
+            # Альтернативный способ через UUID
+            return await self._get_device_external_ip_by_uuid(str(device.id))
 
         except Exception as e:
             logger.error(f"Error getting external IP: {e}")
@@ -950,3 +953,86 @@ class EnhancedRotationManager:
 
         except Exception as e:
             return False, f"DHCP renew error: {str(e)}"
+
+    async def _get_device_info_by_uuid(self, device_uuid: str) -> Optional[dict]:
+        """
+        Получение информации об устройстве из DeviceManager или ModemManager по UUID
+
+        Args:
+            device_uuid: UUID устройства из таблицы proxy_devices
+
+        Returns:
+            Optional[dict]: Информация об устройстве или None если не найдено
+        """
+        try:
+            # Сначала получаем имя устройства из БД по UUID
+            async with AsyncSessionLocal() as db:
+                stmt = select(ProxyDevice.name, ProxyDevice.device_type).where(
+                    ProxyDevice.id == uuid.UUID(device_uuid)
+                )
+                result = await db.execute(stmt)
+                row = result.first()
+
+                if not row:
+                    logger.warning(f"Device not found in database by UUID: {device_uuid}")
+                    return None
+
+                device_name, device_type = row
+
+            # Теперь ищем устройство в соответствующем менеджере
+            if device_type == 'android':
+                device_manager = self.device_manager
+                if device_manager:
+                    all_devices = await device_manager.get_all_devices()
+                    return all_devices.get(device_name)
+            elif device_type == 'usb_modem':
+                modem_manager = getattr(self, 'modem_manager', None)
+                if modem_manager:
+                    all_modems = await modem_manager.get_all_devices()
+                    return all_modems.get(device_name)
+
+            return None
+
+        except Exception as e:
+            logger.error(f"Error getting device info by UUID: {e}")
+            return None
+
+    async def _get_device_external_ip_by_uuid(self, device_uuid: str) -> Optional[str]:
+        """
+        Получение внешнего IP устройства по UUID
+
+        Args:
+            device_uuid: UUID устройства из таблицы proxy_devices
+
+        Returns:
+            Optional[str]: Внешний IP или None если не найдено
+        """
+        try:
+            # Получаем имя устройства из БД по UUID
+            async with AsyncSessionLocal() as db:
+                stmt = select(ProxyDevice.name, ProxyDevice.device_type).where(
+                    ProxyDevice.id == uuid.UUID(device_uuid)
+                )
+                result = await db.execute(stmt)
+                row = result.first()
+
+                if not row:
+                    return None
+
+                device_name, device_type = row
+
+            # Получаем внешний IP из соответствующего менеджера
+            if device_type == 'android':
+                device_manager = self.device_manager
+                if device_manager:
+                    return await device_manager.get_device_external_ip(device_name)
+            elif device_type == 'usb_modem':
+                modem_manager = getattr(self, 'modem_manager', None)
+                if modem_manager:
+                    return await modem_manager.get_device_external_ip(device_name)
+
+            return None
+
+        except Exception as e:
+            logger.error(f"Error getting device external IP by UUID: {e}")
+            return None
