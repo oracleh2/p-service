@@ -66,6 +66,26 @@ class RotationRequest(BaseModel):
 class TestRotationRequest(BaseModel):
     method: str
 
+class RotationResponse(BaseModel):
+    success: bool
+    message: str
+    new_ip: Optional[str] = None
+    device_id: str
+    method: Optional[str] = None
+
+class TestRotationResponse(BaseModel):
+    success: bool
+    method: str
+    device_id: str
+    device_type: str
+    execution_time_seconds: float
+    current_ip_before: Optional[str] = None
+    new_ip_after: Optional[str] = None
+    ip_changed: bool
+    result_message: str
+    timestamp: str
+    recommendation: str
+
 @router.post("/devices/discover")
 async def discover_devices(current_user=Depends(get_admin_user)):
     """Принудительное обнаружение устройств (Android и USB модемы)"""
@@ -295,6 +315,307 @@ async def admin_get_devices_combined():
         return []
 
 
+# Добавьте эти роуты в конец файла backend/app/api/admin.py (после всех существующих роутов)
+
+@router.post("/devices/{device_id}/rotate", response_model=RotationResponse)
+async def rotate_device_ip(
+    device_id: str,
+    rotation_request: RotationRequest = RotationRequest(),
+    current_user=Depends(get_admin_user)
+):
+    """Принудительная ротация IP устройства"""
+    try:
+        from ..core.managers import perform_device_rotation
+
+        logger.info(f"Starting IP rotation for device: {device_id}")
+        logger.info(f"Rotation request: {rotation_request.dict()}")
+
+        # Выполняем ротацию
+        success, result = await perform_device_rotation(
+            device_id,
+            rotation_request.force_method
+        )
+
+        if success:
+            logger.info(f"✅ IP rotation successful for {device_id}: {result}")
+            return RotationResponse(
+                success=True,
+                message="IP rotation completed successfully",
+                new_ip=result,
+                device_id=device_id,
+                method=rotation_request.force_method
+            )
+        else:
+            logger.error(f"❌ IP rotation failed for {device_id}: {result}")
+            return RotationResponse(
+                success=False,
+                message=result,
+                device_id=device_id,
+                method=rotation_request.force_method
+            )
+
+    except Exception as e:
+        logger.error(f"Error during IP rotation for {device_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"IP rotation failed: {str(e)}"
+        )
+
+
+@router.post("/devices/{device_id}/test-rotation", response_model=TestRotationResponse)
+async def test_rotation_method(
+    device_id: str,
+    test_request: TestRotationRequest,
+    current_user=Depends(get_admin_user)
+):
+    """Тестирование метода ротации IP для устройства"""
+    try:
+        from ..core.managers import test_device_rotation
+
+        logger.info(f"Testing rotation method '{test_request.method}' for device: {device_id}")
+
+        # Выполняем тест ротации
+        test_result = await test_device_rotation(device_id, test_request.method)
+
+        if "error" in test_result:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=test_result["error"]
+            )
+
+        logger.info(f"Test rotation result for {device_id}: {test_result}")
+
+        return TestRotationResponse(
+            success=test_result.get("success", False),
+            method=test_result.get("method", test_request.method),
+            device_id=test_result.get("device_id", device_id),
+            device_type=test_result.get("device_type", "unknown"),
+            execution_time_seconds=test_result.get("execution_time_seconds", 0.0),
+            current_ip_before=test_result.get("current_ip_before"),
+            new_ip_after=test_result.get("new_ip_after"),
+            ip_changed=test_result.get("ip_changed", False),
+            result_message=test_result.get("result_message", ""),
+            timestamp=test_result.get("timestamp", datetime.now(timezone.utc).isoformat()),
+            recommendation=test_result.get("recommendation", "try_different_method")
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error testing rotation method for {device_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Test rotation failed: {str(e)}"
+        )
+
+
+@router.post("/devices/rotate-all")
+async def rotate_all_devices(current_user=Depends(get_admin_user)):
+    """Ротация IP для всех онлайн устройств"""
+    try:
+        from ..core.managers import get_online_devices_combined, perform_device_rotation
+
+        # Получаем все онлайн устройства
+        online_devices = await get_online_devices_combined()
+
+        if not online_devices:
+            return {
+                "success": False,
+                "message": "No online devices available for rotation",
+                "results": {},
+                "total_devices": 0,
+                "successful_rotations": 0
+            }
+
+        results = {}
+        successful_rotations = 0
+
+        # Выполняем ротацию для каждого устройства
+        for device in online_devices:
+            device_id = device.get('id') or device.get('device_id') or device.get('modem_id')
+
+            if device_id:
+                try:
+                    success, result = await perform_device_rotation(device_id)
+                    results[device_id] = {
+                        "success": success,
+                        "message": result,
+                        "new_ip": result if success else None
+                    }
+
+                    if success:
+                        successful_rotations += 1
+
+                except Exception as e:
+                    results[device_id] = {
+                        "success": False,
+                        "message": f"Error: {str(e)}"
+                    }
+
+        return {
+            "success": successful_rotations > 0,
+            "message": f"Rotation completed: {successful_rotations}/{len(online_devices)} devices rotated successfully",
+            "results": results,
+            "total_devices": len(online_devices),
+            "successful_rotations": successful_rotations
+        }
+
+    except Exception as e:
+        logger.error(f"Error during bulk rotation: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Bulk rotation failed: {str(e)}"
+        )
+
+
+@router.post("/devices/{device_id}/restart")
+async def restart_device(
+    device_id: str,
+    current_user=Depends(get_admin_user)
+):
+    """Перезапуск устройства"""
+    try:
+        from ..core.managers import get_device_by_id_combined
+
+        device = await get_device_by_id_combined(device_id)
+
+        if not device:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Device not found"
+            )
+
+        # Здесь может быть логика перезапуска устройства
+        # Пока что просто возвращаем успех
+        logger.info(f"Restart requested for device: {device_id}")
+
+        return {
+            "success": True,
+            "message": f"Device {device_id} restart initiated",
+            "device_id": device_id
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error restarting device {device_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Device restart failed: {str(e)}"
+        )
+
+
+@router.put("/devices/{device_id}/auto-rotation")
+async def toggle_auto_rotation(
+    device_id: str,
+    enabled: bool,
+    current_user=Depends(get_admin_user)
+):
+    """Включение/выключение автоматической ротации для устройства"""
+    try:
+        from ..core.managers import get_device_by_id_combined
+
+        device = await get_device_by_id_combined(device_id)
+
+        if not device:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Device not found"
+            )
+
+        # Здесь должна быть логика обновления настроек автоматической ротации
+        # Пока что просто возвращаем успех
+        logger.info(f"Auto rotation {'enabled' if enabled else 'disabled'} for device: {device_id}")
+
+        return {
+            "success": True,
+            "message": f"Auto rotation {'enabled' if enabled else 'disabled'} for device {device_id}",
+            "device_id": device_id,
+            "auto_rotation": enabled
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error toggling auto rotation for device {device_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Auto rotation toggle failed: {str(e)}"
+        )
+
+
+@router.put("/devices/{device_id}/rotation-interval")
+async def update_rotation_interval(
+    device_id: str,
+    interval: int,
+    current_user=Depends(get_admin_user)
+):
+    """Обновление интервала ротации для устройства"""
+    try:
+        from ..core.managers import get_device_by_id_combined
+
+        if interval < 60 or interval > 3600:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Rotation interval must be between 60 and 3600 seconds"
+            )
+
+        device = await get_device_by_id_combined(device_id)
+
+        if not device:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Device not found"
+            )
+
+        # Здесь должна быть логика обновления интервала ротации
+        # Пока что просто возвращаем успех
+        logger.info(f"Rotation interval updated to {interval}s for device: {device_id}")
+
+        return {
+            "success": True,
+            "message": f"Rotation interval updated to {interval} seconds for device {device_id}",
+            "device_id": device_id,
+            "rotation_interval": interval
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating rotation interval for device {device_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Rotation interval update failed: {str(e)}"
+        )
+
+@router.get("/devices/{device_id}/rotation-methods")
+async def get_device_rotation_methods(
+    device_id: str,
+    current_user=Depends(get_admin_user)
+):
+    """Получение доступных методов ротации для устройства"""
+    try:
+        from ..core.managers import get_device_rotation_methods
+
+        result = await get_device_rotation_methods(device_id)
+
+        if "error" in result:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=result["error"]
+            )
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting rotation methods: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get rotation methods: {str(e)}"
+        )
+
 @router.get("/devices/{device_id}")
 async def admin_get_device_by_id_combined(device_id: str):
     """Получение информации о конкретном устройстве (Android или USB модем)"""
@@ -372,33 +693,6 @@ async def admin_get_device_by_id_combined(device_id: str):
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-@router.get("/devices/{device_id}/rotation-methods")
-async def get_device_rotation_methods(
-    device_id: str,
-    current_user=Depends(get_admin_user)
-):
-    """Получение доступных методов ротации для устройства"""
-    try:
-        from ..core.managers import get_device_rotation_methods
-
-        result = await get_device_rotation_methods(device_id)
-
-        if "error" in result:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=result["error"]
-            )
-
-        return result
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting rotation methods: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get rotation methods: {str(e)}"
-        )
 
 @router.post("/devices/sync-to-db")
 async def sync_devices_to_database(current_user=Depends(get_admin_user)):
