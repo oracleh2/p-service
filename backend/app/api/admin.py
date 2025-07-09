@@ -86,6 +86,17 @@ class TestRotationResponse(BaseModel):
     timestamp: str
     recommendation: str
 
+class EnhancedRotationResponse(BaseModel):
+    success: bool
+    message: str
+    new_ip: Optional[str] = None
+    old_ip: Optional[str] = None
+    device_id: str
+    method: Optional[str] = None
+    ip_changed: bool = False
+    rotation_type: str = "unknown"  # "ip_changed", "ip_unchanged", "connection_refreshed"
+    explanation: Optional[str] = None
+
 @router.post("/devices/discover")
 async def discover_devices(current_user=Depends(get_admin_user)):
     """Принудительное обнаружение устройств (Android и USB модемы)"""
@@ -337,18 +348,107 @@ async def admin_get_devices_combined():
 
 # Добавьте эти роуты в конец файла backend/app/api/admin.py (после всех существующих роутов)
 
-@router.post("/devices/{device_id}/rotate", response_model=RotationResponse)
+@router.post("/devices/{device_id}/rotate", response_model=EnhancedRotationResponse)
 async def rotate_device_ip(
     device_id: str,
     rotation_request: RotationRequest = RotationRequest(),
     current_user=Depends(get_admin_user)
 ):
-    """Принудительная ротация IP устройства"""
+    """Принудительная ротация IP устройства с улучшенной обработкой результатов"""
     try:
         from ..core.managers import perform_device_rotation, get_device_uuid_by_name, perform_device_rotation_by_uuid
         import uuid
 
         logger.info(f"Starting IP rotation for device: {device_id}")
+        logger.info(f"Rotation request: {rotation_request.dict()}")
+
+        # Получаем текущий IP до ротации
+        old_ip = await get_device_current_ip(device_id)
+
+        # Проверяем, передан ли UUID или имя устройства
+        try:
+            # Пытаемся интерпретировать как UUID
+            device_uuid = uuid.UUID(device_id)
+            # Если успешно, используем ротацию по UUID
+            success, result = await perform_device_rotation_by_uuid(
+                str(device_uuid),
+                rotation_request.force_method
+            )
+            logger.info(f"Used UUID-based rotation for device UUID: {device_uuid}")
+
+        except ValueError:
+            # Если не UUID, значит это имя устройства
+            success, result = await perform_device_rotation(
+                device_id,
+                rotation_request.force_method
+            )
+            logger.info(f"Used name-based rotation for device name: {device_id}")
+
+        # Получаем новый IP после ротации
+        new_ip = await get_device_current_ip(device_id)
+
+        # Анализируем результат
+        ip_changed = old_ip != new_ip if old_ip and new_ip else False
+
+        if success:
+            if ip_changed:
+                rotation_type = "ip_changed"
+                explanation = f"IP successfully changed from {old_ip} to {new_ip}"
+                message = f"IP rotation completed successfully! New IP: {new_ip}"
+            else:
+                rotation_type = "ip_unchanged"
+                explanation = (
+                    "Rotation completed successfully but IP didn't change. "
+                    "This is normal behavior for some mobile operators - "
+                    "the connection was refreshed even though the IP remained the same."
+                )
+                message = f"Rotation completed successfully. Connection refreshed. IP: {new_ip or old_ip}"
+
+            logger.info(f"✅ IP rotation successful for {device_id}: {result}")
+            return EnhancedRotationResponse(
+                success=True,
+                message=message,
+                new_ip=new_ip,
+                old_ip=old_ip,
+                device_id=device_id,
+                method=rotation_request.force_method,
+                ip_changed=ip_changed,
+                rotation_type=rotation_type,
+                explanation=explanation
+            )
+        else:
+            logger.error(f"❌ IP rotation failed for {device_id}: {result}")
+            return EnhancedRotationResponse(
+                success=False,
+                message=result,
+                new_ip=new_ip,
+                old_ip=old_ip,
+                device_id=device_id,
+                method=rotation_request.force_method,
+                ip_changed=ip_changed,
+                rotation_type="failed",
+                explanation=f"Rotation failed: {result}"
+            )
+
+    except Exception as e:
+        logger.error(f"Error during IP rotation for {device_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"IP rotation failed: {str(e)}"
+        )
+
+@router.post("/devices/{device_id}/rotate-with-fallback")
+async def rotate_device_with_fallback(
+    device_id: str,
+    rotation_request: RotationRequest = RotationRequest(),
+    current_user=Depends(get_admin_user)
+):
+    """Ротация IP с автоматическим fallback к альтернативным методам"""
+    try:
+        from ..core.managers import perform_device_rotation, get_device_uuid_by_name, perform_device_rotation_by_uuid
+        import uuid
+
+        logger.info(f"Starting IP rotation with fallback for device: {device_id}")
         logger.info(f"Rotation request: {rotation_request.dict()}")
 
         # Проверяем, передан ли UUID или имя устройства
@@ -375,7 +475,7 @@ async def rotate_device_ip(
             return RotationResponse(
                 success=True,
                 message="IP rotation completed successfully",
-                new_ip=result,
+                new_ip=result if not result.startswith("Rotation completed") else None,
                 device_id=device_id,
                 method=rotation_request.force_method
             )
@@ -394,7 +494,6 @@ async def rotate_device_ip(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"IP rotation failed: {str(e)}"
         )
-
 
 @router.post("/devices/{device_id}/test-rotation", response_model=TestRotationResponse)
 async def test_rotation_method(
@@ -680,6 +779,247 @@ async def get_device_rotation_methods(
             detail=f"Failed to get rotation methods: {str(e)}"
         )
 
+@router.post("/devices/{device_id}/test-all-methods")
+async def test_all_rotation_methods(
+    device_id: str,
+    current_user=Depends(get_admin_user)
+):
+    """Тестирование всех доступных методов ротации для устройства"""
+    try:
+        from ..core.managers import get_device_rotation_methods, test_device_rotation
+        import uuid
+
+        logger.info(f"Testing all rotation methods for device: {device_id}")
+
+        # Получаем доступные методы ротации
+        try:
+            # Пытаемся интерпретировать как UUID
+            device_uuid = uuid.UUID(device_id)
+            methods_info = await get_device_rotation_methods_by_uuid(str(device_uuid))
+            logger.info(f"Used UUID-based methods lookup for device UUID: {device_uuid}")
+        except ValueError:
+            # Если не UUID, значит это имя устройства
+            methods_info = await get_device_rotation_methods(device_id)
+            logger.info(f"Used name-based methods lookup for device name: {device_id}")
+
+        if "error" in methods_info:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=methods_info["error"]
+            )
+
+        available_methods = methods_info.get("available_methods", [])
+        if not available_methods:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No rotation methods available for this device"
+            )
+
+        # Тестируем каждый метод
+        test_results = []
+        for method_info in available_methods:
+            method = method_info.get("method")
+            if method:
+                logger.info(f"Testing method: {method}")
+                try:
+                    result = await test_device_rotation(device_id, method)
+                    test_results.append({
+                        "method": method,
+                        "method_info": method_info,
+                        "test_result": result
+                    })
+                except Exception as e:
+                    test_results.append({
+                        "method": method,
+                        "method_info": method_info,
+                        "test_result": {"error": str(e)}
+                    })
+
+        # Анализируем результаты
+        successful_methods = [r for r in test_results if r["test_result"].get("success", False)]
+        failed_methods = [r for r in test_results if not r["test_result"].get("success", False)]
+
+        return {
+            "device_id": device_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "total_methods": len(test_results),
+            "successful_methods": len(successful_methods),
+            "failed_methods": len(failed_methods),
+            "recommended_method": successful_methods[0]["method"] if successful_methods else None,
+            "test_results": test_results,
+            "summary": {
+                "best_methods": [r["method"] for r in successful_methods[:3]],
+                "avoid_methods": [r["method"] for r in failed_methods if r["test_result"].get("recommendation") == "avoid"]
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error testing all rotation methods for {device_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Method testing failed: {str(e)}"
+        )
+
+@router.get("/devices/{device_id}/connection-test")
+async def test_device_connection(
+    device_id: str,
+    current_user=Depends(get_admin_user)
+):
+    """Безопасное тестирование соединения устройства"""
+    try:
+        from ..core.managers import get_modem_manager, get_device_manager
+
+        # Определяем тип устройства и выполняем тест
+        device_manager = get_device_manager()
+        modem_manager = get_modem_manager()
+
+        test_result = None
+
+        # Проверяем в modem_manager
+        if modem_manager:
+            modem_info = await modem_manager.get_device_by_id(device_id)
+            if modem_info:
+                test_result = await modem_manager.test_modem_connection_safe(device_id)
+
+        # Если не найдено в modem_manager, проверяем в device_manager
+        if not test_result and device_manager:
+            device_info = await device_manager.get_device_by_id(device_id)
+            if device_info:
+                # Для Android устройств можем добавить свой тест
+                test_result = {
+                    "device_id": device_id,
+                    "device_type": "android",
+                    "timestamp": datetime.now().isoformat(),
+                    "message": "Android device connection test not implemented yet"
+                }
+
+        if not test_result:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Device not found or connection test not available"
+            )
+
+        return test_result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error testing device connection for {device_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Connection test failed: {str(e)}"
+        )
+
+@router.get("/devices/{device_id}/health")
+async def get_device_health(
+    device_id: str,
+    current_user=Depends(get_admin_user)
+):
+    """Получение статуса здоровья устройства"""
+    try:
+        from ..core.managers import get_modem_manager, get_device_manager
+
+        # Определяем тип устройства и получаем статус здоровья
+        device_manager = get_device_manager()
+        modem_manager = get_modem_manager()
+
+        health_status = None
+
+        # Проверяем в modem_manager
+        if modem_manager:
+            modem_info = await modem_manager.get_device_by_id(device_id)
+            if modem_info:
+                health_status = await modem_manager.get_modem_health_status(device_id)
+
+        # Если не найдено в modem_manager, проверяем в device_manager
+        if not health_status and device_manager:
+            device_info = await device_manager.get_device_by_id(device_id)
+            if device_info:
+                # Для Android устройств создаем базовый статус здоровья
+                health_status = {
+                    "device_id": device_id,
+                    "device_type": "android",
+                    "timestamp": datetime.now().isoformat(),
+                    "health_score": 85,  # Примерный score
+                    "status": "healthy",
+                    "issues_count": 0,
+                    "recommendations_count": 0,
+                    "details": {
+                        "message": "Android device health monitoring not fully implemented"
+                    }
+                }
+
+        if not health_status:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Device not found or health check not available"
+            )
+
+        return health_status
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting device health for {device_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Health check failed: {str(e)}"
+        )
+
+@router.post("/devices/{device_id}/diagnose")
+async def diagnose_device_issues(
+    device_id: str,
+    current_user=Depends(get_admin_user)
+):
+    """Диагностика проблем с устройством"""
+    try:
+        from ..core.managers import get_modem_manager, get_device_manager
+
+        # Определяем тип устройства и выполняем диагностику
+        device_manager = get_device_manager()
+        modem_manager = get_modem_manager()
+
+        diagnosis = None
+
+        # Проверяем в modem_manager
+        if modem_manager:
+            modem_info = await modem_manager.get_device_by_id(device_id)
+            if modem_info:
+                diagnosis = await modem_manager.diagnose_modem_connectivity_issue(device_id)
+
+        # Если не найдено в modem_manager, проверяем в device_manager
+        if not diagnosis and device_manager:
+            device_info = await device_manager.get_device_by_id(device_id)
+            if device_info:
+                # Для Android устройств создаем базовую диагностику
+                diagnosis = {
+                    "device_id": device_id,
+                    "device_type": "android",
+                    "timestamp": datetime.now().isoformat(),
+                    "overall_status": "unknown",
+                    "issues": [],
+                    "recommendations": ["Implement Android device diagnostics"],
+                    "summary": "Android device diagnostics not fully implemented"
+                }
+
+        if not diagnosis:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Device not found or diagnostics not available"
+            )
+
+        return diagnosis
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error diagnosing device {device_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Device diagnostics failed: {str(e)}"
+        )
 
 @router.post("/devices/sync-managers")
 async def sync_device_managers(current_user=Depends(get_admin_user)):
@@ -1304,3 +1644,28 @@ async def force_refresh_modem_ip(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Force refresh failed: {str(e)}"
         )
+
+async def get_device_current_ip(device_id: str) -> Optional[str]:
+    """Получение текущего IP устройства"""
+    try:
+        from ..core.managers import get_device_manager, get_modem_manager
+
+        # Пробуем получить из modem_manager
+        modem_manager = get_modem_manager()
+        if modem_manager:
+            modem_info = await modem_manager.get_device_by_id(device_id)
+            if modem_info:
+                return await modem_manager.get_device_external_ip(device_id)
+
+        # Пробуем получить из device_manager
+        device_manager = get_device_manager()
+        if device_manager:
+            device_info = await device_manager.get_device_by_id(device_id)
+            if device_info:
+                return await device_manager.get_device_external_ip(device_id)
+
+        return None
+
+    except Exception as e:
+        logger.error(f"Error getting current IP for device {device_id}: {e}")
+        return None

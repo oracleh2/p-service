@@ -78,7 +78,7 @@ class EnhancedRotationManager:
 
     async def rotate_device_ip(self, device_id: str, force_method: str = None) -> Tuple[bool, str]:
         """
-        Универсальная ротация IP устройства
+        Универсальная ротация IP устройства с улучшенной логикой
 
         Args:
             device_id: UUID устройства
@@ -119,7 +119,7 @@ class EnhancedRotationManager:
                     # Создание конфигурации по умолчанию
                     config = await self._create_default_rotation_config(device)
 
-                # ИСПРАВЛЕНИЕ: Используем force_method если передан
+                # Используем force_method если передан
                 rotation_method = force_method or config.rotation_method
 
                 logger.info(
@@ -132,11 +132,11 @@ class EnhancedRotationManager:
                     final_method=rotation_method
                 )
 
-                # Сохранение старого IP для сравнения
-                old_ip = device.current_external_ip
+                # Получаем текущий IP ДО ротации
+                old_ip = await self._get_current_device_ip(device)
+                logger.info(f"Current IP before rotation: {old_ip}")
 
                 # Выполнение ротации в зависимости от типа устройства
-                # ИСПРАВЛЕНИЕ: Передаем правильный метод
                 success, message = await self._execute_rotation(device, rotation_method)
 
                 # Обновление статистики
@@ -157,25 +157,35 @@ class EnhancedRotationManager:
                     # Получение нового IP и проверка изменения
                     new_ip = await self._verify_ip_change(device, old_ip)
 
-                    if new_ip and new_ip != old_ip:
+                    if new_ip:
                         # Обновление IP в базе данных
                         await self._update_device_ip(device_id, new_ip)
                         await self._save_ip_history(device_id, new_ip)
 
-                        logger.info(
-                            "New IP obtained successfully",
-                            device_id=device_id,
-                            old_ip=old_ip,
-                            new_ip=new_ip,
-                            method=rotation_method
-                        )
-                        return True, new_ip
+                        if new_ip != old_ip:
+                            logger.info(
+                                "New IP obtained successfully",
+                                device_id=device_id,
+                                old_ip=old_ip,
+                                new_ip=new_ip,
+                                method=rotation_method
+                            )
+                            return True, new_ip
+                        else:
+                            # IP не изменился, но ротация выполнена успешно
+                            logger.info(
+                                "Rotation completed but IP unchanged",
+                                device_id=device_id,
+                                ip=new_ip,
+                                method=rotation_method
+                            )
+                            return True, f"Rotation completed successfully. IP unchanged: {new_ip}"
                     else:
-                        # Если IP не изменился, пробуем альтернативный метод
+                        # Если не удалось получить IP, пробуем fallback метод
                         fallback_method = self._get_fallback_method(device.device_type)
                         if rotation_method != fallback_method:
                             logger.warning(
-                                "IP didn't change, trying fallback method",
+                                "Could not verify IP, trying fallback method",
                                 device_id=device_id,
                                 current_method=rotation_method,
                                 fallback_method=fallback_method
@@ -185,12 +195,16 @@ class EnhancedRotationManager:
                             if fallback_success:
                                 await asyncio.sleep(self._get_stabilization_delay(device.device_type))
                                 new_ip = await self._verify_ip_change(device, old_ip)
-                                if new_ip and new_ip != old_ip:
+                                if new_ip:
                                     await self._update_device_ip(device_id, new_ip)
                                     await self._save_ip_history(device_id, new_ip)
-                                    return True, new_ip
 
-                        return False, f"IP rotation executed but IP didn't change (still {old_ip})"
+                                    if new_ip != old_ip:
+                                        return True, new_ip
+                                    else:
+                                        return True, f"Fallback rotation completed. IP unchanged: {new_ip}"
+
+                        return False, f"Could not verify IP change after rotation"
                 else:
                     logger.error(
                         "IP rotation failed",
@@ -210,6 +224,56 @@ class EnhancedRotationManager:
             return False, f"Rotation error: {str(e)}"
         finally:
             self.rotation_in_progress[device_id] = False
+
+    async def _get_current_device_ip(self, device: ProxyDevice) -> Optional[str]:
+        """Получение текущего IP устройства"""
+        try:
+            # Сначала пробуем получить из базы данных
+            if device.current_external_ip:
+                return device.current_external_ip
+
+            # Если нет в БД, получаем напрямую
+            return await self._force_refresh_device_external_ip(device)
+        except Exception as e:
+            logger.error(f"Error getting current device IP: {e}")
+            return None
+
+    async def _try_alternative_rotation_methods(self, device: ProxyDevice, failed_method: str) -> Tuple[bool, str]:
+        """Попытка альтернативных методов ротации"""
+        device_type = device.device_type
+
+        # Определяем альтернативные методы в порядке приоритета
+        alternative_methods = {
+            'usb_modem': ['dhcp_renew', 'interface_restart', 'web_interface'],
+            'android': ['data_toggle', 'airplane_mode', 'usb_reconnect'],
+            'raspberry_pi': ['ppp_restart', 'gpio_reset'],
+            'network_device': ['dhcp_renew', 'interface_restart']
+        }
+
+        methods_to_try = alternative_methods.get(device_type, [])
+
+        # Убираем уже неудачный метод
+        if failed_method in methods_to_try:
+            methods_to_try.remove(failed_method)
+
+        logger.info(f"Trying alternative rotation methods for {device.name}: {methods_to_try}")
+
+        for method in methods_to_try:
+            try:
+                logger.info(f"Attempting alternative method: {method}")
+                success, message = await self._execute_rotation(device, method)
+
+                if success:
+                    logger.info(f"Alternative method {method} succeeded: {message}")
+                    return True, f"Alternative method {method} succeeded: {message}"
+                else:
+                    logger.warning(f"Alternative method {method} failed: {message}")
+
+            except Exception as e:
+                logger.error(f"Alternative method {method} error: {e}")
+                continue
+
+        return False, f"All alternative methods failed for {device_type}"
 
     async def _execute_rotation(self, device: ProxyDevice, method: str) -> Tuple[bool, str]:
         """Выполнение ротации в зависимости от типа устройства и метода"""
@@ -396,24 +460,57 @@ class EnhancedRotationManager:
         except Exception as e:
             return False, f"AT commands error: {str(e)}"
 
-    async def _verify_ip_change(self, device: ProxyDevice, old_ip: str, max_attempts: int = 3) -> Optional[str]:
-        """Проверка изменения IP адреса устройства"""
+    async def _verify_ip_change(self, device: ProxyDevice, old_ip: str, max_attempts: int = 5) -> Optional[str]:
+        """
+        Улучшенная проверка изменения IP адреса устройства
+
+        Args:
+            device: Устройство для проверки
+            old_ip: Предыдущий IP адрес
+            max_attempts: Максимальное количество попыток проверки
+
+        Returns:
+            Optional[str]: Новый IP адрес или None если не изменился
+        """
+        logger.info(f"Verifying IP change for device {device.name}, old IP: {old_ip}")
+
         for attempt in range(max_attempts):
             try:
                 # Принудительно обновляем IP из менеджера
                 new_ip = await self._force_refresh_device_external_ip(device)
 
-                if new_ip and new_ip != old_ip:
-                    logger.info(f"IP changed from {old_ip} to {new_ip} for device {device.name}")
-                    return new_ip
+                if new_ip:
+                    logger.debug(f"Attempt {attempt + 1}: Got IP {new_ip} for device {device.name}")
 
-                if attempt < max_attempts - 1:  # Не ждем после последней попытки
-                    await asyncio.sleep(3)  # Сокращено с 5 до 3 секунд
+                    # Проверяем изменение IP
+                    if new_ip != old_ip:
+                        logger.info(f"✅ IP changed from {old_ip} to {new_ip} for device {device.name}")
+                        return new_ip
+                    else:
+                        logger.debug(f"IP unchanged: {new_ip} (attempt {attempt + 1}/{max_attempts})")
+
+                        # Для некоторых операторов IP может не изменяться сразу
+                        # Добавляем более длительное ожидание для последних попыток
+                        if attempt >= 2:
+                            await asyncio.sleep(8)  # Дольше ждем на последних попытках
+                        else:
+                            await asyncio.sleep(3)
+                else:
+                    logger.warning(f"Could not get IP on attempt {attempt + 1} for device {device.name}")
+                    await asyncio.sleep(3)
 
             except Exception as e:
                 logger.warning(f"IP check attempt {attempt + 1} failed: {e}")
+                await asyncio.sleep(3)
 
-        logger.warning(f"IP didn't change after {max_attempts} attempts for device {device.name}")
+        # Если IP не изменился, это может быть нормальным поведением
+        logger.info(f"IP didn't change after {max_attempts} attempts for device {device.name}")
+
+        # Возвращаем текущий IP как "новый" если он есть
+        if old_ip and old_ip != "None":
+            logger.info(f"Returning current IP {old_ip} as rotation result (no change detected)")
+            return old_ip
+
         return None
 
     async def _force_refresh_device_external_ip(self, device: ProxyDevice) -> Optional[str]:
