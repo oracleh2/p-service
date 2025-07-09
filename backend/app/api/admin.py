@@ -912,6 +912,122 @@ async def test_device_connection(
             detail=f"Connection test failed: {str(e)}"
         )
 
+@router.get("/devices/{device_id}/hilink-info")
+async def get_hilink_modem_info(
+    device_id: str,
+    current_user=Depends(get_admin_user)
+):
+    """Получение детальной информации о HiLink модеме"""
+    try:
+        from ..core.managers import get_modem_manager
+
+        modem_manager = get_modem_manager()
+        if not modem_manager:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Modem manager not available"
+            )
+
+        # Получаем информацию о модеме
+        modem_info = await modem_manager.get_device_by_id(device_id)
+        if not modem_info:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Modem not found"
+            )
+
+        web_interface = modem_info.get('web_interface')
+        if not web_interface:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Web interface not available for this modem"
+            )
+
+        # Получаем информацию через HiLink API
+        from backend.app.core.managers import get_enhanced_rotation_manager
+        rotation_manager = get_enhanced_rotation_manager()
+        if rotation_manager:
+            hilink_info = await rotation_manager.get_hilink_modem_info(web_interface)
+        else:
+            hilink_info = {}
+
+        return {
+            "device_id": device_id,
+            "device_type": "usb_modem",
+            "device_mode": "hilink",
+            "web_interface": web_interface,
+            "interface": modem_info.get('interface'),
+            "interface_ip": modem_info.get('interface_ip'),
+            "external_ip": modem_info.get('external_ip'),
+            "hilink_info": hilink_info,
+            "important_notes": {
+                "ip_rotation_explanation": {
+                    "title": "Как работает ротация IP в HiLink режиме",
+                    "points": [
+                        "В HiLink режиме модем работает как роутер с внутренним DHCP сервером",
+                        "Ваша система получает внутренний IP (например, 192.168.108.100) от модема",
+                        "Внешний (публичный) IP находится на самом модеме, а не на системе",
+                        "Команды dhclient обновляют только внутренний IP, НЕ внешний",
+                        "Для изменения внешнего IP нужно управлять модемом через его веб-API"
+                    ]
+                },
+                "rotation_methods": {
+                    "title": "Эффективные методы ротации для HiLink",
+                    "recommended": [
+                        {
+                            "method": "web_interface",
+                            "description": "Отключение/подключение через HiLink API",
+                            "effectiveness": "Высокая - изменяет внешний IP"
+                        },
+                        {
+                            "method": "hilink_reboot",
+                            "description": "Перезагрузка модема через API",
+                            "effectiveness": "Очень высокая - гарантированно меняет внешний IP"
+                        }
+                    ],
+                    "ineffective": [
+                        {
+                            "method": "dhcp_renew",
+                            "description": "Обновление DHCP",
+                            "effectiveness": "Низкая - НЕ изменяет внешний IP"
+                        },
+                        {
+                            "method": "interface_restart",
+                            "description": "Перезапуск интерфейса",
+                            "effectiveness": "Низкая - НЕ изменяет внешний IP"
+                        }
+                    ]
+                },
+                "troubleshooting": {
+                    "title": "Устранение проблем",
+                    "common_issues": [
+                        {
+                            "problem": "IP не изменяется после dhcp_renew",
+                            "solution": "Это нормально для HiLink модемов. Используйте web_interface или hilink_reboot"
+                        },
+                        {
+                            "problem": "Веб-интерфейс недоступен",
+                            "solution": "Проверьте, что модем в HiLink режиме и IP интерфейса правильный"
+                        },
+                        {
+                            "problem": "Ротация не работает",
+                            "solution": "Убедитесь, что модем поддерживает HiLink API команды"
+                        }
+                    ]
+                }
+            },
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting HiLink info for {device_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get HiLink info: {str(e)}"
+        )
+
 @router.get("/devices/{device_id}/health")
 async def get_device_health(
     device_id: str,

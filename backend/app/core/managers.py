@@ -338,51 +338,71 @@ async def _get_android_rotation_methods(device_id: str, device_info: dict) -> di
 
 
 async def _get_modem_rotation_methods(device_id: str, modem_info: dict) -> dict:
-    """Получение методов ротации для USB модема"""
+    """Получение методов ротации для USB модема с пояснениями о HiLink"""
     rotation_methods = [
         {
             'method': 'web_interface',
-            'name': 'Веб-интерфейс',
-            'description': 'Перезагрузка через веб-интерфейс модема',
+            'name': 'HiLink API (Рекомендуется)',
+            'description': 'Отключение и подключение через HiLink API - изменяет внешний IP',
             'recommended': True,
-            'risk_level': 'low'
+            'risk_level': 'low',
+            'effectiveness': 'high',
+            'explanation': 'Использует веб-API модема для управления соединением'
         },
         {
-            'method': 'interface_restart',
-            'name': 'Перезапуск интерфейса',
-            'description': 'Перезапуск сетевого интерфейса модема',
-            'recommended': False,
-            'risk_level': 'medium'
+            'method': 'hilink_reboot',
+            'name': 'Перезагрузка HiLink модема',
+            'description': 'Перезагрузка модема через API - гарантированно меняет внешний IP',
+            'recommended': True,
+            'risk_level': 'medium',
+            'effectiveness': 'very_high',
+            'explanation': 'Полная перезагрузка модема занимает ~30 секунд, но гарантированно меняет IP'
         },
         {
             'method': 'dhcp_renew',
-            'name': 'Обновление DHCP',
-            'description': 'Запрос нового IP через DHCP',
+            'name': 'DHCP обновление (Неэффективно для HiLink)',
+            'description': 'Обновляет только внутренний IP, НЕ изменяет внешний IP',
             'recommended': False,
-            'risk_level': 'low'
+            'risk_level': 'low',
+            'effectiveness': 'none',
+            'explanation': 'В HiLink режиме этот метод обновляет только внутренний IP от модема',
+            'warning': '⚠️ Этот метод НЕ изменяет внешний IP для HiLink модемов!'
         },
         {
-            'method': 'at_commands',
-            'name': 'AT команды',
-            'description': 'Ротация через AT команды (требует доступ к serial порту)',
+            'method': 'interface_restart',
+            'name': 'Перезапуск интерфейса (Неэффективно для HiLink)',
+            'description': 'Перезапуск сетевого интерфейса - НЕ изменяет внешний IP',
             'recommended': False,
-            'risk_level': 'high'
-        },
-        {
-            'method': 'usb_reset',
-            'name': 'USB сброс',
-            'description': 'Физический сброс USB модема',
-            'recommended': False,
-            'risk_level': 'high'
+            'risk_level': 'medium',
+            'effectiveness': 'none',
+            'explanation': 'Перезапуск интерфейса не влияет на внешний IP модема в HiLink режиме',
+            'warning': '⚠️ Этот метод НЕ изменяет внешний IP для HiLink модемов!'
         }
     ]
 
     return {
         "device_id": device_id,
         "device_type": "usb_modem",
+        "device_mode": "hilink",
         "available_methods": rotation_methods,
         "current_method": modem_info.get('rotation_method', 'web_interface'),
-        "device_status": modem_info.get('status', 'unknown')
+        "device_status": modem_info.get('status', 'unknown'),
+        "hilink_explanation": {
+            "title": "Особенности HiLink модемов",
+            "description": "HiLink модемы работают как роутеры с собственным DHCP сервером. Внешний IP находится на модеме, а не на системе.",
+            "key_points": [
+                "Система получает внутренний IP (192.168.x.x) от модема",
+                "Внешний IP управляется модемом через его веб-API",
+                "DHCP операции не влияют на внешний IP",
+                "Для изменения внешнего IP нужно использовать API модема"
+            ]
+        },
+        "recommendations": {
+            "best_method": "web_interface",
+            "backup_method": "hilink_reboot",
+            "avoid_methods": ["dhcp_renew", "interface_restart"],
+            "explanation": "Используйте методы, которые управляют модемом через его API, а не системные сетевые команды"
+        }
     }
 
 
@@ -836,3 +856,5 @@ async def test_device_rotation_by_uuid(device_uuid: str, method: str) -> dict:
     except Exception as e:
         logger.error(f"Error testing rotation by UUID: {e}")
         return {"error": str(e)}
+
+

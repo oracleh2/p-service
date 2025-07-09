@@ -41,12 +41,11 @@ class EnhancedRotationManager:
                 'network_interface_reset'
             ],
             'usb_modem': [
-                'web_interface',  # Основной метод
-                'interface_restart',
-                'dhcp_renew',
-                'usb_reset',
-                'at_commands',  # Оставляем как дополнительный
-                'serial_reconnect'
+                'web_interface',      # HiLink API dial
+                'hilink_reboot',      # HiLink API reboot
+                'hilink_dial',        # Альтернативный HiLink dial
+                'interface_restart',  # Fallback (НЕ меняет внешний IP)
+                'dhcp_renew',        # Fallback (НЕ меняет внешний IP)
             ],
             'raspberry_pi': [
                 'ppp_restart',
@@ -316,18 +315,51 @@ class EnhancedRotationManager:
             return False, f"Android rotation error: {str(e)}"
 
     async def _rotate_usb_modem(self, device: ProxyDevice, method: str) -> Tuple[bool, str]:
-        """Ротация IP для USB модема"""
+        """Ротация IP для USB модема с правильными методами для HiLink"""
         try:
             if method == 'web_interface':
                 return await self._usb_modem_web_interface(device)
+            elif method == 'hilink_reboot':
+                return await self._usb_modem_hilink_reboot(device)
+            elif method == 'hilink_dial':
+                return await self._hilink_api_rotation(self._get_web_interface_from_device(device))
             elif method == 'interface_restart':
+                # Оставляем как fallback метод
                 return await self._usb_modem_interface_restart(device)
             elif method == 'dhcp_renew':
-                return await self._usb_modem_dhcp_renew(device)
+                # Предупреждаем что это не изменит внешний IP
+                logger.warning(f"DHCP renew for HiLink modem {device.name} - this will NOT change external IP")
+                result = await self._usb_modem_dhcp_renew(device)
+                if result[0]:
+                    return True, "DHCP renewed (Note: External IP unchanged - this is normal for HiLink modems)"
+                return result
             else:
                 return False, f"Unknown USB modem rotation method: {method}"
         except Exception as e:
             return False, f"USB modem rotation error: {str(e)}"
+
+    def _get_web_interface_from_device(self, device: ProxyDevice) -> str:
+        """Получение адреса веб-интерфейса из информации об устройстве"""
+        try:
+            device_name = device.name
+            if 'huawei_' in device_name:
+                interface_name = device_name.replace('huawei_', '')
+
+                import netifaces
+                if interface_name in netifaces.interfaces():
+                    addrs = netifaces.ifaddresses(interface_name)
+                    if netifaces.AF_INET in addrs:
+                        interface_ip = addrs[netifaces.AF_INET][0]['addr']
+                        parts = interface_ip.split('.')
+                        if len(parts) == 4 and parts[0] == '192' and parts[1] == '168':
+                            subnet_number = parts[2]
+                            return f"192.168.{subnet_number}.1"
+
+            return "192.168.8.1"  # Fallback
+
+        except Exception as e:
+            logger.error(f"Error getting web interface: {e}")
+            return "192.168.8.1"
 
     async def _android_data_toggle(self, adb_id: str) -> Tuple[bool, str]:
         """Переключение мобильных данных на Android"""
@@ -595,14 +627,14 @@ class EnhancedRotationManager:
         return delays.get(device_type, 10)  # По умолчанию 10 секунд вместо 15
 
     def _get_fallback_method(self, device_type: str) -> str:
-        """Получение безопасного запасного метода ротации"""
+        """Получение запасного метода ротации для HiLink модемов"""
         fallbacks = {
             'android': 'airplane_mode',
-            'usb_modem': 'dhcp_renew',  # Изменено с 'interface_restart' на безопасный 'dhcp_renew'
-            'raspberry_pi': 'ppp_restart',
+            'usb_modem': 'hilink_reboot',  # Для HiLink модемов используем перезагрузку через API
+            'raspberry_pi': 'gpio_reset',
             'network_device': 'dhcp_renew'
         }
-        return fallbacks.get(device_type, 'dhcp_renew')
+        return fallbacks.get(device_type, 'interface_restart')
 
     async def _try_fallback_rotation(self, device: ProxyDevice, config: RotationConfig) -> Tuple[bool, str]:
         """Попытка ротации запасным методом"""
@@ -638,10 +670,10 @@ class EnhancedRotationManager:
         return None
 
     async def _create_default_rotation_config(self, device: ProxyDevice) -> RotationConfig:
-        """Создание конфигурации ротации по умолчанию"""
+        """Создание конфигурации ротации по умолчанию с правильными методами"""
         default_methods = {
             'android': 'data_toggle',
-            'usb_modem': 'web_interface',  # Изменено с 'at_commands' на 'web_interface'
+            'usb_modem': 'web_interface',  # Для HiLink модемов используем веб-интерфейс
             'raspberry_pi': 'ppp_restart',
             'network_device': 'interface_restart'
         }
@@ -965,7 +997,7 @@ class EnhancedRotationManager:
         return None
 
     async def _usb_modem_web_interface(self, device: ProxyDevice) -> Tuple[bool, str]:
-        """Безопасная ротация через веб-интерфейс USB модема"""
+        """Ротация через веб-интерфейс USB модема (HiLink API)"""
         try:
             device_name = device.name
 
@@ -986,56 +1018,235 @@ class EnhancedRotationManager:
                             subnet_number = parts[2]
                             web_interface = f"192.168.{subnet_number}.1"
 
-                            logger.info(f"Attempting web interface rotation via {web_interface}")
+                            logger.info(f"Attempting HiLink API rotation via {web_interface}")
 
-                            # ИСПРАВЛЕНИЕ: Используем только API вызовы, НЕ перезапускаем интерфейс
-                            import aiohttp
-                            async with aiohttp.ClientSession() as session:
-                                try:
-                                    # Проверяем доступность веб-интерфейса
-                                    async with session.get(f"http://{web_interface}",
-                                                           timeout=aiohttp.ClientTimeout(total=3)) as response:
-                                        if response.status == 200:
-                                            logger.info(f"Web interface {web_interface} is accessible")
-
-                                            # Попытка API вызова для ротации IP
-                                            try:
-                                                # Получаем токен сессии
-                                                async with session.get(
-                                                    f"http://{web_interface}/api/webserver/SesTokInfo",
-                                                    timeout=aiohttp.ClientTimeout(total=5)
-                                                ) as token_response:
-                                                    if token_response.status == 200:
-                                                        token_data = await token_response.text()
-                                                        logger.debug(f"Got session token response: {token_data}")
-
-                                                        # Здесь можно добавить реальные API вызовы для ротации
-                                                        # Пока что имитируем успешную ротацию
-                                                        await asyncio.sleep(2)
-
-                                                        return True, "Web interface rotation completed successfully"
-                                                    else:
-                                                        logger.warning(
-                                                            f"Could not get session token: {token_response.status}")
-                                                        # Fallback к другому методу
-                                                        return await self._usb_modem_dhcp_renew(device)
-                                            except Exception as api_error:
-                                                logger.warning(f"API call failed: {api_error}")
-                                                # Fallback к другому методу
-                                                return await self._usb_modem_dhcp_renew(device)
-                                        else:
-                                            logger.warning(f"Web interface not accessible: {response.status}")
-                                            return await self._usb_modem_dhcp_renew(device)
-
-                                except Exception as e:
-                                    logger.warning(f"Web interface not accessible: {e}")
-                                    # Fallback к dhcp_renew вместо разрушительного interface_restart
-                                    return await self._usb_modem_dhcp_renew(device)
+                            # Реальная ротация через HiLink API
+                            return await self._hilink_api_rotation(web_interface)
 
             return False, "Could not determine web interface for USB modem"
 
         except Exception as e:
             return False, f"Web interface rotation error: {str(e)}"
+
+    async def _hilink_api_rotation(self, web_interface: str) -> Tuple[bool, str]:
+        """Ротация IP через HiLink API"""
+        try:
+            import aiohttp
+            import xml.etree.ElementTree as ET
+
+            async with aiohttp.ClientSession() as session:
+                # Шаг 1: Получаем токен сессии
+                try:
+                    async with session.get(
+                        f"http://{web_interface}/api/webserver/SesTokInfo",
+                        timeout=aiohttp.ClientTimeout(total=5)
+                    ) as response:
+                        if response.status != 200:
+                            return False, f"Cannot get session token: HTTP {response.status}"
+
+                        token_xml = await response.text()
+                        logger.debug(f"Session token response: {token_xml}")
+
+                        # Парсим XML токена
+                        root = ET.fromstring(token_xml)
+                        ses_info = root.find('SesInfo')
+                        tok_info = root.find('TokInfo')
+
+                        if ses_info is None or tok_info is None:
+                            return False, "Invalid session token response"
+
+                        session_id = ses_info.text
+                        csrf_token = tok_info.text
+
+                        logger.info(f"Got session token for {web_interface}")
+
+                except Exception as e:
+                    logger.error(f"Error getting session token: {e}")
+                    return False, f"Cannot get session token: {str(e)}"
+
+                # Шаг 2: Получаем статус соединения
+                try:
+                    headers = {
+                        'Cookie': f'SessionID={session_id}',
+                        '__RequestVerificationToken': csrf_token
+                    }
+
+                    async with session.get(
+                        f"http://{web_interface}/api/monitoring/status",
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=5)
+                    ) as response:
+                        if response.status == 200:
+                            status_xml = await response.text()
+                            logger.debug(f"Current status: {status_xml}")
+                        else:
+                            logger.warning(f"Cannot get status: HTTP {response.status}")
+
+                except Exception as e:
+                    logger.warning(f"Error getting status: {e}")
+
+                # Шаг 3: Выполняем ротацию через отключение/подключение
+                try:
+                    # Отключаем соединение
+                    disconnect_xml = '<?xml version="1.0" encoding="UTF-8"?><request><Action>0</Action></request>'
+
+                    headers = {
+                        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                        'Cookie': f'SessionID={session_id}',
+                        '__RequestVerificationToken': csrf_token
+                    }
+
+                    async with session.post(
+                        f"http://{web_interface}/api/dialup/dial",
+                        headers=headers,
+                        data=disconnect_xml,
+                        timeout=aiohttp.ClientTimeout(total=10)
+                    ) as response:
+                        if response.status == 200:
+                            result_xml = await response.text()
+                            logger.info(f"Disconnect result: {result_xml}")
+                        else:
+                            logger.warning(f"Disconnect failed: HTTP {response.status}")
+
+                    # Ждем отключения
+                    await asyncio.sleep(5)
+
+                    # Подключаем соединение
+                    connect_xml = '<?xml version="1.0" encoding="UTF-8"?><request><Action>1</Action></request>'
+
+                    async with session.post(
+                        f"http://{web_interface}/api/dialup/dial",
+                        headers=headers,
+                        data=connect_xml,
+                        timeout=aiohttp.ClientTimeout(total=15)
+                    ) as response:
+                        if response.status == 200:
+                            result_xml = await response.text()
+                            logger.info(f"Connect result: {result_xml}")
+                        else:
+                            logger.warning(f"Connect failed: HTTP {response.status}")
+
+                    # Ждем подключения
+                    await asyncio.sleep(10)
+
+                    return True, "HiLink API rotation completed successfully"
+
+                except Exception as e:
+                    logger.error(f"Error during HiLink dial operation: {e}")
+                    return False, f"HiLink dial operation failed: {str(e)}"
+
+        except Exception as e:
+            logger.error(f"HiLink API rotation error: {e}")
+            return False, f"HiLink API rotation error: {str(e)}"
+
+    async def _usb_modem_hilink_reboot(self, device: ProxyDevice) -> Tuple[bool, str]:
+        """Перезагрузка HiLink модема через API"""
+        try:
+            device_name = device.name
+
+            if 'huawei_' in device_name:
+                interface_name = device_name.replace('huawei_', '')
+
+                # Получаем IP интерфейса
+                import netifaces
+                if interface_name in netifaces.interfaces():
+                    addrs = netifaces.ifaddresses(interface_name)
+                    if netifaces.AF_INET in addrs:
+                        interface_ip = addrs[netifaces.AF_INET][0]['addr']
+
+                        # Извлекаем номер подсети
+                        parts = interface_ip.split('.')
+                        if len(parts) == 4 and parts[0] == '192' and parts[1] == '168':
+                            subnet_number = parts[2]
+                            web_interface = f"192.168.{subnet_number}.1"
+
+                            logger.info(f"Attempting HiLink reboot via {web_interface}")
+
+                            return await self._hilink_api_reboot(web_interface)
+
+            return False, "Could not determine web interface for USB modem"
+
+        except Exception as e:
+            return False, f"HiLink reboot error: {str(e)}"
+
+    async def _hilink_api_reboot(self, web_interface: str) -> Tuple[bool, str]:
+        """Перезагрузка модема через HiLink API"""
+        try:
+            import aiohttp
+            import xml.etree.ElementTree as ET
+
+            async with aiohttp.ClientSession() as session:
+                # Получаем токен сессии
+                try:
+                    async with session.get(
+                        f"http://{web_interface}/api/webserver/SesTokInfo",
+                        timeout=aiohttp.ClientTimeout(total=5)
+                    ) as response:
+                        if response.status != 200:
+                            return False, f"Cannot get session token: HTTP {response.status}"
+
+                        token_xml = await response.text()
+                        root = ET.fromstring(token_xml)
+                        ses_info = root.find('SesInfo')
+                        tok_info = root.find('TokInfo')
+
+                        if ses_info is None or tok_info is None:
+                            return False, "Invalid session token response"
+
+                        session_id = ses_info.text
+                        csrf_token = tok_info.text
+
+                except Exception as e:
+                    return False, f"Cannot get session token: {str(e)}"
+
+                # Отправляем команду перезагрузки
+                try:
+                    reboot_xml = '<?xml version="1.0" encoding="UTF-8"?><request><Control>1</Control></request>'
+
+                    headers = {
+                        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                        'Cookie': f'SessionID={session_id}',
+                        '__RequestVerificationToken': csrf_token
+                    }
+
+                    async with session.post(
+                        f"http://{web_interface}/api/device/control",
+                        headers=headers,
+                        data=reboot_xml,
+                        timeout=aiohttp.ClientTimeout(total=10)
+                    ) as response:
+                        if response.status == 200:
+                            result_xml = await response.text()
+                            logger.info(f"Reboot command sent: {result_xml}")
+                        else:
+                            logger.warning(f"Reboot command failed: HTTP {response.status}")
+
+                    # Ждем перезагрузки модема
+                    logger.info("Waiting for modem reboot...")
+                    await asyncio.sleep(30)
+
+                    # Проверяем, что модем снова доступен
+                    for attempt in range(6):  # 6 попыток по 5 секунд = 30 секунд
+                        try:
+                            async with session.get(
+                                f"http://{web_interface}/api/monitoring/status",
+                                timeout=aiohttp.ClientTimeout(total=3)
+                            ) as response:
+                                if response.status == 200:
+                                    logger.info("Modem is back online after reboot")
+                                    return True, "HiLink reboot completed successfully"
+                        except:
+                            pass
+
+                        await asyncio.sleep(5)
+
+                    return False, "Modem reboot initiated but device not responding"
+
+                except Exception as e:
+                    return False, f"Reboot command failed: {str(e)}"
+
+        except Exception as e:
+            return False, f"HiLink reboot error: {str(e)}"
 
     async def _usb_modem_interface_restart(self, device: ProxyDevice) -> Tuple[bool, str]:
         """ОСТОРОЖНЫЙ перезапуск интерфейса USB модема с сохранением настроек"""
@@ -1247,4 +1458,132 @@ class EnhancedRotationManager:
             logger.error(f"Error getting device external IP by UUID: {e}")
             return None
 
+    async def get_hilink_modem_info(self, web_interface: str) -> Dict[str, Any]:
+        """Получение информации о HiLink модеме"""
+        try:
+            import aiohttp
+            import xml.etree.ElementTree as ET
 
+            async with aiohttp.ClientSession() as session:
+                # Получаем информацию об устройстве
+                try:
+                    async with session.get(
+                        f"http://{web_interface}/api/device/information",
+                        timeout=aiohttp.ClientTimeout(total=5)
+                    ) as response:
+                        if response.status == 200:
+                            device_xml = await response.text()
+                            root = ET.fromstring(device_xml)
+
+                            info = {
+                                'device_name': root.find('DeviceName').text if root.find(
+                                    'DeviceName') is not None else 'Unknown',
+                                'hardware_version': root.find('HardwareVersion').text if root.find(
+                                    'HardwareVersion') is not None else 'Unknown',
+                                'software_version': root.find('SoftwareVersion').text if root.find(
+                                    'SoftwareVersion') is not None else 'Unknown',
+                                'web_ui_version': root.find('WebUIVersion').text if root.find(
+                                    'WebUIVersion') is not None else 'Unknown',
+                                'mac_address1': root.find('MacAddress1').text if root.find(
+                                    'MacAddress1') is not None else 'Unknown',
+                                'mac_address2': root.find('MacAddress2').text if root.find(
+                                    'MacAddress2') is not None else 'Unknown',
+                                'product_family': root.find('ProductFamily').text if root.find(
+                                    'ProductFamily') is not None else 'Unknown',
+                                'classify': root.find('Classify').text if root.find(
+                                    'Classify') is not None else 'Unknown',
+                                'support_mode': root.find('supportmode').text if root.find(
+                                    'supportmode') is not None else 'Unknown',
+                                'work_mode': root.find('workmode').text if root.find(
+                                    'workmode') is not None else 'Unknown'
+                            }
+
+                            logger.info(f"HiLink device info: {info}")
+                            return info
+
+                except Exception as e:
+                    logger.error(f"Error getting device info: {e}")
+                    return {}
+
+                # Получаем статус соединения
+                try:
+                    async with session.get(
+                        f"http://{web_interface}/api/monitoring/status",
+                        timeout=aiohttp.ClientTimeout(total=5)
+                    ) as response:
+                        if response.status == 200:
+                            status_xml = await response.text()
+                            root = ET.fromstring(status_xml)
+
+                            status_info = {
+                                'connection_status': root.find('ConnectionStatus').text if root.find(
+                                    'ConnectionStatus') is not None else 'Unknown',
+                                'wifi_connection_status': root.find('WifiConnectionStatus').text if root.find(
+                                    'WifiConnectionStatus') is not None else 'Unknown',
+                                'signal_strength': root.find('SignalStrength').text if root.find(
+                                    'SignalStrength') is not None else 'Unknown',
+                                'signal_icon': root.find('SignalIcon').text if root.find(
+                                    'SignalIcon') is not None else 'Unknown',
+                                'current_network_type': root.find('CurrentNetworkType').text if root.find(
+                                    'CurrentNetworkType') is not None else 'Unknown',
+                                'current_service_domain': root.find('CurrentServiceDomain').text if root.find(
+                                    'CurrentServiceDomain') is not None else 'Unknown',
+                                'roaming_status': root.find('RoamingStatus').text if root.find(
+                                    'RoamingStatus') is not None else 'Unknown',
+                                'battery_status': root.find('BatteryStatus').text if root.find(
+                                    'BatteryStatus') is not None else 'Unknown',
+                                'battery_level': root.find('BatteryLevel').text if root.find(
+                                    'BatteryLevel') is not None else 'Unknown',
+                                'sim_status': root.find('SimStatus').text if root.find(
+                                    'SimStatus') is not None else 'Unknown',
+                                'wan_ip_address': root.find('WanIPAddress').text if root.find(
+                                    'WanIPAddress') is not None else 'Unknown',
+                                'primary_dns': root.find('PrimaryDns').text if root.find(
+                                    'PrimaryDns') is not None else 'Unknown',
+                                'secondary_dns': root.find('SecondaryDns').text if root.find(
+                                    'SecondaryDns') is not None else 'Unknown',
+                                'current_wan_state': root.find('CurrentWanState').text if root.find(
+                                    'CurrentWanState') is not None else 'Unknown',
+                                'current_wifi_user': root.find('CurrentWifiUser').text if root.find(
+                                    'CurrentWifiUser') is not None else 'Unknown',
+                                'total_wifi_user': root.find('TotalWifiUser').text if root.find(
+                                    'TotalWifiUser') is not None else 'Unknown',
+                                'current_download_rate': root.find('CurrentDownloadRate').text if root.find(
+                                    'CurrentDownloadRate') is not None else 'Unknown',
+                                'current_upload_rate': root.find('CurrentUploadRate').text if root.find(
+                                    'CurrentUploadRate') is not None else 'Unknown',
+                                'current_download_rate_display': root.find(
+                                    'CurrentDownloadRateDisplay').text if root.find(
+                                    'CurrentDownloadRateDisplay') is not None else 'Unknown',
+                                'current_upload_rate_display': root.find('CurrentUploadRateDisplay').text if root.find(
+                                    'CurrentUploadRateDisplay') is not None else 'Unknown',
+                                'total_download': root.find('TotalDownload').text if root.find(
+                                    'TotalDownload') is not None else 'Unknown',
+                                'total_upload': root.find('TotalUpload').text if root.find(
+                                    'TotalUpload') is not None else 'Unknown',
+                                'total_connected_time': root.find('TotalConnectedTime').text if root.find(
+                                    'TotalConnectedTime') is not None else 'Unknown',
+                                'service_status': root.find('ServiceStatus').text if root.find(
+                                    'ServiceStatus') is not None else 'Unknown',
+                                'sim_lock_status': root.find('SimLockStatus').text if root.find(
+                                    'SimLockStatus') is not None else 'Unknown',
+                                'wan_policy': root.find('WanPolicy').text if root.find(
+                                    'WanPolicy') is not None else 'Unknown',
+                                'classify': root.find('Classify').text if root.find(
+                                    'Classify') is not None else 'Unknown',
+                                'fly_mode': root.find('flymode').text if root.find(
+                                    'flymode') is not None else 'Unknown',
+                                'cell_roam': root.find('cellroam').text if root.find(
+                                    'cellroam') is not None else 'Unknown'
+                            }
+
+                            logger.info(f"HiLink connection status: {status_info}")
+                            return status_info
+
+                except Exception as e:
+                    logger.error(f"Error getting connection status: {e}")
+                    return {}
+
+        except Exception as e:
+            logger.error(f"Error getting HiLink info: {e}")
+            return {}
