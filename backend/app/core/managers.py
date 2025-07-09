@@ -226,8 +226,8 @@ async def perform_device_rotation(device_id: str, method: str = None) -> tuple[b
 
         logger.info(f"Found device UUID: {device_uuid} for device name: {device_id}")
 
-        # Используем EnhancedRotationManager для ротации с UUID
-        success, result = await rotation_manager.rotate_device_ip(str(device_uuid))
+        # ИСПРАВЛЕНИЕ: Передаем force_method правильно
+        success, result = await rotation_manager.rotate_device_ip(str(device_uuid), force_method=method)
 
         if success:
             logger.info(f"✅ Rotation successful for {device_id} (UUID: {device_uuid}): {result}")
@@ -778,14 +778,22 @@ async def perform_device_rotation_by_uuid(device_uuid: str, method: str = None) 
     Returns:
         tuple[bool, str]: (успех, сообщение/новый_IP)
     """
-    try:
-        # Получаем имя устройства по UUID
-        device_name = await get_device_name_by_uuid(device_uuid)
-        if not device_name:
-            return False, f"Device not found by UUID: {device_uuid}"
+    rotation_manager = get_enhanced_rotation_manager()
+    if not rotation_manager:
+        return False, "Enhanced rotation manager not available"
 
-        # Выполняем ротацию через имя устройства
-        return await perform_device_rotation(device_name, method)
+    try:
+        logger.info(f"Performing rotation for device UUID: {device_uuid} with method: {method}")
+
+        # ИСПРАВЛЕНИЕ: Передаем force_method правильно
+        success, result = await rotation_manager.rotate_device_ip(device_uuid, force_method=method)
+
+        if success:
+            logger.info(f"✅ Rotation successful for UUID {device_uuid}: {result}")
+            return True, result
+        else:
+            logger.error(f"❌ Rotation failed for UUID {device_uuid}: {result}")
+            return False, result
 
     except Exception as e:
         logger.error(f"Error in device rotation by UUID: {e}")
