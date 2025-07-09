@@ -245,7 +245,11 @@ async def debug_devices(current_user=Depends(get_admin_user)):
 async def admin_get_devices_combined():
     """Список всех устройств (Android и USB модемы)"""
     try:
-        from ..core.managers import get_all_devices_combined
+        from ..core.managers import get_all_devices_combined, get_device_manager, get_modem_manager
+
+        # Получаем менеджеры
+        device_manager = get_device_manager()
+        modem_manager = get_modem_manager()
 
         all_devices = await get_all_devices_combined()
 
@@ -254,8 +258,24 @@ async def admin_get_devices_combined():
             # Определяем тип устройства
             device_type = device_info.get('type', 'unknown')
 
-            # Получаем внешний IP
+            # Получаем внешний IP с принудительным обновлением
             external_ip = device_info.get('external_ip', 'Not connected')
+
+            # Принудительно обновляем внешний IP если устройство онлайн
+            if device_info.get('status') == 'online':
+                try:
+                    if device_type == 'android' and device_manager:
+                        fresh_ip = await device_manager.get_device_external_ip(device_id)
+                        if fresh_ip:
+                            external_ip = fresh_ip
+                            device_info['external_ip'] = fresh_ip
+                    elif device_type == 'usb_modem' and modem_manager:
+                        fresh_ip = await modem_manager.force_refresh_external_ip(device_id)
+                        if fresh_ip:
+                            external_ip = fresh_ip
+                            device_info['external_ip'] = fresh_ip
+                except Exception as e:
+                    logger.warning(f"Could not refresh external IP for {device_id}: {e}")
 
             # Базовые данные для всех типов устройств
             device_data = {
@@ -724,7 +744,11 @@ async def get_devices_with_uuid(current_user=Depends(get_admin_user)):
 async def admin_get_device_by_id_combined(device_id: str):
     """Получение информации о конкретном устройстве (Android или USB модем)"""
     try:
-        from ..core.managers import get_device_by_id_combined
+        from ..core.managers import get_device_by_id_combined, get_device_manager, get_modem_manager
+
+        # Получаем менеджеры
+        device_manager = get_device_manager()
+        modem_manager = get_modem_manager()
 
         device_info = await get_device_by_id_combined(device_id)
 
@@ -736,6 +760,22 @@ async def admin_get_device_by_id_combined(device_id: str):
 
         device_type = device_info.get('type', 'unknown')
         external_ip = device_info.get('external_ip', 'Not connected')
+
+        # Принудительно обновляем внешний IP если устройство онлайн
+        if device_info.get('status') == 'online':
+            try:
+                if device_type == 'android' and device_manager:
+                    fresh_ip = await device_manager.get_device_external_ip(device_id)
+                    if fresh_ip:
+                        external_ip = fresh_ip
+                        device_info['external_ip'] = fresh_ip
+                elif device_type == 'usb_modem' and modem_manager:
+                    fresh_ip = await modem_manager.force_refresh_external_ip(device_id)
+                    if fresh_ip:
+                        external_ip = fresh_ip
+                        device_info['external_ip'] = fresh_ip
+            except Exception as e:
+                logger.warning(f"Could not refresh external IP for {device_id}: {e}")
 
         # Базовые данные устройства
         device_data = {
@@ -786,7 +826,7 @@ async def admin_get_device_by_id_combined(device_id: str):
                 'routing_capable': device_info.get('routing_capable', True)
             })
 
-        logger.info(f"Returning device data: {device_data}")
+        logger.info(f"Returning device data with external IP: {external_ip}")
         return device_data
 
     except HTTPException:

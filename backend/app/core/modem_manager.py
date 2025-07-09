@@ -448,10 +448,6 @@ class ModemManager:
             return None
 
         try:
-            # Если IP уже есть в кэше, возвращаем его
-            if modem.get('external_ip'):
-                return modem['external_ip']
-
             # Получаем внешний IP через интерфейс
             interface_ip = modem.get('interface_ip')
             if interface_ip:
@@ -459,12 +455,60 @@ class ModemManager:
                 if external_ip:
                     # Обновляем кэш
                     modem['external_ip'] = external_ip
+                    logger.debug(f"Updated external IP for {modem_id}: {external_ip}")
                     return external_ip
+
+            # Альтернативный способ через интерфейс напрямую
+            interface_name = modem.get('interface')
+            if interface_name:
+                external_ip = await self.get_external_ip_via_interface_name(interface_name)
+                if external_ip:
+                    # Обновляем кэш
+                    modem['external_ip'] = external_ip
+                    logger.debug(f"Updated external IP for {modem_id} via interface: {external_ip}")
+                    return external_ip
+
+            logger.warning(f"Could not get external IP for modem {modem_id}")
+            return None
 
         except Exception as e:
             logger.error(f"Error getting external IP for modem {modem_id}: {e}")
+            return None
 
-        return None
+    async def get_external_ip_via_interface_name(self, interface_name: str) -> Optional[str]:
+        """Получение внешнего IP через имя интерфейса"""
+        try:
+            # Получаем внешний IP через curl с привязкой к интерфейсу
+            result = await asyncio.create_subprocess_exec(
+                'curl', '--interface', interface_name, '-s', '--connect-timeout', '10',
+                'https://httpbin.org/ip',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await result.communicate()
+
+            if result.returncode == 0:
+                try:
+                    import json
+                    response = json.loads(stdout.decode())
+                    external_ip = response.get('origin', '').split(',')[0].strip()
+                    if external_ip:
+                        logger.debug(f"Got external IP via interface {interface_name}: {external_ip}")
+                        return external_ip
+                except json.JSONDecodeError:
+                    # Пробуем найти IP в тексте
+                    ip_match = re.search(r'(\d+\.\d+\.\d+\.\d+)', stdout.decode())
+                    if ip_match:
+                        external_ip = ip_match.group(1)
+                        logger.debug(f"Got external IP via interface {interface_name}: {external_ip}")
+                        return external_ip
+
+            logger.debug(f"Could not get external IP via interface {interface_name}: {stderr.decode()}")
+            return None
+
+        except Exception as e:
+            logger.debug(f"Error getting external IP via interface {interface_name}: {e}")
+            return None
 
     async def update_device_status(self, modem_id: str, status: str):
         """Обновление статуса модема в памяти и БД"""
@@ -728,10 +772,13 @@ class ModemManager:
                 if modem.get('status') != new_status:
                     await self.update_device_status(modem_id, new_status)
 
-            # Обновляем внешний IP
-            external_ip = await self.get_external_ip_via_interface(modem.get('interface_ip'))
+            # Принудительно обновляем внешний IP (сбрасываем кэш)
+            modem.pop('external_ip', None)  # Удаляем из кэша
+            external_ip = await self.get_device_external_ip(modem_id)
             if external_ip:
                 modem['external_ip'] = external_ip
+                # Обновляем в БД тоже
+                await self.update_device_external_ip_in_db(modem_id, external_ip)
 
             modem['last_seen'] = datetime.now().isoformat()
             return True
@@ -739,6 +786,22 @@ class ModemManager:
         except Exception as e:
             logger.error(f"Error refreshing modem status: {e}")
             return False
+
+    async def update_device_external_ip_in_db(self, modem_id: str, external_ip: str):
+        """Обновление внешнего IP модема в базе данных"""
+        try:
+            async with AsyncSessionLocal() as db:
+                stmt = update(ProxyDevice).where(
+                    ProxyDevice.name == modem_id
+                ).values(
+                    current_external_ip=external_ip,
+                    updated_at=datetime.now()
+                )
+                await db.execute(stmt)
+                await db.commit()
+                logger.debug(f"Updated external IP in DB for {modem_id}: {external_ip}")
+        except Exception as e:
+            logger.error(f"Error updating external IP in DB: {e}")
 
     async def get_modem_stats(self, modem_id: str) -> Optional[Dict[str, Any]]:
         """Получение статистики модема"""
@@ -784,3 +847,29 @@ class ModemManager:
     async def discover_network_modems(self) -> Dict[str, dict]:
         """Заглушка для совместимости - используем только USB модемы Huawei"""
         return {}
+
+    async def force_refresh_external_ip(self, modem_id: str) -> Optional[str]:
+        """Принудительное обновление внешнего IP модема"""
+        modem = self.modems.get(modem_id)
+        if not modem:
+            return None
+
+        try:
+            # Очищаем кэш
+            modem.pop('external_ip', None)
+
+            # Получаем свежий IP
+            external_ip = await self.get_device_external_ip(modem_id)
+
+            if external_ip:
+                # Обновляем в БД
+                await self.update_device_external_ip_in_db(modem_id, external_ip)
+                logger.info(f"Force refreshed external IP for {modem_id}: {external_ip}")
+                return external_ip
+            else:
+                logger.warning(f"Could not refresh external IP for {modem_id}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Error force refreshing external IP for {modem_id}: {e}")
+            return None

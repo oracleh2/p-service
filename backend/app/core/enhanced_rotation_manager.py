@@ -381,23 +381,53 @@ class EnhancedRotationManager:
         except Exception as e:
             return False, f"AT commands error: {str(e)}"
 
-    async def _verify_ip_change(self, device: ProxyDevice, old_ip: str, max_attempts: int = 5) -> Optional[str]:
+    async def _verify_ip_change(self, device: ProxyDevice, old_ip: str, max_attempts: int = 3) -> Optional[str]:
         """Проверка изменения IP адреса устройства"""
         for attempt in range(max_attempts):
             try:
-                # Используем UUID для получения нового IP
-                new_ip = await self._get_device_external_ip_by_uuid(str(device.id))
+                # Принудительно обновляем IP из менеджера
+                new_ip = await self._force_refresh_device_external_ip(device)
 
                 if new_ip and new_ip != old_ip:
+                    logger.info(f"IP changed from {old_ip} to {new_ip} for device {device.name}")
                     return new_ip
 
                 if attempt < max_attempts - 1:  # Не ждем после последней попытки
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(3)  # Сокращено с 5 до 3 секунд
 
             except Exception as e:
                 logger.warning(f"IP check attempt {attempt + 1} failed: {e}")
 
+        logger.warning(f"IP didn't change after {max_attempts} attempts for device {device.name}")
         return None
+
+    async def _force_refresh_device_external_ip(self, device: ProxyDevice) -> Optional[str]:
+        """Принудительное обновление внешнего IP устройства"""
+        try:
+            device_name = device.name
+            device_type = device.device_type
+
+            # Получаем внешний IP в зависимости от типа устройства
+            if device_type == 'android':
+                if self.device_manager:
+                    # Для Android используем device_manager, но принудительно обновляем
+                    android_device = await self.device_manager.get_device_by_id(device_name)
+                    if android_device:
+                        # Очищаем кэш если есть
+                        android_device.pop('external_ip', None)
+                        return await self.device_manager.get_device_external_ip(device_name)
+
+            elif device_type == 'usb_modem':
+                if hasattr(self, 'modem_manager') and self.modem_manager:
+                    # Для USB модемов используем force_refresh_external_ip
+                    return await self.modem_manager.force_refresh_external_ip(device_name)
+
+            # Fallback - используем UUID
+            return await self._get_device_external_ip_by_uuid(str(device.id))
+
+        except Exception as e:
+            logger.error(f"Error force refreshing external IP for device {device.name}: {e}")
+            return None
 
     async def _get_device_external_ip(self, device: ProxyDevice) -> Optional[str]:
         """Получение внешнего IP адреса устройства"""
@@ -445,12 +475,12 @@ class EnhancedRotationManager:
     def _get_stabilization_delay(self, device_type: str) -> int:
         """Получение времени стабилизации в зависимости от типа устройства"""
         delays = {
-            'android': 12,
-            'usb_modem': 20,
-            'raspberry_pi': 25,
-            'network_device': 8
+            'android': 8,     # Сокращено с 12 до 8 секунд
+            'usb_modem': 10,  # Сокращено с 20 до 10 секунд
+            'raspberry_pi': 15,  # Сокращено с 25 до 15 секунд
+            'network_device': 5  # Сокращено с 8 до 5 секунд
         }
-        return delays.get(device_type, 15)
+        return delays.get(device_type, 10)  # По умолчанию 10 секунд вместо 15
 
     def _get_fallback_method(self, device_type: str) -> str:
         """Получение запасного метода ротации"""
@@ -853,14 +883,11 @@ class EnhancedRotationManager:
                                     # Пробуем отправить запрос на перезагрузку
                                     # Это может потребовать авторизации, пока используем простую проверку
                                     async with session.get(f"http://{web_interface}",
-                                                           timeout=aiohttp.ClientTimeout(total=5)) as response:
+                                                           timeout=aiohttp.ClientTimeout(total=3)) as response:
                                         if response.status == 200:
                                             logger.info(f"Web interface {web_interface} is accessible")
 
-                                            # Симулируем перезагрузку через интерфейс
-                                            await asyncio.sleep(2)
-
-                                            # Перезапускаем интерфейс как альтернативу
+                                            # Перезапускаем интерфейс как альтернативу (сокращаем время ожидания)
                                             result = await asyncio.create_subprocess_exec(
                                                 'sudo', 'ip', 'link', 'set', interface_name, 'down',
                                                 stdout=asyncio.subprocess.PIPE,
@@ -868,7 +895,7 @@ class EnhancedRotationManager:
                                             )
                                             await result.communicate()
 
-                                            await asyncio.sleep(3)
+                                            await asyncio.sleep(2)  # Сокращено с 3 до 2 секунд
 
                                             result = await asyncio.create_subprocess_exec(
                                                 'sudo', 'ip', 'link', 'set', interface_name, 'up',
@@ -877,7 +904,7 @@ class EnhancedRotationManager:
                                             )
                                             await result.communicate()
 
-                                            await asyncio.sleep(10)
+                                            await asyncio.sleep(5)  # Сокращено с 10 до 5 секунд
 
                                             return True, "Web interface rotation completed successfully"
 
@@ -910,7 +937,7 @@ class EnhancedRotationManager:
                 )
                 await result.communicate()
 
-                await asyncio.sleep(5)
+                await asyncio.sleep(2)  # Сокращено с 5 до 2 секунд
 
                 # Включение интерфейса
                 result = await asyncio.create_subprocess_exec(
@@ -920,7 +947,7 @@ class EnhancedRotationManager:
                 )
                 await result.communicate()
 
-                await asyncio.sleep(15)
+                await asyncio.sleep(8)  # Сокращено с 15 до 8 секунд
 
                 return True, "Interface restart completed successfully"
 
@@ -948,7 +975,7 @@ class EnhancedRotationManager:
                 )
                 await result.communicate()
 
-                await asyncio.sleep(2)
+                await asyncio.sleep(1)  # Сокращено с 2 до 1 секунды
 
                 # Получение нового IP
                 result = await asyncio.create_subprocess_exec(
@@ -958,7 +985,7 @@ class EnhancedRotationManager:
                 )
                 await result.communicate()
 
-                await asyncio.sleep(10)
+                await asyncio.sleep(5)  # Сокращено с 10 до 5 секунд
 
                 return True, "DHCP renew completed successfully"
 
@@ -1036,13 +1063,16 @@ class EnhancedRotationManager:
 
             # Получаем внешний IP из соответствующего менеджера
             if device_type == 'android':
-                device_manager = self.device_manager
-                if device_manager:
-                    return await device_manager.get_device_external_ip(device_name)
+                if self.device_manager:
+                    # Очищаем кэш и получаем свежий IP
+                    android_device = await self.device_manager.get_device_by_id(device_name)
+                    if android_device:
+                        android_device.pop('external_ip', None)
+                    return await self.device_manager.get_device_external_ip(device_name)
+
             elif device_type == 'usb_modem':
-                modem_manager = getattr(self, 'modem_manager', None)
-                if modem_manager:
-                    return await modem_manager.get_device_external_ip(device_name)
+                if hasattr(self, 'modem_manager') and self.modem_manager:
+                    return await self.modem_manager.force_refresh_external_ip(device_name)
 
             return None
 
