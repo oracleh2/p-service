@@ -333,7 +333,7 @@ class ModemManager:
                         status=modem_info.get('status', 'offline'),
                         current_external_ip=external_ip,
                         operator=modem_info.get('operator', 'Unknown'),
-                        last_heartbeat=datetime.now()
+                        last_heartbeat=datetime.now()  # Убираем timezone.utc
                     )
                     await db.execute(stmt)
                     logger.info(f"Updated Huawei modem {modem_id} in database")
@@ -472,7 +472,7 @@ class ModemManager:
             # Обновляем в памяти
             if modem_id in self.modems:
                 self.modems[modem_id]['status'] = status
-                self.modems[modem_id]['last_seen'] = datetime.now(timezone.utc).isoformat()
+                self.modems[modem_id]['last_seen'] = datetime.now().isoformat()  # Убираем timezone.utc
 
             # Обновляем в БД
             async with AsyncSessionLocal() as db:
@@ -480,7 +480,7 @@ class ModemManager:
                     ProxyDevice.name == modem_id
                 ).values(
                     status=status,
-                    last_heartbeat=datetime.now()
+                    last_heartbeat=datetime.now()  # Убираем timezone.utc
                 )
                 await db.execute(stmt)
                 await db.commit()

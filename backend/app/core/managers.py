@@ -460,7 +460,7 @@ async def test_device_rotation(device_id: str, method: str) -> dict:
             "new_ip_after": new_ip,
             "ip_changed": ip_changed,
             "result_message": result if success else f"Test rotation failed: {result}",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now().isoformat(),  # Убираем timezone.utc
             "recommendation": "success" if success and ip_changed else "try_different_method"
         }
 
@@ -558,7 +558,7 @@ async def get_devices_summary_combined() -> Dict[str, Any]:
             "total_devices": 0,
             "total_online": 0,
             "total_offline": 0,
-            "last_update": datetime.now().isoformat()
+            "last_update": datetime.now().isoformat()  # Убираем timezone.utc
         }
 
         # Статистика Android устройств
@@ -718,7 +718,7 @@ async def sync_device_managers_with_database():
                     # Обновляем статус и внешний IP
                     update_data = {
                         'status': device_info.get('status', 'unknown'),
-                        'last_heartbeat': datetime.now(timezone.utc)
+                        'last_heartbeat': datetime.now()  # Убираем timezone.utc
                     }
 
                     # Обновляем внешний IP если есть

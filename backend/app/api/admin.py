@@ -920,7 +920,7 @@ async def get_system_stats(
         devices_summary = await get_devices_summary_combined()
 
         # Статистика запросов за сегодня
-        today = datetime.now(timezone.utc).date()
+        today = datetime.now().date()  # Убираем timezone.utc
 
         # Общее количество запросов
         stmt = select(func.count(RequestLog.id)).where(

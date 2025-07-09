@@ -525,11 +525,15 @@ class EnhancedRotationManager:
         try:
             async with AsyncSessionLocal() as db:
                 device_uuid = uuid.UUID(device_id)
+
+                # Используем timezone-naive datetime для совместимости с PostgreSQL
+                now = datetime.now()  # Убираем timezone.utc
+
                 stmt = update(ProxyDevice).where(
                     ProxyDevice.id == device_uuid
                 ).values(
                     current_external_ip=new_ip,
-                    updated_at=datetime.now(timezone.utc)
+                    updated_at=now
                 )
                 await db.execute(stmt)
                 await db.commit()
@@ -542,11 +546,14 @@ class EnhancedRotationManager:
             async with AsyncSessionLocal() as db:
                 device_uuid = uuid.UUID(device_id)
 
+                # Используем timezone-naive datetime для совместимости с PostgreSQL
+                now = datetime.now()  # Убираем timezone.utc
+
                 ip_history = IpHistory(
                     device_id=device_uuid,
                     ip_address=ip_address,
-                    first_seen=datetime.now(timezone.utc),
-                    last_seen=datetime.now(timezone.utc),
+                    first_seen=now,
+                    last_seen=now,
                     total_requests=1
                 )
                 db.add(ip_history)
@@ -560,11 +567,14 @@ class EnhancedRotationManager:
             async with AsyncSessionLocal() as db:
                 device_uuid = uuid.UUID(device_id)
 
+                # Используем timezone-naive datetime для совместимости с PostgreSQL
+                now = datetime.now()  # Убираем timezone.utc
+
                 stmt = update(ProxyDevice).where(
                     ProxyDevice.id == device_uuid
                 ).values(
-                    last_ip_rotation=datetime.now(timezone.utc),
-                    updated_at=datetime.now(timezone.utc)
+                    last_ip_rotation=now,
+                    updated_at=now
                 )
                 await db.execute(stmt)
                 await db.commit()
@@ -1039,3 +1049,5 @@ class EnhancedRotationManager:
         except Exception as e:
             logger.error(f"Error getting device external IP by UUID: {e}")
             return None
+
+

@@ -404,7 +404,7 @@ class DeviceManager:
                         status=device_info.get('status', 'offline'),
                         current_external_ip=external_ip,
                         operator=device_info.get('operator', 'Unknown'),
-                        last_heartbeat=datetime.now()
+                        last_heartbeat=datetime.now()  # Убираем timezone.utc
                     )
                     await db.execute(stmt)
                     logger.info(f"Updated Android device {device_id} in database")
@@ -706,7 +706,7 @@ class DeviceManager:
             # Обновляем в памяти
             if device_id in self.devices:
                 self.devices[device_id]['status'] = status
-                self.devices[device_id]['last_seen'] = datetime.now(timezone.utc).isoformat()
+                self.devices[device_id]['last_seen'] = datetime.now().isoformat()  # Убираем timezone.utc
 
             # Обновляем в БД
             async with AsyncSessionLocal() as db:
@@ -714,7 +714,7 @@ class DeviceManager:
                     ProxyDevice.name == device_id
                 ).values(
                     status=status,
-                    last_heartbeat=datetime.now()
+                    last_heartbeat=datetime.now()  # Убираем timezone.utc
                 )
                 await db.execute(stmt)
                 await db.commit()
