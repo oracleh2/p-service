@@ -202,8 +202,10 @@ for modem_id in "${FOUND_MODEMS[@]}"; do
         # Способ 1: Стандартный usb_modeswitch
         echo "    Способ 1: Стандартное переключение..."
         if [ -f "/usr/share/usb_modeswitch/$modem_id" ]; then
+            echo "sudo usb_modeswitch -v \"$vendor\" -p \"$product\" -c \"/usr/share/usb_modeswitch/$modem_id\""
             sudo usb_modeswitch -v "$vendor" -p "$product" -c "/usr/share/usb_modeswitch/$modem_id" 2>/dev/null
         else
+            echo "sudo usb_modeswitch -v \"$vendor\" -p \"$product\" -M '55534243123456780000000000000a11062000000000000100000000000000'"
             sudo usb_modeswitch -v "$vendor" -p "$product" -M '55534243123456780000000000000a11062000000000000100000000000000' 2>/dev/null
         fi
         sleep 5
