@@ -360,6 +360,20 @@ async def _get_modem_rotation_methods(device_id: str, modem_info: dict) -> dict:
             'description': 'Запрос нового IP через DHCP',
             'recommended': False,
             'risk_level': 'low'
+        },
+        {
+            'method': 'at_commands',
+            'name': 'AT команды',
+            'description': 'Ротация через AT команды (требует доступ к serial порту)',
+            'recommended': False,
+            'risk_level': 'high'
+        },
+        {
+            'method': 'usb_reset',
+            'name': 'USB сброс',
+            'description': 'Физический сброс USB модема',
+            'recommended': False,
+            'risk_level': 'high'
         }
     ]
 

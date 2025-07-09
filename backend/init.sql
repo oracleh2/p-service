@@ -27,7 +27,14 @@ CREATE TABLE IF NOT EXISTS proxy_devices (
 CREATE TABLE IF NOT EXISTS rotation_config (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     device_id UUID NOT NULL REFERENCES proxy_devices(id) ON DELETE CASCADE,
-    rotation_method VARCHAR(50) NOT NULL CHECK (rotation_method IN ('airplane_mode', 'data_toggle', 'api_call', 'network_reset')),
+--     rotation_method VARCHAR(50) NOT NULL CHECK (rotation_method IN ('airplane_mode', 'data_toggle', 'api_call', 'network_reset')),
+    -- Расширенный список методов ротации для всех типов устройств
+    rotation_method VARCHAR(50) NOT NULL CHECK (rotation_method IN (
+        'airplane_mode', 'data_toggle', 'api_call', 'network_reset',
+        'at_commands', 'web_interface', 'interface_restart', 'dhcp_renew',
+        'usb_reset', 'ppp_restart', 'gpio_reset', 'usb_reconnect',
+        'network_interface_reset', 'serial_reconnect'
+    )),
     rotation_interval INTEGER NOT NULL CHECK (rotation_interval > 0),
     auto_rotation BOOLEAN DEFAULT TRUE,
     rotation_url VARCHAR(500),

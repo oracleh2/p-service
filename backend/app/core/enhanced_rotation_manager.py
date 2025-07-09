@@ -17,6 +17,7 @@ import structlog
 
 from ..models.database import AsyncSessionLocal
 from ..models.base import ProxyDevice, RotationConfig, IpHistory
+
 # from ..utils.device_utils import detect_device_capabilities, get_device_interfaces
 
 logger = structlog.get_logger()
@@ -40,21 +41,23 @@ class EnhancedRotationManager:
                 'network_interface_reset'
             ],
             'usb_modem': [
-                'at_commands',
-                'usb_reset',
+                'web_interface',  # Основной метод
                 'interface_restart',
+                'dhcp_renew',
+                'usb_reset',
+                'at_commands',  # Оставляем как дополнительный
                 'serial_reconnect'
             ],
             'raspberry_pi': [
                 'ppp_restart',
-                'modem_reset',
-                'interface_restart',
-                'gpio_reset'
+                'gpio_reset',
+                'usb_reset',
+                'interface_restart'
             ],
             'network_device': [
                 'interface_restart',
                 'dhcp_renew',
-                'route_refresh'
+                'network_reset'
             ]
         }
 
@@ -453,8 +456,8 @@ class EnhancedRotationManager:
         """Получение запасного метода ротации"""
         fallbacks = {
             'android': 'airplane_mode',
-            'usb_modem': 'interface_restart',
-            'raspberry_pi': 'modem_reset',
+            'usb_modem': 'interface_restart',  # Изменено с 'at_commands' на 'interface_restart'
+            'raspberry_pi': 'gpio_reset',
             'network_device': 'dhcp_renew'
         }
         return fallbacks.get(device_type, 'interface_restart')
@@ -496,7 +499,7 @@ class EnhancedRotationManager:
         """Создание конфигурации ротации по умолчанию"""
         default_methods = {
             'android': 'data_toggle',
-            'usb_modem': 'at_commands',
+            'usb_modem': 'web_interface',  # Изменено с 'at_commands' на 'web_interface'
             'raspberry_pi': 'ppp_restart',
             'network_device': 'interface_restart'
         }
