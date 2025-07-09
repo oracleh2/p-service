@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import telnetlib
 import uuid
 import aiohttp
 import subprocess
@@ -319,6 +320,8 @@ class EnhancedRotationManager:
         try:
             if method == 'web_interface':
                 return await self._usb_modem_web_interface(device)
+            elif method == 'telnet_rotation':
+                return await self._usb_modem_telnet_rotation(device)
             elif method == 'hilink_reboot':
                 return await self._usb_modem_hilink_reboot(device)
             elif method == 'hilink_dial':
@@ -1587,3 +1590,244 @@ class EnhancedRotationManager:
         except Exception as e:
             logger.error(f"Error getting HiLink info: {e}")
             return {}
+
+    async def _usb_modem_telnet_rotation(self, device: ProxyDevice) -> Tuple[bool, str]:
+        """
+        Ротация IP через Telnet к модему
+        Подключаемся к внутреннему интерфейсу модема и выполняем dhclient
+        """
+        try:
+            device_name = device.name
+
+            # Получаем IP веб-интерфейса модема
+            if 'huawei_' in device_name:
+                interface_name = device_name.replace('huawei_', '')
+
+                import netifaces
+                if interface_name in netifaces.interfaces():
+                    addrs = netifaces.ifaddresses(interface_name)
+                    if netifaces.AF_INET in addrs:
+                        interface_ip = addrs[netifaces.AF_INET][0]['addr']
+
+                        # Извлекаем номер подсети
+                        parts = interface_ip.split('.')
+                        if len(parts) == 4 and parts[0] == '192' and parts[1] == '168':
+                            subnet_number = parts[2]
+                            modem_ip = f"192.168.{subnet_number}.1"
+
+                            logger.info(f"Attempting telnet rotation to modem at {modem_ip}")
+
+                            # Пробуем разные методы telnet ротации
+                            for method in ['dhclient', 'network_restart', 'interface_restart']:
+                                success, result = await self._execute_telnet_rotation(modem_ip, method)
+                                if success:
+                                    return True, f"Telnet rotation succeeded with method: {method}"
+                                else:
+                                    logger.warning(f"Telnet method {method} failed: {result}")
+
+                            return False, "All telnet rotation methods failed"
+
+            return False, "Could not determine modem IP for telnet rotation"
+
+        except Exception as e:
+            return False, f"Telnet rotation error: {str(e)}"
+
+    async def _execute_telnet_rotation(self, modem_ip: str, method: str) -> Tuple[bool, str]:
+        """
+        Выполнение команд ротации через Telnet
+        """
+        try:
+            import asyncio
+
+            # Выполняем в отдельном потоке чтобы не блокировать async
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                self._sync_telnet_rotation,
+                modem_ip,
+                method
+            )
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Error in telnet rotation: {e}")
+            return False, f"Telnet execution error: {str(e)}"
+
+    def _sync_telnet_rotation(self, modem_ip: str, method: str) -> Tuple[bool, str]:
+        """
+        Синхронное выполнение Telnet команд
+        """
+        try:
+            # Стандартные учетные данные для Huawei модемов
+            credentials = [
+                ('admin', 'admin'),
+                ('root', 'admin'),
+                ('root', 'root'),
+                ('', ''),  # пустые
+                ('user', 'user')
+            ]
+
+            for username, password in credentials:
+                try:
+                    logger.info(f"Trying telnet with credentials: {username}:{password}")
+
+                    # Подключаемся к модему
+                    tn = telnetlib.Telnet(modem_ip, timeout=10)
+
+                    # Ждем приглашение к вводу логина
+                    try:
+                        tn.read_until(b"login:", timeout=5)
+                        tn.write(username.encode('ascii') + b"\n")
+
+                        tn.read_until(b"Password:", timeout=5)
+                        tn.write(password.encode('ascii') + b"\n")
+
+                        # Ждем командную строку
+                        response = tn.read_until(b"#", timeout=5).decode('ascii', errors='ignore')
+
+                        if "#" in response or "$" in response:
+                            logger.info(f"Successfully logged in to modem via telnet")
+
+                            # Выполняем команды ротации в зависимости от метода
+                            if method == 'dhclient':
+                                success, result = self._execute_modem_dhclient(tn)
+                            elif method == 'network_restart':
+                                success, result = self._execute_modem_network_restart(tn)
+                            elif method == 'interface_restart':
+                                success, result = self._execute_modem_interface_restart(tn)
+                            else:
+                                success, result = False, f"Unknown method: {method}"
+
+                            tn.close()
+
+                            if success:
+                                return True, f"Telnet {method} completed: {result}"
+                            else:
+                                logger.warning(f"Telnet {method} failed: {result}")
+                                continue
+
+                        else:
+                            logger.warning(f"Login failed for {username}:{password}")
+                            tn.close()
+                            continue
+
+                    except Exception as e:
+                        logger.warning(f"Telnet login error for {username}:{password}: {e}")
+                        tn.close()
+                        continue
+
+                except Exception as e:
+                    logger.warning(f"Telnet connection error: {e}")
+                    continue
+
+            return False, "All telnet credentials failed"
+
+        except Exception as e:
+            logger.error(f"Sync telnet rotation error: {e}")
+            return False, f"Telnet sync error: {str(e)}"
+
+    def _execute_modem_dhclient(self, tn: telnetlib.Telnet) -> Tuple[bool, str]:
+        """
+        Выполнение dhclient внутри модема для обновления внешнего IP
+        """
+        try:
+            commands = [
+                "dhclient -r",  # Освобождаем текущий IP
+                "sleep 3",
+                "dhclient",  # Получаем новый IP
+                "sleep 5",
+                "ifconfig"  # Проверяем результат
+            ]
+
+            results = []
+            for cmd in commands:
+                logger.info(f"Executing modem command: {cmd}")
+                tn.write(cmd.encode('ascii') + b"\n")
+
+                # Ждем выполнения команды
+                if "sleep" in cmd:
+                    time.sleep(int(cmd.split()[1]))
+                else:
+                    time.sleep(2)
+
+                # Читаем результат
+                try:
+                    response = tn.read_until(b"#", timeout=10).decode('ascii', errors='ignore')
+                    results.append(f"{cmd}: {response}")
+                except:
+                    results.append(f"{cmd}: timeout")
+
+            return True, f"DHCP renewal completed: {'; '.join(results)}"
+
+        except Exception as e:
+            return False, f"Modem dhclient error: {str(e)}"
+
+    def _execute_modem_network_restart(self, tn: telnetlib.Telnet) -> Tuple[bool, str]:
+        """
+        Перезапуск сетевых сервисов внутри модема
+        """
+        try:
+            commands = [
+                "/etc/init.d/network restart",
+                "sleep 10",
+                "ifconfig"
+            ]
+
+            results = []
+            for cmd in commands:
+                logger.info(f"Executing modem command: {cmd}")
+                tn.write(cmd.encode('ascii') + b"\n")
+
+                if "sleep" in cmd:
+                    time.sleep(int(cmd.split()[1]))
+                else:
+                    time.sleep(3)
+
+                try:
+                    response = tn.read_until(b"#", timeout=15).decode('ascii', errors='ignore')
+                    results.append(f"{cmd}: {response}")
+                except:
+                    results.append(f"{cmd}: timeout")
+
+            return True, f"Network restart completed: {'; '.join(results)}"
+
+        except Exception as e:
+            return False, f"Modem network restart error: {str(e)}"
+
+    def _execute_modem_interface_restart(self, tn: telnetlib.Telnet) -> Tuple[bool, str]:
+        """
+        Перезапуск WAN интерфейса внутри модема
+        """
+        try:
+            commands = [
+                "ifconfig wan0 down",
+                "sleep 3",
+                "ifconfig wan0 up",
+                "sleep 5",
+                "dhclient wan0",
+                "sleep 10",
+                "ifconfig wan0"
+            ]
+
+            results = []
+            for cmd in commands:
+                logger.info(f"Executing modem command: {cmd}")
+                tn.write(cmd.encode('ascii') + b"\n")
+
+                if "sleep" in cmd:
+                    time.sleep(int(cmd.split()[1]))
+                else:
+                    time.sleep(2)
+
+                try:
+                    response = tn.read_until(b"#", timeout=10).decode('ascii', errors='ignore')
+                    results.append(f"{cmd}: {response}")
+                except:
+                    results.append(f"{cmd}: timeout")
+
+            return True, f"Interface restart completed: {'; '.join(results)}"
+
+        except Exception as e:
+            return False, f"Modem interface restart error: {str(e)}"
+

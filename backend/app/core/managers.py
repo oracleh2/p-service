@@ -338,11 +338,21 @@ async def _get_android_rotation_methods(device_id: str, device_info: dict) -> di
 
 
 async def _get_modem_rotation_methods(device_id: str, modem_info: dict) -> dict:
-    """Получение методов ротации для USB модема с пояснениями о HiLink"""
+    """Получение методов ротации для USB модема с подробным описанием"""
     rotation_methods = [
         {
+            'method': 'telnet_rotation',
+            'name': 'Telnet ротация (НОВЫЙ)',
+            'description': 'Подключение к модему через Telnet и выполнение dhclient внутри модема',
+            'recommended': True,
+            'risk_level': 'medium',
+            'effectiveness': 'high',
+            'explanation': 'Подключается к внутреннему интерфейсу модема и выполняет dhclient для обновления внешнего IP',
+            'requirements': 'Telnet доступ к модему (логин/пароль)'
+        },
+        {
             'method': 'web_interface',
-            'name': 'HiLink API (Рекомендуется)',
+            'name': 'HiLink API (Стандартный)',
             'description': 'Отключение и подключение через HiLink API - изменяет внешний IP',
             'recommended': True,
             'risk_level': 'low',
@@ -385,23 +395,37 @@ async def _get_modem_rotation_methods(device_id: str, modem_info: dict) -> dict:
         "device_type": "usb_modem",
         "device_mode": "hilink",
         "available_methods": rotation_methods,
-        "current_method": modem_info.get('rotation_method', 'web_interface'),
+        "current_method": modem_info.get('rotation_method', 'telnet_rotation'),
         "device_status": modem_info.get('status', 'unknown'),
+        "telnet_info": {
+            "title": "Новый метод: Telnet ротация",
+            "description": "Подключение к внутреннему интерфейсу модема и выполнение dhclient",
+            "advantages": [
+                "Работает с внешним IP напрямую",
+                "Не зависит от HiLink API",
+                "Может использовать стандартные Linux команды",
+                "Больше контроля над процессом"
+            ],
+            "requirements": [
+                "Telnet должен быть доступен на модеме",
+                "Нужны корректные учетные данные",
+                "Модем должен поддерживать shell команды"
+            ]
+        },
         "hilink_explanation": {
             "title": "Особенности HiLink модемов",
-            "description": "HiLink модемы работают как роутеры с собственным DHCP сервером. Внешний IP находится на модеме, а не на системе.",
+            "description": "HiLink модемы работают как роутеры с собственным DHCP сервером",
             "key_points": [
                 "Система получает внутренний IP (192.168.x.x) от модема",
-                "Внешний IP управляется модемом через его веб-API",
-                "DHCP операции не влияют на внешний IP",
-                "Для изменения внешнего IP нужно использовать API модема"
+                "Внешний IP управляется модемом, а не системой",
+                "Telnet позволяет работать напрямую с модемом"
             ]
         },
         "recommendations": {
-            "best_method": "web_interface",
+            "best_method": "telnet_rotation",
             "backup_method": "hilink_reboot",
             "avoid_methods": ["dhcp_renew", "interface_restart"],
-            "explanation": "Используйте методы, которые управляют модемом через его API, а не системные сетевые команды"
+            "explanation": "Telnet ротация - наиболее эффективный метод для HiLink модемов"
         }
     }
 
