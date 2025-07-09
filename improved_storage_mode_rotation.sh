@@ -217,7 +217,8 @@ echo "⏱️  Этап 1: Переключение в Storage Mode (${STORAGE_TI
 echo "🔧 Переключение в Storage Mode..."
 
 # Используем рабочий метод из логов
-sudo usb_modeswitch -v "$vendor" -p "$product" -M '55534243123456780000000000000a11062000000000000100000000000000' 2>/dev/null
+#sudo usb_modeswitch -v "$vendor" -p "$product" -M '55534243123456780000000000000a11062000000000000100000000000000' 2>/dev/null
+sudo usb_modeswitch -v "$vendor" -p "$product" -R
 
 echo "⏳ Ожидание переключения в Storage Mode (${STORAGE_TIMEOUT}s)..."
 sleep "$STORAGE_TIMEOUT"
