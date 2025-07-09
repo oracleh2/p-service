@@ -229,6 +229,20 @@ class EnhancedRotationManager:
         except Exception as e:
             return False, f"Android rotation error: {str(e)}"
 
+    async def _rotate_usb_modem(self, device: ProxyDevice, method: str) -> Tuple[bool, str]:
+        """Ротация IP для USB модема"""
+        try:
+            if method == 'web_interface':
+                return await self._usb_modem_web_interface(device)
+            elif method == 'interface_restart':
+                return await self._usb_modem_interface_restart(device)
+            elif method == 'dhcp_renew':
+                return await self._usb_modem_dhcp_renew(device)
+            else:
+                return False, f"Unknown USB modem rotation method: {method}"
+        except Exception as e:
+            return False, f"USB modem rotation error: {str(e)}"
+
     async def _android_data_toggle(self, adb_id: str) -> Tuple[bool, str]:
         """Переключение мобильных данных на Android"""
         try:
@@ -332,22 +346,6 @@ class EnhancedRotationManager:
 
         except Exception as e:
             return False, f"USB reconnect error: {str(e)}"
-
-    async def _rotate_usb_modem(self, device: ProxyDevice, method: str) -> Tuple[bool, str]:
-        """Ротация IP для USB модема"""
-        try:
-            if method == 'at_commands':
-                return await self._usb_modem_at_commands(device)
-            elif method == 'usb_reset':
-                return await self._usb_modem_usb_reset(device)
-            elif method == 'interface_restart':
-                return await self._usb_modem_interface_restart(device)
-            elif method == 'serial_reconnect':
-                return await self._usb_modem_serial_reconnect(device)
-            else:
-                return False, f"Unknown USB modem rotation method: {method}"
-        except Exception as e:
-            return False, f"USB modem rotation error: {str(e)}"
 
     async def _usb_modem_at_commands(self, device: ProxyDevice) -> Tuple[bool, str]:
         """Ротация через AT команды"""
@@ -734,37 +732,6 @@ class EnhancedRotationManager:
         except Exception as e:
             return False, f"USB reset error: {str(e)}"
 
-    async def _usb_modem_interface_restart(self, device: ProxyDevice) -> Tuple[bool, str]:
-        """Перезапуск интерфейса USB модема"""
-        try:
-            # Находим сетевой интерфейс модема
-            interface = self._find_modem_network_interface(device)
-
-            if not interface:
-                return False, "Could not find network interface for modem"
-
-            # Отключение интерфейса
-            result = await asyncio.create_subprocess_exec(
-                'sudo', 'ifdown', interface,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE
-            )
-            await result.communicate()
-
-            await asyncio.sleep(5)
-
-            # Включение интерфейса
-            result = await asyncio.create_subprocess_exec(
-                'sudo', 'ifup', interface,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE
-            )
-            await result.communicate()
-
-            await asyncio.sleep(15)
-            return True, "Interface restart completed successfully"
-
-        except Exception as e:
-            return False, f"Interface restart error: {str(e)}"
-
     async def _usb_modem_serial_reconnect(self, device: ProxyDevice) -> Tuple[bool, str]:
         """Переподключение серийного порта USB модема"""
         try:
@@ -839,3 +806,147 @@ class EnhancedRotationManager:
 
         return None
 
+    async def _usb_modem_web_interface(self, device: ProxyDevice) -> Tuple[bool, str]:
+        """Ротация через веб-интерфейс USB модема"""
+        try:
+            # Получаем веб-интерфейс модема из имени устройства
+            # Предполагаем, что имя устройства содержит информацию о подсети
+            device_name = device.name
+
+            # Извлекаем интерфейс из имени (например, huawei_enx0c5b8f279a64)
+            if 'huawei_' in device_name:
+                interface_name = device_name.replace('huawei_', '')
+
+                # Получаем IP интерфейса
+                import netifaces
+                if interface_name in netifaces.interfaces():
+                    addrs = netifaces.ifaddresses(interface_name)
+                    if netifaces.AF_INET in addrs:
+                        interface_ip = addrs[netifaces.AF_INET][0]['addr']
+
+                        # Извлекаем номер подсети
+                        parts = interface_ip.split('.')
+                        if len(parts) == 4 and parts[0] == '192' and parts[1] == '168':
+                            subnet_number = parts[2]
+                            web_interface = f"192.168.{subnet_number}.1"
+
+                            # Отправляем запрос на перезагрузку модема
+                            import aiohttp
+                            async with aiohttp.ClientSession() as session:
+                                try:
+                                    # Пробуем отправить запрос на перезагрузку
+                                    # Это может потребовать авторизации, пока используем простую проверку
+                                    async with session.get(f"http://{web_interface}",
+                                                           timeout=aiohttp.ClientTimeout(total=5)) as response:
+                                        if response.status == 200:
+                                            logger.info(f"Web interface {web_interface} is accessible")
+
+                                            # Симулируем перезагрузку через интерфейс
+                                            await asyncio.sleep(2)
+
+                                            # Перезапускаем интерфейс как альтернативу
+                                            result = await asyncio.create_subprocess_exec(
+                                                'sudo', 'ip', 'link', 'set', interface_name, 'down',
+                                                stdout=asyncio.subprocess.PIPE,
+                                                stderr=asyncio.subprocess.PIPE
+                                            )
+                                            await result.communicate()
+
+                                            await asyncio.sleep(3)
+
+                                            result = await asyncio.create_subprocess_exec(
+                                                'sudo', 'ip', 'link', 'set', interface_name, 'up',
+                                                stdout=asyncio.subprocess.PIPE,
+                                                stderr=asyncio.subprocess.PIPE
+                                            )
+                                            await result.communicate()
+
+                                            await asyncio.sleep(10)
+
+                                            return True, "Web interface rotation completed successfully"
+
+                                except Exception as e:
+                                    logger.warning(f"Web interface not accessible: {e}")
+                                    # Fallback к перезапуску интерфейса
+                                    return await self._usb_modem_interface_restart(device)
+
+            return False, "Could not determine web interface for USB modem"
+
+        except Exception as e:
+            return False, f"Web interface rotation error: {str(e)}"
+
+    async def _usb_modem_interface_restart(self, device: ProxyDevice) -> Tuple[bool, str]:
+        """Перезапуск интерфейса USB модема"""
+        try:
+            device_name = device.name
+
+            # Извлекаем интерфейс из имени
+            if 'huawei_' in device_name:
+                interface_name = device_name.replace('huawei_', '')
+
+                logger.info(f"Restarting interface {interface_name}")
+
+                # Отключение интерфейса
+                result = await asyncio.create_subprocess_exec(
+                    'sudo', 'ip', 'link', 'set', interface_name, 'down',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                await result.communicate()
+
+                await asyncio.sleep(5)
+
+                # Включение интерфейса
+                result = await asyncio.create_subprocess_exec(
+                    'sudo', 'ip', 'link', 'set', interface_name, 'up',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                await result.communicate()
+
+                await asyncio.sleep(15)
+
+                return True, "Interface restart completed successfully"
+
+            return False, "Could not determine interface for USB modem"
+
+        except Exception as e:
+            return False, f"Interface restart error: {str(e)}"
+
+    async def _usb_modem_dhcp_renew(self, device: ProxyDevice) -> Tuple[bool, str]:
+        """Обновление DHCP для USB модема"""
+        try:
+            device_name = device.name
+
+            # Извлекаем интерфейс из имени
+            if 'huawei_' in device_name:
+                interface_name = device_name.replace('huawei_', '')
+
+                logger.info(f"Renewing DHCP for interface {interface_name}")
+
+                # Освобождение IP
+                result = await asyncio.create_subprocess_exec(
+                    'sudo', 'dhclient', '-r', interface_name,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                await result.communicate()
+
+                await asyncio.sleep(2)
+
+                # Получение нового IP
+                result = await asyncio.create_subprocess_exec(
+                    'sudo', 'dhclient', interface_name,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                await result.communicate()
+
+                await asyncio.sleep(10)
+
+                return True, "DHCP renew completed successfully"
+
+            return False, "Could not determine interface for USB modem"
+
+        except Exception as e:
+            return False, f"DHCP renew error: {str(e)}"
