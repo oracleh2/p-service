@@ -12,9 +12,9 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette import status
 
-from backend.app.api.auth import get_admin_user
-from backend.app.models.base import RequestLog, ProxyDevice
-from backend.app.models.database import get_db
+from .auth import get_admin_user
+from ..models.base import RequestLog, ProxyDevice
+from ..models.database import get_db
 
 router = APIRouter()
 logger = structlog.get_logger()
