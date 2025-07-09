@@ -3,7 +3,8 @@ import subprocess
 from typing import Optional
 
 import netifaces
-from datetime import datetime, timezone, time
+from datetime import (datetime, timezone)
+import time
 
 import structlog
 from fastapi import HTTPException, Depends, APIRouter
