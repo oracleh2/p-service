@@ -372,6 +372,33 @@ async def admin_get_device_by_id_combined(device_id: str):
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
+@router.get("/devices/{device_id}/rotation-methods")
+async def get_device_rotation_methods(
+    device_id: str,
+    current_user=Depends(get_admin_user)
+):
+    """Получение доступных методов ротации для устройства"""
+    try:
+        from ..core.managers import get_device_rotation_methods
+
+        result = await get_device_rotation_methods(device_id)
+
+        if "error" in result:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=result["error"]
+            )
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting rotation methods: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get rotation methods: {str(e)}"
+        )
 
 @router.post("/devices/sync-to-db")
 async def sync_devices_to_database(current_user=Depends(get_admin_user)):
