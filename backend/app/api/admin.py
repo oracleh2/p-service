@@ -1,30 +1,22 @@
-# backend/app/api/admin.py - ОЧИЩЕННАЯ ВЕРСИЯ БЕЗ МОКОВ
-
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, delete, func
-from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
-from datetime import datetime, timezone, timedelta
-import uuid
+# Обновленные блоки в backend/app/api/admin.py
 import subprocess
-import netifaces
-import asyncio
-import time
-import structlog
-
-# from ..main import logger
-from ..models.database import get_db, get_system_config, update_system_config
-from ..models.base import ProxyDevice, RotationConfig, SystemConfig, RequestLog, IpHistory
-from ..api.auth import get_admin_user
-from ..core.managers import get_device_manager, get_proxy_server, get_rotation_manager
-from ..config import DEFAULT_SYSTEM_CONFIG
-from pydantic import BaseModel
 from typing import Optional
 
+import netifaces
+from datetime import datetime, timezone, time
+
+import structlog
+from fastapi import HTTPException, Depends, APIRouter
+from pydantic import BaseModel
+from sqlalchemy import select, func
+from sqlalchemy.ext.asyncio import AsyncSession
+from starlette import status
+
+from backend.app.api.auth import get_admin_user
+from backend.app.models.base import RequestLog, ProxyDevice
+from backend.app.models.database import get_db
 
 router = APIRouter()
-# logger = None  # Будет импортирован из main
 logger = structlog.get_logger()
 
 class SystemConfigUpdate(BaseModel):
@@ -73,91 +65,53 @@ class RotationRequest(BaseModel):
 class TestRotationRequest(BaseModel):
     method: str
 
-
-# Системная конфигурация
-@router.get("/system/config", response_model=List[SystemConfigResponse])
-async def get_system_config_all(
-    current_user=Depends(get_admin_user),
-    db: AsyncSession = Depends(get_db)
-):
-    """Получение всех системных настроек"""
-    try:
-        stmt = select(SystemConfig).order_by(SystemConfig.key)
-        result = await db.execute(stmt)
-        configs = result.scalars().all()
-
-        return [
-            SystemConfigResponse(
-                key=config.key,
-                value=config.value,
-                description=config.description,
-                config_type=config.config_type,
-                created_at=config.created_at,
-                updated_at=config.updated_at
-            )
-            for config in configs
-        ]
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get system config: {str(e)}"
-        )
-
-
-@router.put("/system/config")
-async def update_system_config_endpoint(
-    config_update: SystemConfigUpdate,
-    current_user=Depends(get_admin_user),
-    db: AsyncSession = Depends(get_db)
-):
-    """Обновление системной настройки"""
-    try:
-        success = await update_system_config(config_update.key, config_update.value)
-
-        if success:
-            return {"message": "System config updated successfully"}
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="System config not found"
-            )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to update system config: {str(e)}"
-        )
-
-
-# Управление устройствами
-
-
-
-
 @router.post("/devices/discover")
 async def discover_devices(current_user=Depends(get_admin_user)):
-    """Принудительное обнаружение устройств"""
+    """Принудительное обнаружение устройств (Android и USB модемы)"""
     try:
+        from ..core.managers import get_device_manager, get_modem_manager
+
         device_manager = get_device_manager()
-        if not device_manager:
+        modem_manager = get_modem_manager()
+
+        if not device_manager and not modem_manager:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Device manager not available"
+                detail="No device managers available"
             )
 
-        # Запускаем обнаружение устройств
-        await device_manager.discover_all_devices()
+        results = {
+            "android_devices": {"found": 0, "devices": []},
+            "usb_modems": {"found": 0, "devices": []},
+            "total_found": 0,
+            "errors": []
+        }
 
-        # Получаем результат
-        devices = await device_manager.get_all_devices()
+        # Обнаружение Android устройств
+        if device_manager:
+            try:
+                await device_manager.discover_all_devices()
+                android_devices = await device_manager.get_all_devices()
+                results["android_devices"]["found"] = len(android_devices)
+                results["android_devices"]["devices"] = list(android_devices.values())
+            except Exception as e:
+                results["errors"].append(f"Android discovery error: {str(e)}")
+
+        # Обнаружение USB модемов
+        if modem_manager:
+            try:
+                await modem_manager.discover_all_devices()
+                usb_modems = await modem_manager.get_all_devices()
+                results["usb_modems"]["found"] = len(usb_modems)
+                results["usb_modems"]["devices"] = list(usb_modems.values())
+            except Exception as e:
+                results["errors"].append(f"USB modem discovery error: {str(e)}")
+
+        results["total_found"] = results["android_devices"]["found"] + results["usb_modems"]["found"]
 
         return {
             "message": "Device discovery completed",
-            "devices_found": len(devices),
-            "devices": list(devices.values())
+            "results": results
         }
 
     except Exception as e:
@@ -169,347 +123,166 @@ async def discover_devices(current_user=Depends(get_admin_user)):
 
 @router.get("/devices/debug")
 async def debug_devices(current_user=Depends(get_admin_user)):
-    """Отладочная информация об устройствах"""
+    """Отладочная информация об устройствах (Android и USB модемы)"""
     try:
-        # Проверяем ADB
-        try:
-            result = subprocess.run(['adb', 'devices', '-l'], capture_output=True, text=True, timeout=10)
-            adb_output = result.stdout
-            adb_success = result.returncode == 0
-        except Exception as e:
-            adb_output = f"ADB error: {str(e)}"
-            adb_success = False
+        from ..core.managers import get_device_manager, get_modem_manager
 
-        # Проверяем интерфейсы
-        all_interfaces = netifaces.interfaces()
-        usb_interfaces = []
+        debug_info = {
+            "android_debug": {},
+            "usb_modem_debug": {},
+            "system_info": {}
+        }
 
-        for interface in all_interfaces:
-            if interface.startswith(('enx', 'usb', 'rndis')):
-                try:
-                    addrs = netifaces.ifaddresses(interface)
-                    if netifaces.AF_INET in addrs:
-                        ip_info = addrs[netifaces.AF_INET][0]
-                        usb_interfaces.append({
-                            'interface': interface,
-                            'ip': ip_info['addr'],
-                            'netmask': ip_info.get('netmask', '')
-                        })
-                except Exception as e:
-                    usb_interfaces.append({
-                        'interface': interface,
-                        'error': str(e)
-                    })
-
-        # Проверяем DeviceManager
+        # Отладка Android устройств
         device_manager = get_device_manager()
-        dm_status = "Available" if device_manager else "Not available"
-
         if device_manager:
             try:
-                devices = await device_manager.get_all_devices()
-                dm_devices_count = len(devices)
-                dm_devices = list(devices.values())
-            except Exception as e:
-                dm_devices_count = f"Error: {str(e)}"
-                dm_devices = []
-        else:
-            dm_devices_count = 0
-            dm_devices = []
+                # Проверяем ADB
+                result = subprocess.run(['adb', 'devices', '-l'], capture_output=True, text=True, timeout=10)
+                adb_output = result.stdout
+                adb_success = result.returncode == 0
 
-        return {
-            "adb": {
-                "success": adb_success,
-                "output": adb_output
-            },
-            "interfaces": {
-                "all": all_interfaces,
-                "usb": usb_interfaces,
-                "honor_exists": "enx566cf3eaaf4b" in all_interfaces
-            },
-            "device_manager": {
-                "status": dm_status,
-                "devices_count": dm_devices_count,
-                "devices": dm_devices
+                # Проверяем USB интерфейсы
+                all_interfaces = netifaces.interfaces()
+                usb_interfaces = []
+                for interface in all_interfaces:
+                    if interface.startswith(('enx', 'usb', 'rndis')):
+                        try:
+                            addrs = netifaces.ifaddresses(interface)
+                            if netifaces.AF_INET in addrs:
+                                ip_info = addrs[netifaces.AF_INET][0]
+                                usb_interfaces.append({
+                                    'interface': interface,
+                                    'ip': ip_info['addr'],
+                                    'netmask': ip_info.get('netmask', '')
+                                })
+                        except Exception as e:
+                            usb_interfaces.append({
+                                'interface': interface,
+                                'error': str(e)
+                            })
+
+                android_devices = await device_manager.get_all_devices()
+                debug_info["android_debug"] = {
+                    "adb_success": adb_success,
+                    "adb_output": adb_output,
+                    "usb_interfaces": usb_interfaces,
+                    "devices_count": len(android_devices),
+                    "devices": list(android_devices.values())
+                }
+
+            except Exception as e:
+                debug_info["android_debug"]["error"] = str(e)
+
+        # Отладка USB модемов
+        modem_manager = get_modem_manager()
+        if modem_manager:
+            try:
+                # Проверяем Huawei интерфейсы
+                huawei_interfaces = []
+                for interface in netifaces.interfaces():
+                    mac_addr = await modem_manager.get_interface_mac(interface)
+                    if mac_addr and mac_addr.lower().startswith('0c:5b:8f'):
+                        interface_ip = await modem_manager.get_interface_ip(interface)
+                        subnet_number = await modem_manager.extract_subnet_number(
+                            interface_ip) if interface_ip else None
+
+                        huawei_interfaces.append({
+                            'interface': interface,
+                            'mac': mac_addr,
+                            'ip': interface_ip,
+                            'subnet_number': subnet_number,
+                            'web_interface': f"192.168.{subnet_number}.1" if subnet_number else None
+                        })
+
+                usb_modems = await modem_manager.get_all_devices()
+                debug_info["usb_modem_debug"] = {
+                    "huawei_interfaces": huawei_interfaces,
+                    "modems_count": len(usb_modems),
+                    "modems": list(usb_modems.values())
+                }
+
+            except Exception as e:
+                debug_info["usb_modem_debug"]["error"] = str(e)
+
+        # Системная информация
+        debug_info["system_info"] = {
+            "all_interfaces": netifaces.interfaces(),
+            "managers_status": {
+                "device_manager": "available" if device_manager else "not available",
+                "modem_manager": "available" if modem_manager else "not available"
             }
         }
+
+        return debug_info
 
     except Exception as e:
         return {"error": str(e)}
 
 
-@router.get("/devices/test-discovery")
-async def test_discovery(current_user=Depends(get_admin_user)):
-    """Тестирование отдельных частей обнаружения"""
-    try:
-        device_manager = get_device_manager()
-        if not device_manager:
-            return {"error": "Device manager not available"}
-
-        # Тест 1: ADB устройства
-        adb_devices = await device_manager.get_adb_devices()
-
-        # Тест 2: USB интерфейсы
-        usb_interfaces = await device_manager.detect_usb_tethering_interfaces()
-
-        # Тест 3: Android устройства с интерфейсами
-        android_devices = await device_manager.discover_android_devices_with_interfaces()
-
-        return {
-            "adb_devices": adb_devices,
-            "usb_interfaces": usb_interfaces,
-            "android_devices": android_devices
-        }
-
-    except Exception as e:
-        import traceback
-        return {"error": str(e), "traceback": traceback.format_exc()}
-
-
-@router.post("/devices/{device_id}/rotate")
-async def rotate_device_ip_enhanced(
-    device_id: str,
-    rotation_request: Optional[RotationRequest] = None,
-    current_user=Depends(get_admin_user)
-):
-    """Улучшенная принудительная ротация IP устройства"""
-    try:
-        # Извлекаем force_method если передан
-        force_method = None
-        if rotation_request:
-            force_method = rotation_request.force_method
-
-        # Используем функцию из managers.py
-        from ..core.managers import perform_device_rotation
-
-        logger.info(f"Starting enhanced IP rotation for device: {device_id}")
-
-        if force_method:
-            logger.info(f"Using forced rotation method: {force_method}")
-
-        # Выполняем ротацию
-        success, result = await perform_device_rotation(device_id, force_method)
-
-        if success:
-            return {
-                "success": True,
-                "message": "IP rotation completed successfully",
-                "new_ip": result if result and result != "true" else None,
-                "device_id": device_id,
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            }
-        else:
-            return {
-                "success": False,
-                "message": f"IP rotation failed: {result}",
-                "device_id": device_id,
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            }
-
-    except Exception as e:
-        logger.error(f"Error in enhanced rotation: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to rotate IP: {str(e)}"
-        )
-
-@router.get("/devices/{device_id}/rotation-methods")
-async def get_device_rotation_methods(
-    device_id: str,
-    current_user=Depends(get_admin_user)
-):
-    """Получение доступных методов ротации для устройства"""
-    try:
-        from ..core.managers import get_device_rotation_methods
-
-        result = await get_device_rotation_methods(device_id)
-
-        if "error" in result:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=result["error"]
-            )
-
-        return result
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting rotation methods: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get rotation methods: {str(e)}"
-        )
-
-
-@router.post("/devices/rotate-all")
-async def rotate_all_devices_enhanced(current_user=Depends(get_admin_user)):
-    """Улучшенная ротация IP всех активных устройств"""
-    try:
-        from ..core.managers import get_device_manager, get_enhanced_rotation_manager
-
-        device_manager = get_device_manager()
-        rotation_manager = get_enhanced_rotation_manager()
-
-        if not device_manager or not rotation_manager:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Required managers not available"
-            )
-
-        # Получаем все онлайн устройства
-        all_devices = await device_manager.get_all_devices()
-        online_devices = [
-            device_id for device_id, info in all_devices.items()
-            if info.get('status') == 'online'
-        ]
-
-        if not online_devices:
-            return {
-                "success": True,
-                "message": "No online devices found to rotate",
-                "results": {},
-                "total_devices": 0,
-                "successful_rotations": 0,
-                "failed_rotations": 0
-            }
-
-        # Ротация всех устройств
-        results = {}
-        successful_count = 0
-        failed_count = 0
-
-        # Используем семафор для ограничения одновременных ротаций
-        semaphore = asyncio.Semaphore(3)  # Максимум 3 одновременные ротации
-
-        async def rotate_single_device(device_id):
-            async with semaphore:
-                try:
-                    success, result = await rotation_manager.rotate_device_ip(device_id)
-                    return device_id, {
-                        "success": success,
-                        "message": result,
-                        "timestamp": datetime.now(timezone.utc).isoformat()
-                    }
-                except Exception as e:
-                    return device_id, {
-                        "success": False,
-                        "message": f"Error: {str(e)}",
-                        "timestamp": datetime.now(timezone.utc).isoformat()
-                    }
-
-        # Выполняем ротации параллельно
-        tasks = [rotate_single_device(device_id) for device_id in online_devices]
-        rotation_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Обрабатываем результаты
-        for result in rotation_results:
-            if isinstance(result, tuple):
-                device_id, device_result = result
-                results[device_id] = device_result
-
-                if device_result["success"]:
-                    successful_count += 1
-                else:
-                    failed_count += 1
-            else:
-                failed_count += 1
-                logger.error(f"Unexpected rotation result: {result}")
-
-        return {
-            "success": True,
-            "message": f"Bulk rotation completed: {successful_count} successful, {failed_count} failed",
-            "results": results,
-            "total_devices": len(online_devices),
-            "successful_rotations": successful_count,
-            "failed_rotations": failed_count,
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }
-
-    except Exception as e:
-        logger.error(f"Error in bulk rotation: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to rotate all devices: {str(e)}"
-        )
-
-
-@router.post("/devices/{device_id}/test-rotation")
-async def test_device_rotation(
-    device_id: str,
-    test_request: TestRotationRequest,
-    current_user=Depends(get_admin_user)
-):
-    """Тестирование метода ротации для устройства"""
-    try:
-        from ..core.managers import test_device_rotation
-
-        logger.info(f"Testing rotation method '{test_request.method}' for device {device_id}")
-
-        result = await test_device_rotation(device_id, test_request.method)
-
-        if "error" in result:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=result["error"]
-            )
-
-        return result
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error testing rotation: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to test rotation: {str(e)}"
-        )
-
 @router.get("/devices")
-async def admin_get_devices_legacy():
-    """Список устройств (legacy endpoint для фронтенда)"""
+async def admin_get_devices_combined():
+    """Список всех устройств (Android и USB модемы)"""
     try:
-        from ..core.managers import get_device_manager
-        device_manager = get_device_manager()
-        if not device_manager:
-            return []
+        from ..core.managers import get_all_devices_combined
 
-        await device_manager.discover_all_devices()
-        all_devices = await device_manager.get_all_devices()
+        all_devices = await get_all_devices_combined()
 
         devices_list = []
         for device_id, device_info in all_devices.items():
-            external_ip = await device_manager.get_device_external_ip(device_id)
+            # Определяем тип устройства
+            device_type = device_info.get('type', 'unknown')
 
+            # Получаем внешний IP
+            external_ip = device_info.get('external_ip', 'Not connected')
+
+            # Базовые данные для всех типов устройств
             device_data = {
                 "modem_id": device_id,
                 "id": device_id,
                 "device_info": device_info.get('device_info', f"Device {device_id}"),
                 "name": device_info.get('device_info', f"Device {device_id}"),
-                "modem_type": device_info['type'],
-                "device_type": device_info['type'],
-                "type": device_info['type'],
-                "status": device_info['status'],
-                "external_ip": external_ip or "Not connected",
+                "modem_type": device_type,
+                "device_type": device_type,
+                "type": device_type,
+                "status": device_info.get('status', 'unknown'),
+                "external_ip": external_ip,
                 "operator": device_info.get('operator', 'Unknown'),
                 "interface": device_info.get('interface', 'Unknown'),
                 "last_rotation": time.time() * 1000,  # В миллисекундах для JS
                 "total_requests": 0,
                 "successful_requests": 0,
                 "failed_requests": 0,
-                "success_rate": 100.0,  # Всегда float
+                "success_rate": 100.0,
                 "auto_rotation": True,
                 "avg_response_time": 0
             }
 
-            # Добавляем специфичные поля
-            if device_info['type'] == 'android':
+            # Добавляем специфичные поля для Android
+            if device_type == 'android':
                 device_data.update({
                     "manufacturer": device_info.get('manufacturer', 'Unknown'),
                     "model": device_info.get('model', 'Unknown'),
                     "android_version": device_info.get('android_version', 'Unknown'),
                     "battery_level": device_info.get('battery_level', 0),
                     "adb_id": device_info.get('adb_id', ''),
+                    "usb_interface": device_info.get('usb_interface', 'Unknown'),
+                    "routing_capable": device_info.get('routing_capable', False)
+                })
+
+            # Добавляем специфичные поля для USB модемов
+            elif device_type == 'usb_modem':
+                device_data.update({
+                    "manufacturer": device_info.get('manufacturer', 'Huawei'),
+                    "model": device_info.get('model', 'E3372h'),
+                    "mac_address": device_info.get('mac_address', 'Unknown'),
+                    "web_interface": device_info.get('web_interface', 'N/A'),
+                    "subnet_number": device_info.get('subnet_number', 'N/A'),
+                    "interface_ip": device_info.get('interface_ip', 'N/A'),
+                    "web_accessible": device_info.get('web_accessible', False),
+                    "signal_strength": device_info.get('signal_strength', 'N/A'),
+                    "technology": device_info.get('technology', '4G LTE'),
+                    "routing_capable": device_info.get('routing_capable', True)
                 })
 
             devices_list.append(device_data)
@@ -517,100 +290,34 @@ async def admin_get_devices_legacy():
         return devices_list
 
     except Exception as e:
-        logger.error(f"Error getting devices: {e}")
+        logger.error(f"Error getting combined devices: {e}")
         return []
 
 
-@router.post("/devices/sync-to-db")
-async def sync_devices_to_database(current_user=Depends(get_admin_user)):
-    """Принудительная синхронизация обнаруженных устройств с базой данных"""
-    try:
-        device_manager = get_device_manager()
-        if not device_manager:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Device manager not available"
-            )
-
-        # Сначала обнаруживаем устройства
-        await device_manager.discover_all_devices()
-
-        # Затем принудительно синхронизируем с БД
-        synced_count = await device_manager.force_sync_to_db()
-
-        # Получаем актуальный список из БД
-        db_devices = await device_manager.get_devices_from_db()
-
-        return {
-            "message": "Devices synchronized to database successfully",
-            "discovered_devices": synced_count,
-            "database_devices": len(db_devices),
-            "devices": db_devices
-        }
-
-    except Exception as e:
-        logger.error(f"Error syncing devices to database: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to sync devices to database: {str(e)}"
-        )
-
-
-@router.get("/devices/from-db")
-async def get_devices_from_database(current_user=Depends(get_admin_user)):
-    """Получение списка устройств из базы данных"""
-    try:
-        device_manager = get_device_manager()
-        if not device_manager:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Device manager not available"
-            )
-
-        db_devices = await device_manager.get_devices_from_db()
-
-        return {
-            "message": "Devices from database",
-            "count": len(db_devices),
-            "devices": db_devices
-        }
-
-    except Exception as e:
-        logger.error(f"Error getting devices from database: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get devices from database: {str(e)}"
-        )
-
 @router.get("/devices/{device_id}")
-async def admin_get_device_by_id_legacy(device_id: str):
-    """Получение информации о конкретном устройстве (legacy endpoint)"""
+async def admin_get_device_by_id_combined(device_id: str):
+    """Получение информации о конкретном устройстве (Android или USB модем)"""
     try:
-        from ..core.managers import get_device_manager
-        device_manager = get_device_manager()
-        if not device_manager:
-            raise HTTPException(status_code=404, detail="Device manager not available")
+        from ..core.managers import get_device_by_id_combined
 
-        logger.info(f"Getting info for device: {device_id}")
+        device_info = await get_device_by_id_combined(device_id)
 
-        # Получаем все устройства
-        all_devices = await device_manager.get_all_devices()
-
-        if device_id not in all_devices:
+        if not device_info:
             raise HTTPException(status_code=404, detail="Device not found")
 
-        device_info = all_devices[device_id]
+        logger.info(f"Getting info for device: {device_id}")
         logger.info(f"Device info: {device_info}")
 
-        # Получаем внешний IP
-        external_ip = await device_manager.get_device_external_ip(device_id)
+        device_type = device_info.get('type', 'unknown')
+        external_ip = device_info.get('external_ip', 'Not connected')
 
         # Базовые данные устройства
         device_data = {
             "modem_id": device_id,
-            "modem_type": device_info.get('type', 'unknown'),
+            "modem_type": device_type,
+            "device_type": device_type,
             "status": device_info.get('status', 'unknown'),
-            "external_ip": external_ip or "Not connected",
+            "external_ip": external_ip,
             "operator": device_info.get('operator', 'Unknown'),
             "interface": device_info.get('interface', 'Unknown'),
             "device_info": device_info.get('device_info', f"Device {device_id}"),
@@ -626,26 +333,31 @@ async def admin_get_device_by_id_legacy(device_id: str):
             "rotation_methods": device_info.get('rotation_methods', [])
         }
 
-        # Добавляем специфичную информацию по типу
-        if device_info.get('type') == 'android':
+        # Добавляем специфичную информацию для Android
+        if device_type == 'android':
             device_data.update({
                 'manufacturer': device_info.get('manufacturer', 'Unknown'),
                 'model': device_info.get('model', 'Unknown'),
                 'android_version': device_info.get('android_version', 'Unknown'),
                 'battery_level': device_info.get('battery_level', 0),
                 'adb_id': device_info.get('adb_id', ''),
+                'usb_interface': device_info.get('usb_interface', 'Unknown'),
+                'routing_capable': device_info.get('routing_capable', False)
             })
-        elif device_info.get('type') == 'usb_modem':
+
+        # Добавляем специфичную информацию для USB модема
+        elif device_type == 'usb_modem':
             device_data.update({
+                'manufacturer': device_info.get('manufacturer', 'Huawei'),
+                'model': device_info.get('model', 'E3372h'),
+                'mac_address': device_info.get('mac_address', 'Unknown'),
+                'web_interface': device_info.get('web_interface', 'N/A'),
+                'subnet_number': device_info.get('subnet_number', 'N/A'),
+                'interface_ip': device_info.get('interface_ip', 'N/A'),
+                'web_accessible': device_info.get('web_accessible', False),
                 'signal_strength': device_info.get('signal_strength', 'N/A'),
-                'technology': device_info.get('technology', 'Unknown'),
-                'manufacturer': device_info.get('manufacturer', 'Unknown'),
-                'model': device_info.get('model', 'Unknown'),
-            })
-        elif device_info.get('type') == 'raspberry_pi':
-            device_data.update({
-                'interface_type': 'PPP/WWAN',
-                'connection_type': 'Network modem'
+                'technology': device_info.get('technology', '4G LTE'),
+                'routing_capable': device_info.get('routing_capable', True)
             })
 
         logger.info(f"Returning device data: {device_data}")
@@ -658,28 +370,128 @@ async def admin_get_device_by_id_legacy(device_id: str):
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-# Статистика системы
+
+
+@router.post("/devices/sync-to-db")
+async def sync_devices_to_database(current_user=Depends(get_admin_user)):
+    """Принудительная синхронизация всех устройств с базой данных"""
+    try:
+        from ..core.managers import get_device_manager, get_modem_manager
+
+        device_manager = get_device_manager()
+        modem_manager = get_modem_manager()
+
+        if not device_manager and not modem_manager:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="No device managers available"
+            )
+
+        results = {
+            "android_synced": 0,
+            "usb_modems_synced": 0,
+            "total_synced": 0,
+            "errors": []
+        }
+
+        # Синхронизация Android устройств
+        if device_manager:
+            try:
+                await device_manager.discover_all_devices()
+                android_synced = await device_manager.force_sync_to_db()
+                results["android_synced"] = android_synced
+            except Exception as e:
+                results["errors"].append(f"Android sync error: {str(e)}")
+
+        # Синхронизация USB модемов
+        if modem_manager:
+            try:
+                await modem_manager.discover_all_devices()
+                modems_synced = await modem_manager.force_sync_to_db()
+                results["usb_modems_synced"] = modems_synced
+            except Exception as e:
+                results["errors"].append(f"USB modem sync error: {str(e)}")
+
+        results["total_synced"] = results["android_synced"] + results["usb_modems_synced"]
+
+        # Получаем актуальный список из БД
+        db_devices = []
+        if device_manager:
+            android_devices = await device_manager.get_devices_from_db()
+            db_devices.extend(android_devices)
+        if modem_manager:
+            modem_devices = await modem_manager.get_devices_from_db()
+            db_devices.extend(modem_devices)
+
+        return {
+            "message": "All devices synchronized to database successfully",
+            "results": results,
+            "database_devices": len(db_devices),
+            "devices": db_devices
+        }
+
+    except Exception as e:
+        logger.error(f"Error syncing devices to database: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to sync devices to database: {str(e)}"
+        )
+
+
+@router.get("/devices/from-db")
+async def get_devices_from_database(current_user=Depends(get_admin_user)):
+    """Получение списка всех устройств из базы данных"""
+    try:
+        from ..core.managers import get_device_manager, get_modem_manager
+
+        device_manager = get_device_manager()
+        modem_manager = get_modem_manager()
+
+        if not device_manager and not modem_manager:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="No device managers available"
+            )
+
+        all_devices = []
+
+        # Получаем Android устройства из БД
+        if device_manager:
+            android_devices = await device_manager.get_devices_from_db()
+            all_devices.extend(android_devices)
+
+        # Получаем USB модемы из БД
+        if modem_manager:
+            modem_devices = await modem_manager.get_devices_from_db()
+            all_devices.extend(modem_devices)
+
+        return {
+            "message": "All devices from database",
+            "android_devices": len([d for d in all_devices if d.get('device_type') == 'android']),
+            "usb_modems": len([d for d in all_devices if d.get('device_type') == 'usb_modem']),
+            "total_count": len(all_devices),
+            "devices": all_devices
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting devices from database: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get devices from database: {str(e)}"
+        )
+
+
 @router.get("/system/stats", response_model=SystemStatsResponse)
 async def get_system_stats(
     current_user=Depends(get_admin_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Получение общей статистики системы"""
+    """Получение общей статистики системы (Android и USB модемы)"""
     try:
-        device_manager = get_device_manager()
-        if not device_manager:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Device manager not available"
-            )
+        from ..core.managers import get_devices_summary_combined
 
-        # Получение информации об устройствах
-        devices = await device_manager.get_all_devices()
-        online_devices = 0
-
-        for device_id in devices.keys():
-            if await device_manager.is_device_online(device_id):
-                online_devices += 1
+        # Получаем сводную информацию о всех устройствах
+        devices_summary = await get_devices_summary_combined()
 
         # Статистика запросов за сегодня
         today = datetime.now(timezone.utc).date()
@@ -724,9 +536,9 @@ async def get_system_stats(
         last_rotation_time = result.scalar()
 
         return SystemStatsResponse(
-            total_devices=len(devices),
-            online_devices=online_devices,
-            offline_devices=len(devices) - online_devices,
+            total_devices=devices_summary.get("total_devices", 0),
+            online_devices=devices_summary.get("total_online", 0),
+            offline_devices=devices_summary.get("total_offline", 0),
             total_requests_today=total_requests_today,
             successful_requests_today=successful_requests_today,
             failed_requests_today=failed_requests_today,
@@ -745,26 +557,42 @@ async def get_system_stats(
         )
 
 
-# Здоровье системы
 @router.get("/system/health")
 async def get_system_health(current_user=Depends(get_admin_user)):
     """Детальная проверка здоровья системы"""
     try:
+        from ..core.managers import get_device_manager, get_modem_manager, get_proxy_server
+
         health_data = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "components": {}
         }
 
-        # Проверка device manager
+        # Проверка device manager (Android)
         device_manager = get_device_manager()
         if device_manager:
-            devices = await device_manager.get_all_devices()
-            health_data["components"]["device_manager"] = {
+            android_devices = await device_manager.get_all_devices()
+            health_data["components"]["android_manager"] = {
                 "status": "running",
-                "devices_count": len(devices)
+                "devices_count": len(android_devices),
+                "online_devices": len([d for d in android_devices.values() if d.get('status') == 'online'])
             }
         else:
-            health_data["components"]["device_manager"] = {
+            health_data["components"]["android_manager"] = {
+                "status": "not_running"
+            }
+
+        # Проверка modem manager (USB модемы)
+        modem_manager = get_modem_manager()
+        if modem_manager:
+            usb_modems = await modem_manager.get_all_devices()
+            health_data["components"]["modem_manager"] = {
+                "status": "running",
+                "devices_count": len(usb_modems),
+                "online_devices": len([d for d in usb_modems.values() if d.get('status') == 'online'])
+            }
+        else:
+            health_data["components"]["modem_manager"] = {
                 "status": "not_running"
             }
 
@@ -794,182 +622,3 @@ async def get_system_health(current_user=Depends(get_admin_user)):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get system health: {str(e)}"
         )
-
-
-# Логи
-@router.get("/logs/requests")
-async def get_request_logs(
-    limit: int = 100,
-    offset: int = 0,
-    device_id: Optional[str] = None,
-    status_code: Optional[int] = None,
-    current_user=Depends(get_admin_user),
-    db: AsyncSession = Depends(get_db)
-):
-    """Получение логов запросов"""
-    try:
-        query = select(RequestLog)
-
-        if device_id:
-            query = query.where(RequestLog.device_id == uuid.UUID(device_id))
-
-        if status_code:
-            query = query.where(RequestLog.status_code == status_code)
-
-        query = query.order_by(RequestLog.created_at.desc()).limit(limit).offset(offset)
-
-        result = await db.execute(query)
-        logs = result.scalars().all()
-
-        return {
-            "logs": [
-                {
-                    "id": str(log.id),
-                    "device_id": str(log.device_id) if log.device_id else None,
-                    "client_ip": log.client_ip,
-                    "target_url": log.target_url,
-                    "method": log.method,
-                    "status_code": log.status_code,
-                    "response_time_ms": log.response_time_ms,
-                    "external_ip": log.external_ip,
-                    "created_at": log.created_at,
-                    "error_message": log.error_message
-                }
-                for log in logs
-            ],
-            "total": len(logs),
-            "limit": limit,
-            "offset": offset
-        }
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get request logs: {str(e)}"
-        )
-
-
-# Диагностика ADB
-@router.get("/debug/adb")
-async def debug_adb(current_user=Depends(get_admin_user)):
-    """Диагностика ADB соединения"""
-    debug_info = {
-        "adb_status": "unknown",
-        "adb_version": None,
-        "adb_devices": [],
-        "raw_output": "",
-        "error_output": "",
-        "return_code": None,
-        "adb_path": None
-    }
-
-    try:
-        # Проверка наличия ADB
-        which_result = subprocess.run(['which', 'adb'], capture_output=True, text=True)
-        debug_info["adb_path"] = which_result.stdout.strip() if which_result.returncode == 0 else "Not found"
-
-        # Получение версии ADB
-        try:
-            version_result = await asyncio.create_subprocess_exec(
-                'adb', 'version',
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            version_stdout, version_stderr = await version_result.communicate()
-            debug_info["adb_version"] = version_stdout.decode().strip()
-        except Exception as e:
-            debug_info["adb_version"] = f"Error: {str(e)}"
-
-        # Выполнение adb devices
-        result = await asyncio.create_subprocess_exec(
-            'adb', 'devices', '-l',
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await result.communicate()
-
-        debug_info["return_code"] = result.returncode
-        debug_info["raw_output"] = stdout.decode()
-        debug_info["error_output"] = stderr.decode()
-
-        if result.returncode == 0:
-            debug_info["adb_status"] = "working"
-
-            # Парсинг устройств
-            lines = stdout.decode().strip().split('\n')[1:]  # Пропускаем заголовок
-            devices = []
-
-            for line in lines:
-                line = line.strip()
-                if line:
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        devices.append({
-                            "device_id": parts[0],
-                            "status": parts[1],
-                            "full_line": line
-                        })
-
-            debug_info["adb_devices"] = devices
-        else:
-            debug_info["adb_status"] = "error"
-
-    except FileNotFoundError:
-        debug_info["adb_status"] = "not_installed"
-        debug_info["error_output"] = "ADB not found in PATH"
-    except Exception as e:
-        debug_info["adb_status"] = "exception"
-        debug_info["error_output"] = str(e)
-
-    return debug_info
-
-
-@router.post("/debug/restart-adb")
-async def restart_adb(current_user=Depends(get_admin_user)):
-    """Перезапуск ADB сервера"""
-    try:
-        # Остановка ADB сервера
-        kill_result = await asyncio.create_subprocess_exec(
-            'adb', 'kill-server',
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        await kill_result.communicate()
-
-        # Ожидание
-        await asyncio.sleep(2)
-
-        # Запуск ADB сервера
-        start_result = await asyncio.create_subprocess_exec(
-            'adb', 'start-server',
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        await start_result.communicate()
-
-        # Ожидание
-        await asyncio.sleep(3)
-
-        # Проверка устройств
-        devices_result = await asyncio.create_subprocess_exec(
-            'adb', 'devices',
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        devices_stdout, devices_stderr = await devices_result.communicate()
-
-        return {
-            "message": "ADB server restarted",
-            "kill_code": kill_result.returncode,
-            "start_code": start_result.returncode,
-            "devices_output": devices_stdout.decode(),
-            "devices_error": devices_stderr.decode()
-        }
-
-    except Exception as e:
-        return {
-            "error": str(e),
-            "message": "Failed to restart ADB server"
-        }
-
-

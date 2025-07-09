@@ -1,7 +1,6 @@
-# backend/app/core/device_manager.py - ENHANCED VERSION WITH USB INTERFACE DETECTION
+# backend/app/core/device_manager.py - ОЧИЩЕННАЯ ВЕРСИЯ ДЛЯ ANDROID УСТРОЙСТВ
 
 import asyncio
-import serial
 import subprocess
 import time
 import re
@@ -10,7 +9,6 @@ import netifaces
 from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime, timezone
 import structlog
-import psutil
 import random
 import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,7 +20,7 @@ logger = structlog.get_logger()
 
 
 class DeviceManager:
-    """Улучшенный менеджер устройств с поддержкой USB интерфейсов"""
+    """Менеджер Android устройств с поддержкой USB интерфейсов"""
 
     def __init__(self):
         self.devices: Dict[str, dict] = {}
@@ -40,158 +38,37 @@ class DeviceManager:
         logger.info("Device manager stopped")
 
     async def discover_all_devices(self):
-        """Обнаружение всех типов устройств с сохранением в БД"""
+        """Обнаружение всех Android устройств с сохранением в БД"""
         try:
             # Очищаем старый список
             self.devices.clear()
 
-            logger.info("Starting comprehensive device discovery...")
+            logger.info("Starting Android device discovery...")
 
-            # 1. Обнаружение Android устройств с USB интерфейсами
+            # Обнаружение Android устройств с USB интерфейсами
             android_devices = await self.discover_android_devices_with_interfaces()
 
-            # 2. Обнаружение USB модемов
-            usb_modems = await self.discover_usb_modems()
-
-            # 3. Обнаружение Raspberry Pi с модемами
-            raspberry_devices = await self.discover_raspberry_devices()
-
-            # Объединение всех устройств
-            all_devices = {**android_devices, **usb_modems, **raspberry_devices}
-
-            for device_id, device_info in all_devices.items():
+            # Объединение всех найденных устройств
+            for device_id, device_info in android_devices.items():
                 # Сохраняем в память
                 self.devices[device_id] = device_info
 
                 logger.info(
-                    "Device discovered",
+                    "Android device discovered",
                     device_id=device_id,
                     type=device_info['type'],
                     interface=device_info.get('usb_interface', device_info.get('interface', 'N/A')),
                     info=device_info.get('device_info', 'Unknown')
                 )
 
-                # НОВОЕ: Сохраняем в базу данных
+                # Сохраняем в базу данных
                 await self.save_device_to_db(device_id, device_info)
 
-            logger.info(f"✅ Total devices discovered: {len(self.devices)}")
+            logger.info(f"✅ Total Android devices discovered: {len(self.devices)}")
             logger.info(f"✅ Devices saved to database")
 
         except Exception as e:
-            logger.error("Error discovering devices", error=str(e))
-
-    async def save_device_to_db(self, device_id: str, device_info: dict):
-        """Сохранение информации об устройстве в базу данных"""
-        try:
-            async with AsyncSessionLocal() as db:
-                # Проверяем, существует ли устройство в БД
-                stmt = select(ProxyDevice).where(ProxyDevice.name == device_id)
-                result = await db.execute(stmt)
-                existing_device = result.scalar_one_or_none()
-
-                # Определяем тип устройства
-                device_type = device_info.get('type', 'unknown')
-
-                # Получаем IP адрес интерфейса
-                ip_address = "0.0.0.0"
-                interface = device_info.get('usb_interface') or device_info.get('interface', 'unknown')
-
-                if interface and interface != 'unknown':
-                    # Пробуем получить IP интерфейса
-                    try:
-                        import netifaces
-                        if interface in netifaces.interfaces():
-                            addrs = netifaces.ifaddresses(interface)
-                            if netifaces.AF_INET in addrs:
-                                ip_address = addrs[netifaces.AF_INET][0]['addr']
-                    except:
-                        pass
-
-                # Получаем внешний IP
-                external_ip = await self.get_device_external_ip(device_id)
-
-                if existing_device:
-                    # Обновляем существующее устройство (порт не меняем)
-                    stmt = update(ProxyDevice).where(
-                        ProxyDevice.name == device_id
-                    ).values(
-                        device_type=device_type,
-                        ip_address=ip_address,
-                        status=device_info.get('status', 'offline'),
-                        current_external_ip=external_ip,
-                        operator=device_info.get('operator', 'Unknown'),
-                        last_heartbeat=datetime.now()  # ИСПРАВЛЕНО: убрали timezone.utc
-                    )
-                    await db.execute(stmt)
-                    logger.info(f"Updated device {device_id} in database")
-                else:
-                    # Создаем новое устройство с уникальным портом
-                    unique_port = await self.get_next_available_port(db)
-
-                    new_device = ProxyDevice(
-                        name=device_id,
-                        device_type=device_type,
-                        ip_address=ip_address,
-                        port=unique_port,  # Уникальный порт для каждого устройства
-                        status=device_info.get('status', 'offline'),
-                        current_external_ip=external_ip,
-                        operator=device_info.get('operator', 'Unknown'),
-                        region=device_info.get('region', 'Unknown'),
-                        rotation_interval=600  # По умолчанию 10 минут
-                    )
-                    db.add(new_device)
-                    logger.info(f"Created new device {device_id} in database with port {unique_port}")
-
-                await db.commit()
-
-        except Exception as e:
-            logger.error(
-                "Error saving device to database",
-                device_id=device_id,
-                error=str(e)
-            )
-            # Не прерываем работу, если не удалось сохранить в БД
-            import traceback
-            logger.error(f"Database save traceback: {traceback.format_exc()}")
-
-    async def get_next_available_port(self, db: AsyncSession, start_port: int = 9000, max_port: int = 65535) -> int:
-        """Получение следующего доступного порта с проверкой доступности"""
-        try:
-            # Получаем максимальный используемый порт
-            stmt = select(func.max(ProxyDevice.port)).where(
-                ProxyDevice.port.between(start_port, max_port)
-            )
-            result = await db.execute(stmt)
-            max_used_port = result.scalar()
-
-            if max_used_port is None:
-                # Если нет устройств, начинаем с start_port
-                return start_port
-
-            # Начинаем поиск с max_used_port + 1
-            candidate_port = max(max_used_port + 1, start_port)
-
-            # Проверяем доступность портов
-            for port in range(candidate_port, max_port + 1):
-                if not await self.is_port_used(db, port):
-                    logger.info(f"Selected next available port: {port}")
-                    return port
-
-            # Если не нашли свободный порт после максимального, ищем пропуски в начале
-            for port in range(start_port, max_used_port):
-                if not await self.is_port_used(db, port):
-                    logger.info(f"Found gap in port range, using: {port}")
-                    return port
-
-            raise RuntimeError(f"No available ports in range {start_port}-{max_port}")
-
-        except Exception as e:
-            logger.error(f"Error finding available port: {e}")
-            # Генерируем случайный порт и надеемся на лучшее
-            import random
-            fallback_port = random.randint(start_port, max_port)
-            logger.warning(f"Using fallback random port: {fallback_port}")
-            return fallback_port
+            logger.error("Error discovering Android devices", error=str(e))
 
     async def discover_android_devices_with_interfaces(self) -> Dict[str, dict]:
         """Обнаружение Android устройств с обнаружением USB интерфейсов"""
@@ -487,207 +364,139 @@ class DeviceManager:
 
         return details
 
-    async def discover_usb_modems(self) -> Dict[str, dict]:
-        """Обнаружение USB 4G модемов"""
-        modems = {}
-
+    async def save_device_to_db(self, device_id: str, device_info: dict):
+        """Сохранение информации об устройстве в базу данных"""
         try:
-            logger.info("Scanning for USB modems...")
-
-            # Проверяем стандартные serial порты для USB модемов
-            for device_path in ['/dev/ttyUSB0', '/dev/ttyUSB1', '/dev/ttyUSB2',
-                                '/dev/ttyACM0', '/dev/ttyACM1', '/dev/ttyACM2']:
-                try:
-                    # Попытка открыть порт
-                    with serial.Serial(device_path, timeout=1) as ser:
-                        modem_id = f"usb_{device_path.split('/')[-1]}"
-
-                        # Получаем информацию о модеме через AT команды
-                        modem_info = await self.get_usb_modem_details(device_path)
-
-                        modems[modem_id] = {
-                            'id': modem_id,
-                            'type': 'usb_modem',
-                            'interface': device_path,
-                            'device_info': f"USB modem on {device_path}",
-                            'status': 'online',
-                            'operator': modem_info.get('operator', 'Unknown'),
-                            'signal_strength': modem_info.get('signal_strength', 'N/A'),
-                            'technology': modem_info.get('technology', 'Unknown'),
-                            'rotation_methods': ['at_commands', 'network_reset'],
-                            'routing_capable': True,
-                            'last_seen': datetime.now().isoformat()
-                        }
-                        logger.info(f"Found USB modem on {device_path}")
-
-                except (serial.SerialException, PermissionError):
-                    continue
-
-        except Exception as e:
-            logger.error("Error discovering USB modems", error=str(e))
-
-        return modems
-
-    async def discover_raspberry_devices(self) -> Dict[str, dict]:
-        """Обнаружение Raspberry Pi с 4G модулями"""
-        devices = {}
-
-        try:
-            logger.info("Scanning for Raspberry Pi devices...")
-
-            # Поиск PPP и WWAN интерфейсов
-            interfaces = netifaces.interfaces()
-
-            for interface in interfaces:
-                if interface.startswith('ppp') or interface.startswith('wwan'):
-                    device_id = f"raspberry_{interface}"
-
-                    devices[device_id] = {
-                        'id': device_id,
-                        'type': 'raspberry_pi',
-                        'interface': interface,
-                        'device_info': f"Raspberry Pi with modem on {interface}",
-                        'status': 'online',
-                        'rotation_methods': ['ppp_reset', 'modem_restart'],
-                        'routing_capable': True,
-                        'last_seen': datetime.now().isoformat()
-                    }
-                    logger.info(f"Found Raspberry Pi device on {interface}")
-
-        except Exception as e:
-            logger.error("Error discovering Raspberry Pi devices", error=str(e))
-
-        return devices
-
-    async def get_usb_modem_details(self, device_path: str) -> Dict[str, any]:
-        """Получение информации о USB модеме через AT команды"""
-        details = {}
-
-        try:
-            with serial.Serial(device_path, 115200, timeout=5) as ser:
-                commands = {
-                    'manufacturer': 'AT+CGMI',
-                    'model': 'AT+CGMM',
-                    'signal_strength': 'AT+CSQ',
-                    'operator': 'AT+COPS?',
-                    'technology': 'AT+CREG?'
-                }
-
-                for key, cmd in commands.items():
-                    try:
-                        ser.write(f'{cmd}\r\n'.encode())
-                        time.sleep(0.5)
-                        response = ser.read_all().decode('utf-8', errors='ignore')
-
-                        # Простой парсинг ответа
-                        if 'OK' in response:
-                            lines = response.split('\n')
-                            for line in lines:
-                                if line.strip() and not line.startswith('AT') and 'OK' not in line:
-                                    details[key] = line.strip()
-                                    break
-                        else:
-                            details[key] = 'Unknown'
-
-                    except Exception:
-                        details[key] = 'Unknown'
-
-        except Exception as e:
-            logger.error(f"Error getting USB modem details: {e}")
-
-        return details
-
-    # Остальные методы остаются без изменений
-    async def get_all_devices(self) -> Dict[str, Dict[str, Any]]:
-        """Получение всех устройств"""
-        return self.devices.copy()
-
-    async def update_device_status(self, device_id: str, status: str):
-        """Обновление статуса устройства в памяти и БД"""
-        try:
-            # Обновляем в памяти
-            if device_id in self.devices:
-                self.devices[device_id]['status'] = status
-                self.devices[device_id]['last_seen'] = datetime.now(timezone.utc).isoformat()
-
-            # Обновляем в БД
             async with AsyncSessionLocal() as db:
-                stmt = update(ProxyDevice).where(
-                    ProxyDevice.name == device_id
-                ).values(
-                    status=status,
-                    last_heartbeat=datetime.now()
-                )
-                await db.execute(stmt)
+                # Проверяем, существует ли устройство в БД
+                stmt = select(ProxyDevice).where(ProxyDevice.name == device_id)
+                result = await db.execute(stmt)
+                existing_device = result.scalar_one_or_none()
+
+                # Определяем тип устройства
+                device_type = device_info.get('type', 'android')
+
+                # Получаем IP адрес интерфейса
+                ip_address = "0.0.0.0"
+                interface = device_info.get('usb_interface') or device_info.get('interface', 'unknown')
+
+                if interface and interface != 'unknown':
+                    # Пробуем получить IP интерфейса
+                    try:
+                        import netifaces
+                        if interface in netifaces.interfaces():
+                            addrs = netifaces.ifaddresses(interface)
+                            if netifaces.AF_INET in addrs:
+                                ip_address = addrs[netifaces.AF_INET][0]['addr']
+                    except:
+                        pass
+
+                # Получаем внешний IP
+                external_ip = await self.get_device_external_ip(device_id)
+
+                if existing_device:
+                    # Обновляем существующее устройство
+                    stmt = update(ProxyDevice).where(
+                        ProxyDevice.name == device_id
+                    ).values(
+                        device_type=device_type,
+                        ip_address=ip_address,
+                        status=device_info.get('status', 'offline'),
+                        current_external_ip=external_ip,
+                        operator=device_info.get('operator', 'Unknown'),
+                        last_heartbeat=datetime.now()
+                    )
+                    await db.execute(stmt)
+                    logger.info(f"Updated Android device {device_id} in database")
+                else:
+                    # Создаем новое устройство с уникальным портом
+                    unique_port = await self.get_next_available_port(db)
+
+                    new_device = ProxyDevice(
+                        name=device_id,
+                        device_type=device_type,
+                        ip_address=ip_address,
+                        port=unique_port,
+                        status=device_info.get('status', 'offline'),
+                        current_external_ip=external_ip,
+                        operator=device_info.get('operator', 'Unknown'),
+                        region=device_info.get('region', 'Unknown'),
+                        rotation_interval=600
+                    )
+                    db.add(new_device)
+                    logger.info(f"Created new Android device {device_id} in database with port {unique_port}")
+
                 await db.commit()
 
         except Exception as e:
-            logger.error(f"Error updating device status: {e}")
+            logger.error(
+                "Error saving Android device to database",
+                device_id=device_id,
+                error=str(e)
+            )
 
-    async def get_devices_from_db(self) -> List[dict]:
-        """Получение списка устройств из базы данных"""
+    async def get_next_available_port(self, db: AsyncSession, start_port: int = 9000, max_port: int = 65535) -> int:
+        """Получение следующего доступного порта с проверкой доступности"""
         try:
-            async with AsyncSessionLocal() as db:
-                stmt = select(ProxyDevice)
-                result = await db.execute(stmt)
-                devices = result.scalars().all()
+            # Получаем максимальный используемый порт
+            stmt = select(func.max(ProxyDevice.port)).where(
+                ProxyDevice.port.between(start_port, max_port)
+            )
+            result = await db.execute(stmt)
+            max_used_port = result.scalar()
 
-                devices_list = []
-                for device in devices:
-                    device_data = {
-                        "id": str(device.id),
-                        "name": device.name,
-                        "device_type": device.device_type,
-                        "ip_address": device.ip_address,
-                        "port": device.port,
-                        "status": device.status,
-                        "current_external_ip": device.current_external_ip,
-                        "operator": device.operator,
-                        "region": device.region,
-                        "last_heartbeat": device.last_heartbeat,
-                        "rotation_interval": device.rotation_interval,
-                        "proxy_enabled": device.proxy_enabled or False,
-                        "dedicated_port": device.dedicated_port,
-                        "proxy_username": device.proxy_username,
-                        "proxy_password": device.proxy_password
-                    }
-                    devices_list.append(device_data)
+            if max_used_port is None:
+                return start_port
 
-                return devices_list
+            # Начинаем поиск с max_used_port + 1
+            candidate_port = max(max_used_port + 1, start_port)
+
+            # Проверяем доступность портов
+            for port in range(candidate_port, max_port + 1):
+                if not await self.is_port_used(db, port):
+                    logger.info(f"Selected next available port: {port}")
+                    return port
+
+            # Если не нашли свободный порт, ищем пропуски
+            for port in range(start_port, max_used_port):
+                if not await self.is_port_used(db, port):
+                    logger.info(f"Found gap in port range, using: {port}")
+                    return port
+
+            raise RuntimeError(f"No available ports in range {start_port}-{max_port}")
 
         except Exception as e:
-            logger.error(f"Error getting devices from database: {e}")
-            return []
+            logger.error(f"Error finding available port: {e}")
+            import random
+            fallback_port = random.randint(start_port, max_port)
+            logger.warning(f"Using fallback random port: {fallback_port}")
+            return fallback_port
 
-    async def sync_devices_with_db(self):
-        """Синхронизация обнаруженных устройств с базой данных"""
+    async def is_port_used(self, db: AsyncSession, port: int) -> bool:
+        """Проверка, используется ли порт другим устройством"""
         try:
-            logger.info("Syncing discovered devices with database...")
-
-            for device_id, device_info in self.devices.items():
-                await self.save_device_to_db(device_id, device_info)
-
-            logger.info("✅ Device synchronization completed")
-
+            stmt = select(ProxyDevice.id).where(ProxyDevice.port == port)
+            result = await db.execute(stmt)
+            return result.scalar_one_or_none() is not None
         except Exception as e:
-            logger.error(f"Error syncing devices with database: {e}")
+            logger.error(f"Error checking port usage: {e}")
+            return True
 
-    async def force_sync_to_db(self):
-        """Принудительная синхронизация всех устройств с БД"""
-        logger.info("🔄 Starting forced device synchronization to database...")
-        await self.sync_devices_with_db()
-        return len(self.devices)
+    # Методы для получения информации об устройствах
+    async def get_all_devices(self) -> Dict[str, Dict[str, Any]]:
+        """Получение всех Android устройств"""
+        return self.devices.copy()
 
     async def get_device_by_id(self, device_id: str) -> Optional[Dict[str, Any]]:
-        """Получение устройства по ID"""
+        """Получение Android устройства по ID"""
         return self.devices.get(device_id)
 
     async def get_available_devices(self) -> List[dict]:
-        """Получение доступных (онлайн) устройств"""
+        """Получение доступных (онлайн) Android устройств"""
         return [device for device in self.devices.values() if device.get('status') == 'online']
 
     async def get_random_device(self) -> Optional[Dict[str, Any]]:
-        """Получение случайного онлайн устройства"""
+        """Получение случайного онлайн Android устройства"""
         online_devices = [
             device for device in self.devices.values()
             if device.get('status') == 'online'
@@ -696,69 +505,44 @@ class DeviceManager:
         if not online_devices:
             return None
 
-        import random
         return random.choice(online_devices)
 
-    async def get_device_by_operator(self, operator: str) -> Optional[dict]:
-        """Получение устройства по оператору"""
-        for device in self.devices.values():
-            if device.get('operator', '').lower() == operator.lower() and device.get('status') == 'online':
-                return device
-        return None
-
-    async def get_device_by_region(self, region: str) -> Optional[dict]:
-        """Получение устройства по региону"""
-        for device in self.devices.values():
-            if device.get('region', '').lower() == region.lower() and device.get('status') == 'online':
-                return device
-        return None
-
     async def is_device_online(self, device_id: str) -> bool:
-        """Проверка онлайн статуса устройства"""
+        """Проверка онлайн статуса Android устройства"""
         device = self.devices.get(device_id)
         return device is not None and device.get('status') == 'online'
 
     async def get_device_external_ip(self, device_id: str) -> Optional[str]:
-        """Получение внешнего IP устройства"""
+        """Получение внешнего IP Android устройства"""
         device = self.devices.get(device_id)
         if not device:
             return None
 
-        device_type = device.get('type')
-
         try:
-            if device_type == 'android':
-                return await self.get_android_external_ip(device)
-            elif device_type == 'usb_modem':
-                return await self.get_usb_modem_external_ip(device)
-            elif device_type == 'raspberry_pi':
-                return await self.get_raspberry_external_ip(device)
-            else:
-                logger.warning(f"Unknown device type: {device_type}")
-                return None
-
+            return await self.get_android_external_ip(device)
         except Exception as e:
             logger.error(f"Error getting external IP for {device_id}: {e}")
             return None
 
-    async def get_android_external_ip_via_interface(self, device: dict) -> Optional[str]:
+    async def get_android_external_ip(self, device: Dict[str, Any]) -> Optional[str]:
         """Получение внешнего IP Android устройства через USB интерфейс"""
         try:
-            interface = device.get('interface')
+            interface = device.get('interface') or device.get('usb_interface')
             adb_id = device.get('adb_id')
 
-            if not interface:
-                logger.warning(f"No USB interface found for Android device {adb_id}")
+            if not interface or interface == "unknown":
+                logger.warning(f"No USB interface for Android device {adb_id}")
                 # Пытаемся найти интерфейс заново
                 interface = await self.find_android_usb_interface(adb_id)
                 if interface:
-                    # Обновляем устройство с найденным интерфейсом
                     device['interface'] = interface
+                    device['status'] = 'online'
+                    device['usb_tethering'] = True
                     logger.info(f"Found and updated interface for {adb_id}: {interface}")
                 else:
                     return None
 
-            # Метод 1: Через curl с привязкой к интерфейсу (наиболее надежный)
+            # Метод 1: Через curl с привязкой к интерфейсу
             try:
                 result = await asyncio.create_subprocess_exec(
                     'curl', '--interface', interface, '-s', '--connect-timeout', '10',
@@ -806,37 +590,6 @@ class DeviceManager:
             except Exception as e:
                 logger.debug(f"Method 2 failed for {adb_id}: {e}")
 
-            # Метод 3: Через ip route на устройстве (самый надежный для получения реального IP)
-            try:
-                result = await asyncio.create_subprocess_exec(
-                    'adb', '-s', adb_id, 'shell', 'ip', 'route', 'get', '8.8.8.8',
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                stdout, stderr = await result.communicate()
-
-                if result.returncode == 0:
-                    output = stdout.decode()
-                    # Ищем внешний IP в выводе
-                    ip_match = re.search(r'src (\d+\.\d+\.\d+\.\d+)', output)
-                    if ip_match:
-                        local_ip = ip_match.group(1)
-                        # Это локальный IP, нужно получить внешний
-                        # Используем простой HTTP запрос
-                        ext_result = await asyncio.create_subprocess_exec(
-                            'adb', '-s', adb_id, 'shell', 'wget', '-qO-', 'ipinfo.io/ip',
-                            stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE
-                        )
-                        ext_stdout, _ = await ext_result.communicate()
-                        if ext_result.returncode == 0:
-                            external_ip = ext_stdout.decode().strip()
-                            if re.match(r'^\d+\.\d+\.\d+\.\d+$', external_ip):
-                                logger.debug(f"Got external IP for {adb_id} via ip route: {external_ip}")
-                                return external_ip
-            except Exception as e:
-                logger.debug(f"Method 3 failed for {adb_id}: {e}")
-
             logger.warning(f"All methods failed to get external IP for Android device {adb_id}")
             return None
 
@@ -844,208 +597,24 @@ class DeviceManager:
             logger.error(f"Error getting Android external IP: {e}")
             return None
 
-    # async def get_android_external_ip(self, device: dict) -> Optional[str]:
-    #     """Получение внешнего IP Android устройства"""
-    #     try:
-    #         # Попробуем через USB интерфейс если есть
-    #         usb_interface = device.get('usb_interface')
-    #         if usb_interface:
-    #             try:
-    #                 # Используем curl через интерфейс для получения внешнего IP
-    #                 result = await asyncio.create_subprocess_exec(
-    #                     'curl', '--interface', usb_interface, '-s', '--connect-timeout', '10',
-    #                     'http://httpbin.org/ip',
-    #                     stdout=asyncio.subprocess.PIPE,
-    #                     stderr=asyncio.subprocess.PIPE
-    #                 )
-    #                 stdout, _ = await result.communicate()
-    #
-    #                 if result.returncode == 0:
-    #                     import json
-    #                     response = json.loads(stdout.decode())
-    #                     return response.get('origin', '').split(',')[0].strip()
-    #             except Exception as e:
-    #                 logger.warning(f"Failed to get external IP via USB interface: {e}")
-    #
-    #         # Fallback: попробуем через ADB
-    #         device_id = device.get('adb_id')
-    #         if device_id:
-    #             result = await asyncio.create_subprocess_exec(
-    #                 'adb', '-s', device_id, 'shell', 'ip', 'route', 'get', '8.8.8.8',
-    #                 stdout=asyncio.subprocess.PIPE,
-    #                 stderr=asyncio.subprocess.PIPE
-    #             )
-    #             stdout, _ = await result.communicate()
-    #
-    #             if result.returncode == 0:
-    #                 output = stdout.decode()
-    #                 ip_match = re.search(r'src (\d+\.\d+\.\d+\.\d+)', output)
-    #                 if ip_match:
-    #                     return ip_match.group(1)
-    #
-    #     except Exception as e:
-    #         logger.error(f"Error getting Android external IP: {e}")
-    #
-    #     return None
-
-    async def get_usb_modem_external_ip(self, device: dict) -> Optional[str]:
-        """Получение внешнего IP USB модема"""
-        try:
-            # Поиск PPP интерфейса
-            interfaces = netifaces.interfaces()
-            for interface in interfaces:
-                if interface.startswith('ppp') or interface.startswith('wwan'):
-                    addrs = netifaces.ifaddresses(interface)
-                    if netifaces.AF_INET in addrs:
-                        return addrs[netifaces.AF_INET][0]['addr']
-        except Exception as e:
-            logger.error(f"Error getting USB modem external IP: {e}")
-
-        return None
-
-    async def get_raspberry_external_ip(self, device: dict) -> Optional[str]:
-        """Получение внешнего IP Raspberry Pi"""
-        try:
-            interface = device.get('interface', '')
-            if interface and interface in netifaces.interfaces():
-                addrs = netifaces.ifaddresses(interface)
-                if netifaces.AF_INET in addrs:
-                    return addrs[netifaces.AF_INET][0]['addr']
-        except Exception as e:
-            logger.error(f"Error getting Raspberry Pi external IP: {e}")
-
-        return None
-
-    async def rotate_device_ip(self, device_id: str, method: str = None) -> bool:
-        """Ротация IP устройства с поддержкой выбора метода"""
-        device = self.devices.get(device_id)
-        if not device:
-            return False
-
-        device_type = device.get('type')
-
-        if device_type == 'android':
-            return await self.rotate_android_ip(device, method)
-        elif device_type == 'usb_modem':
-            return await self.rotate_usb_modem_ip(device, method)
-        elif device_type == 'raspberry_pi':
-            return await self.rotate_raspberry_ip(device, method)
-
-        return False
-
-    async def rotate_android_ip(self, device: dict, method: str = None) -> bool:
-        """Ротация IP для Android устройства с поддержкой разных методов"""
-        try:
-            device_id = device['adb_id']
-
-            # Определяем метод ротации (по умолчанию data_toggle)
-            rotation_method = method or 'data_toggle'
-
-            logger.info(f"Starting Android IP rotation for {device_id} using method: {rotation_method}")
-
-            if rotation_method == 'airplane_mode':
-                return await self._android_airplane_mode(device_id)
-            elif rotation_method == 'data_toggle':
-                return await self._android_data_toggle(device_id)
-            elif rotation_method == 'usb_reconnect':
-                return await self._android_usb_reconnect(device_id)
-            else:
-                logger.warning(f"Unknown rotation method: {rotation_method}, using data_toggle")
-                return await self._android_data_toggle(device_id)
-
-        except Exception as e:
-            logger.error(f"Error rotating Android IP: {e}")
-            return False
-
-    async def rotate_usb_modem_ip(self, device: dict) -> bool:
-        """Ротация IP для USB модема"""
-        try:
-            interface = device['interface']
-            logger.info(f"Starting USB modem IP rotation for {interface}")
-
-            with serial.Serial(interface, 115200, timeout=5) as ser:
-                # Отключение модема
-                ser.write(b'AT+CFUN=0\r\n')
-                time.sleep(2)
-
-                # Включение модема
-                ser.write(b'AT+CFUN=1\r\n')
-                time.sleep(10)
-
-            logger.info(f"USB modem IP rotation completed for {interface}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Error rotating USB modem IP: {e}")
-            return False
-
-    async def rotate_raspberry_ip(self, device: dict) -> bool:
-        """Ротация IP для Raspberry Pi"""
-        try:
-            interface = device['interface']
-            logger.info(f"Starting Raspberry Pi IP rotation for {interface}")
-
-            # Перезапуск PPP соединения
-            if interface.startswith('ppp'):
-                # Отключение PPP
-                result = await asyncio.create_subprocess_exec('sudo', 'poff', interface)
-                await result.wait()
-
-                await asyncio.sleep(3)
-
-                # Включение PPP
-                result = await asyncio.create_subprocess_exec('sudo', 'pon', interface)
-                await result.wait()
-
-                await asyncio.sleep(10)
-
-            logger.info(f"Raspberry Pi IP rotation completed for {interface}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Error rotating Raspberry Pi IP: {e}")
-            return False
-
-    async def get_summary(self) -> Dict[str, any]:
-        """Получение сводной информации об устройствах"""
-        total = len(self.devices)
-        online = len([d for d in self.devices.values() if d.get('status') == 'online'])
-        routing_capable = len([d for d in self.devices.values() if d.get('routing_capable', False)])
-
-        by_type = {}
-        for device in self.devices.values():
-            device_type = device.get('type', 'unknown')
-            by_type[device_type] = by_type.get(device_type, 0) + 1
-
-        return {
-            'total_devices': total,
-            'online_devices': online,
-            'offline_devices': total - online,
-            'routing_capable_devices': routing_capable,
-            'devices_by_type': by_type,
-            'last_discovery': datetime.now().isoformat()
-        }
-
     async def find_android_usb_interface(self, device_id: str) -> Optional[str]:
-        """
-        Автоматическое определение USB интерфейса для Android устройства
-        """
+        """Автоматическое определение USB интерфейса для Android устройства"""
         logger.info(f"Searching USB interface for Android device {device_id}")
 
         try:
-            # 1. Получаем список всех сетевых интерфейсов
+            # Получаем список всех сетевых интерфейсов
             all_interfaces = netifaces.interfaces()
             logger.debug(f"All network interfaces: {all_interfaces}")
 
-            # 2. Возможные шаблоны имен USB интерфейсов для Android
+            # Возможные шаблоны имен USB интерфейсов для Android
             android_patterns = [
-                r'^usb\d+$',  # usb0, usb1, etc.
-                r'^rndis\d+$',  # rndis0, rndis1, etc.
-                r'^enx[0-9a-f]{12}$',  # enx + MAC address (как ваш enx566cf3eaaf4b)
-                r'^enp\d+s\d+u\d+$',  # enp0s20u1, etc.
+                r'^usb\d+$',
+                r'^rndis\d+$',
+                r'^enx[0-9a-f]{12}$',
+                r'^enp\d+s\d+u\d+$',
             ]
 
-            # 3. Находим кандидатов среди интерфейсов
+            # Находим кандидатов среди интерфейсов
             candidate_interfaces = []
 
             for interface in all_interfaces:
@@ -1060,19 +629,19 @@ class DeviceManager:
                 logger.warning(f"No active USB interfaces found for device {device_id}")
                 return None
 
-            # 4. Если есть несколько кандидатов, выбираем лучший
+            # Если есть несколько кандидатов, выбираем лучший
             if len(candidate_interfaces) == 1:
                 interface = candidate_interfaces[0]
                 logger.info(f"Found USB interface for {device_id}: {interface}")
                 return interface
 
-            # 5. Если несколько интерфейсов, проверяем какой подключен к нашему устройству
+            # Если несколько интерфейсов, проверяем какой подключен к нашему устройству
             for interface in candidate_interfaces:
                 if await self._verify_interface_belongs_to_device(interface, device_id):
                     logger.info(f"Verified USB interface for {device_id}: {interface}")
                     return interface
 
-            # 6. Если не удалось определить однозначно, берем первый
+            # Если не удалось определить однозначно, берем первый
             interface = candidate_interfaces[0]
             logger.warning(f"Using first candidate interface for {device_id}: {interface}")
             return interface
@@ -1090,10 +659,7 @@ class DeviceManager:
             return False
 
     async def _verify_interface_belongs_to_device(self, interface: str, device_id: str) -> bool:
-        """
-        Проверка принадлежности интерфейса к конкретному Android устройству
-        Метод: проверяем можем ли мы получить одинаковый внешний IP
-        """
+        """Проверка принадлежности интерфейса к конкретному Android устройству"""
         try:
             # Получаем внешний IP через ADB
             adb_result = await asyncio.create_subprocess_exec(
@@ -1134,635 +700,117 @@ class DeviceManager:
             logger.debug(f"Error verifying interface {interface} for device {device_id}: {e}")
             return False
 
-    async def discover_android_devices(self) -> Dict[str, dict]:
-        """Обнаружение Android устройств с автоматическим определением USB интерфейса"""
-        devices = {}
-
+    async def update_device_status(self, device_id: str, status: str):
+        """Обновление статуса устройства в памяти и БД"""
         try:
-            logger.info("Scanning for Android devices via ADB...")
+            # Обновляем в памяти
+            if device_id in self.devices:
+                self.devices[device_id]['status'] = status
+                self.devices[device_id]['last_seen'] = datetime.now(timezone.utc).isoformat()
 
-            result = await asyncio.create_subprocess_exec(
-                'adb', 'devices', '-l',
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await result.communicate()
-
-            if result.returncode != 0:
-                logger.error(f"ADB command failed: {stderr.decode()}")
-                return devices
-
-            devices_output = stdout.decode().strip()
-            lines = devices_output.split('\n')[1:]  # Пропускаем заголовок
-
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-
-                # Парсинг строки ADB
-                parts = line.split()
-                if len(parts) >= 2:
-                    device_id = parts[0]
-                    status = parts[1]
-
-                    if status == 'device':
-                        logger.info(f"Found Android device: {device_id}")
-
-                        # Получаем детальную информацию
-                        device_details = await self.get_android_device_details(device_id)
-
-                        # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Ищем реальный USB интерфейс
-                        usb_interface = await self.find_android_usb_interface(device_id)
-
-                        if not usb_interface:
-                            logger.warning(f"No USB interface found for Android device {device_id}")
-                            # Все равно добавляем устройство, но с предупреждением
-                            usb_interface = "unknown"
-
-                        android_device_id = f"android_{device_id}"
-                        devices[android_device_id] = {
-                            'id': android_device_id,
-                            'type': 'android',
-                            'interface': usb_interface,  # ТЕПЕРЬ РЕАЛЬНЫЙ USB ИНТЕРФЕЙС
-                            'adb_id': device_id,
-                            'device_info': device_details.get('friendly_name', f"Android device {device_id}"),
-                            'status': 'online' if usb_interface != "unknown" else 'interface_missing',
-                            'manufacturer': device_details.get('manufacturer', 'Unknown'),
-                            'model': device_details.get('model', 'Unknown'),
-                            'android_version': device_details.get('android_version', 'Unknown'),
-                            'battery_level': device_details.get('battery_level', 0),
-                            'usb_tethering': True if usb_interface != "unknown" else False,
-                            'rotation_methods': ['data_toggle', 'airplane_mode'],
-                            'last_seen': datetime.now().isoformat()
-                        }
-
-                        if usb_interface != "unknown":
-                            logger.info(
-                                f"Android device discovered: {device_id} -> {usb_interface} "
-                                f"({device_details.get('manufacturer')} {device_details.get('model')})"
-                            )
-                        else:
-                            logger.warning(
-                                f"Android device discovered without USB interface: {device_id} "
-                                f"({device_details.get('manufacturer')} {device_details.get('model')})"
-                            )
-                    else:
-                        logger.warning(f"Device {device_id} has status '{status}', skipping")
-
-        except FileNotFoundError:
-            logger.error("ADB not found - install android-tools-adb")
-        except Exception as e:
-            logger.error(f"Error discovering Android devices: {e}")
-
-        return devices
-
-    async def get_android_external_ip(self, device: Dict[str, Any]) -> Optional[str]:
-        """Получение внешнего IP Android устройства через USB интерфейс"""
-        try:
-            interface = device.get('interface')
-            adb_id = device.get('adb_id')
-
-            if not interface or interface == "unknown":
-                logger.warning(f"No USB interface for Android device {adb_id}")
-                # Пытаемся найти интерфейс заново
-                interface = await self.find_android_usb_interface(adb_id)
-                if interface:
-                    # Обновляем устройство с найденным интерфейсом
-                    device['interface'] = interface
-                    device['status'] = 'online'
-                    device['usb_tethering'] = True
-                    logger.info(f"Found and updated interface for {adb_id}: {interface}")
-                else:
-                    return None
-
-            # Метод 1: Через curl с привязкой к интерфейсу (наиболее надежный)
-            try:
-                result = await asyncio.create_subprocess_exec(
-                    'curl', '--interface', interface, '-s', '--connect-timeout', '10',
-                    'httpbin.org/ip',
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
+            # Обновляем в БД
+            async with AsyncSessionLocal() as db:
+                stmt = update(ProxyDevice).where(
+                    ProxyDevice.name == device_id
+                ).values(
+                    status=status,
+                    last_heartbeat=datetime.now()
                 )
-                stdout, stderr = await result.communicate()
-
-                if result.returncode == 0:
-                    try:
-                        import json
-                        response = json.loads(stdout.decode())
-                        external_ip = response.get('origin')
-                        if external_ip:
-                            logger.debug(f"Got external IP for {adb_id} via interface {interface}: {external_ip}")
-                            return external_ip
-                    except json.JSONDecodeError:
-                        # Пробуем найти IP в тексте
-                        ip_match = re.search(r'(\d+\.\d+\.\d+\.\d+)', stdout.decode())
-                        if ip_match:
-                            return ip_match.group(1)
-            except Exception as e:
-                logger.debug(f"Method 1 failed for {adb_id}: {e}")
-
-            # Метод 2: Через ADB (резервный)
-            try:
-                result = await asyncio.create_subprocess_exec(
-                    'adb', '-s', adb_id, 'shell', 'curl', '-s', '--connect-timeout', '5', 'httpbin.org/ip',
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                stdout, stderr = await result.communicate()
-
-                if result.returncode == 0:
-                    try:
-                        import json
-                        response = json.loads(stdout.decode())
-                        external_ip = response.get('origin')
-                        if external_ip:
-                            logger.debug(f"Got external IP for {adb_id} via ADB: {external_ip}")
-                            return external_ip
-                    except json.JSONDecodeError:
-                        pass
-            except Exception as e:
-                logger.debug(f"Method 2 failed for {adb_id}: {e}")
-
-            logger.warning(f"All methods failed to get external IP for Android device {adb_id}")
-            return None
+                await db.execute(stmt)
+                await db.commit()
 
         except Exception as e:
-            logger.error(f"Error getting Android external IP: {e}")
-            return None
+            logger.error(f"Error updating device status: {e}")
+
+    async def get_devices_from_db(self) -> List[dict]:
+        """Получение списка Android устройств из базы данных"""
+        try:
+            async with AsyncSessionLocal() as db:
+                stmt = select(ProxyDevice).where(ProxyDevice.device_type == 'android')
+                result = await db.execute(stmt)
+                devices = result.scalars().all()
+
+                devices_list = []
+                for device in devices:
+                    device_data = {
+                        "id": str(device.id),
+                        "name": device.name,
+                        "device_type": device.device_type,
+                        "ip_address": device.ip_address,
+                        "port": device.port,
+                        "status": device.status,
+                        "current_external_ip": device.current_external_ip,
+                        "operator": device.operator,
+                        "region": device.region,
+                        "last_heartbeat": device.last_heartbeat,
+                        "rotation_interval": device.rotation_interval,
+                        "proxy_enabled": device.proxy_enabled or False,
+                        "dedicated_port": device.dedicated_port,
+                        "proxy_username": device.proxy_username,
+                        "proxy_password": device.proxy_password
+                    }
+                    devices_list.append(device_data)
+
+                return devices_list
+
+        except Exception as e:
+            logger.error(f"Error getting Android devices from database: {e}")
+            return []
+
+    async def sync_devices_with_db(self):
+        """Синхронизация обнаруженных устройств с базой данных"""
+        try:
+            logger.info("Syncing discovered Android devices with database...")
+
+            for device_id, device_info in self.devices.items():
+                await self.save_device_to_db(device_id, device_info)
+
+            logger.info("✅ Android device synchronization completed")
+
+        except Exception as e:
+            logger.error(f"Error syncing Android devices with database: {e}")
+
+    async def force_sync_to_db(self):
+        """Принудительная синхронизация всех Android устройств с БД"""
+        logger.info("🔄 Starting forced Android device synchronization to database...")
+        await self.sync_devices_with_db()
+        return len(self.devices)
+
+    async def get_summary(self) -> Dict[str, any]:
+        """Получение сводной информации об Android устройствах"""
+        total = len(self.devices)
+        online = len([d for d in self.devices.values() if d.get('status') == 'online'])
+        routing_capable = len([d for d in self.devices.values() if d.get('routing_capable', False)])
+
+        by_type = {}
+        for device in self.devices.values():
+            device_type = device.get('type', 'unknown')
+            by_type[device_type] = by_type.get(device_type, 0) + 1
+
+        return {
+            'total_devices': total,
+            'online_devices': online,
+            'offline_devices': total - online,
+            'routing_capable_devices': routing_capable,
+            'devices_by_type': by_type,
+            'last_discovery': datetime.now().isoformat()
+        }
 
     async def get_device_proxy_route(self, device_id: str) -> Optional[dict]:
-        """Получение маршрута для проксирования через устройство"""
-
+        """Получение маршрута для проксирования через Android устройство"""
         all_devices = await self.get_all_devices()
         device = all_devices.get(device_id)
 
         if not device:
             return None
 
-        device_type = device.get('type')
-
-        if device_type == 'android':
-            interface = device.get('interface')
-            if interface:
-                return {
-                    'type': 'android_usb',
-                    'interface': interface,
-                    'method': 'interface_binding',
-                    'device_id': device.get('adb_id')
-                }
-        elif device_type == 'usb_modem':
-            interface = device.get('interface')
-            if interface:
-                return {
-                    'type': 'usb_modem',
-                    'interface': interface,
-                    'method': 'ppp_interface'
-                }
-        elif device_type == 'raspberry_pi':
-            interface = device.get('interface')
-            if interface:
-                return {
-                    'type': 'raspberry_pi',
-                    'interface': interface,
-                    'method': 'network_interface'
-                }
-
-        return None
-
-    async def is_port_used(self, db: AsyncSession, port: int) -> bool:
-        """Проверка, используется ли порт другим устройством"""
-        try:
-            stmt = select(ProxyDevice.id).where(ProxyDevice.port == port)
-            result = await db.execute(stmt)
-            return result.scalar_one_or_none() is not None
-        except Exception as e:
-            logger.error(f"Error checking port usage: {e}")
-            return True  # В случае ошибки считаем порт занятым
-
-        # Добавьте эти методы в backend/app/core/device_manager.py
-
-    async def enhanced_discover_all_devices(self):
-        """Улучшенное обнаружение всех устройств"""
-        try:
-            from ..utils.device_detection import get_device_detector
-
-            logger.info("🔍 Starting enhanced device discovery...")
-
-            detector = get_device_detector()
-            discovered_devices = await detector.detect_all_devices()
-
-            logger.info(f"🔍 Enhanced discovery found {len(discovered_devices)} devices")
-
-            # Обновляем наш список устройств
-            for device_id, device_info in discovered_devices.items():
-                # Тестируем подключение каждого устройства
-                connectivity_test = await detector.test_device_connectivity(device_id)
-
-                if connectivity_test.get('success', False):
-                    device_info['status'] = 'online'
-                    device_info['connectivity_test'] = connectivity_test
-
-                    # Получаем внешний IP если возможно
-                    external_ip = await self._get_device_external_ip_enhanced(device_info)
-                    if external_ip:
-                        device_info['external_ip'] = external_ip
-
-                else:
-                    device_info['status'] = 'offline'
-                    device_info['connectivity_error'] = connectivity_test.get('error', 'Unknown error')
-
-                # Обновляем информацию об устройстве
-                self.devices[device_id] = device_info
-                logger.info(
-                    f"📱 Device {device_id}: {device_info['status']} - {device_info.get('device_info', 'Unknown')}")
-
-            # Синхронизируем с базой данных
-            await self.sync_devices_to_database()
-
-            logger.info(f"✅ Enhanced discovery completed. Total devices: {len(self.devices)}")
-            return self.devices
-
-        except Exception as e:
-            logger.error(f"❌ Enhanced discovery failed: {e}")
-            # Fallback к старому методу
-            return await self.discover_all_devices()
-
-    async def _get_device_external_ip_enhanced(self, device_info: dict) -> Optional[str]:
-        """Улучшенное получение внешнего IP устройства"""
-        device_type = device_info.get('type')
-
-        try:
-            if device_type == 'android':
-                # Для Android пытаемся через ADB
-                adb_id = device_info.get('adb_id')
-                if adb_id:
-                    return await self._get_android_external_ip_via_adb(adb_id)
-
-            elif device_type == 'usb_modem':
-                # Для USB модема пытаемся через AT команды
-                return await self._get_usb_modem_external_ip(device_info)
-
-            elif device_type in ['network_device', 'raspberry_pi']:
-                # Для сетевых устройств пытаемся через интерфейс
-                return await self._get_network_device_external_ip(device_info)
-
-        except Exception as e:
-            logger.error(f"Error getting external IP for {device_info.get('id')}: {e}")
-
-        return None
-
-    async def _get_android_external_ip_via_adb(self, adb_id: str) -> Optional[str]:
-        """Получение внешнего IP Android устройства через ADB"""
-        try:
-            # Пытаемся получить IP через curl на устройстве
-            result = await asyncio.create_subprocess_exec(
-                'adb', '-s', adb_id, 'shell', 'curl', '-s', '--max-time', '10', 'https://httpbin.org/ip',
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-            stdout, stderr = await result.communicate()
-
-            if result.returncode == 0:
-                import json
-                data = json.loads(stdout.decode())
-                return data.get('origin', '').split(',')[0].strip()
-
-        except Exception as e:
-            logger.debug(f"Error getting Android IP via ADB: {e}")
-
-        # Альтернативный способ через wget
-        try:
-            result = await asyncio.create_subprocess_exec(
-                'adb', '-s', adb_id, 'shell', 'wget', '-qO-', '--timeout=10', 'https://icanhazip.com',
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-            stdout, stderr = await result.communicate()
-
-            if result.returncode == 0:
-                ip = stdout.decode().strip()
-                if self._is_valid_ip(ip):
-                    return ip
-
-        except Exception as e:
-            logger.debug(f"Error getting Android IP via wget: {e}")
-
-        return None
-
-    async def _get_usb_modem_external_ip(self, device_info: dict) -> Optional[str]:
-        """Получение внешнего IP USB модема"""
-        try:
-            # Пытаемся найти сетевой интерфейс модема
-            interface = await self._find_modem_network_interface(device_info)
-            if interface:
-                return await self._get_interface_external_ip(interface)
-
-        except Exception as e:
-            logger.debug(f"Error getting USB modem IP: {e}")
-
-        return None
-
-    async def _find_modem_network_interface(self, device_info: dict) -> Optional[str]:
-        """Поиск сетевого интерфейса USB модема"""
-        try:
-            # Ищем интерфейсы, которые могут принадлежать модему
-            interfaces = netifaces.interfaces()
-
-            # Проверяем типичные интерфейсы модемов
-            for interface in interfaces:
-                if interface.startswith(('wwan', 'ppp', 'usb')):
-                    try:
-                        addrs = netifaces.ifaddresses(interface)
-                        if netifaces.AF_INET in addrs:
-                            return interface
-                    except:
-                        continue
-
-        except Exception as e:
-            logger.debug(f"Error finding modem interface: {e}")
-
-        return None
-
-    async def _get_network_device_external_ip(self, device_info: dict) -> Optional[str]:
-        """Получение внешнего IP сетевого устройства"""
-        interface = device_info.get('interface')
+        interface = device.get('interface') or device.get('usb_interface')
         if interface:
-            return await self._get_interface_external_ip(interface)
-        return None
-
-    async def _get_interface_external_ip(self, interface: str) -> Optional[str]:
-        """Получение внешнего IP через конкретный интерфейс"""
-        try:
-            # Используем curl с привязкой к интерфейсу
-            result = await asyncio.create_subprocess_exec(
-                'curl', '-s', '--max-time', '10', '--interface', interface, 'https://httpbin.org/ip',
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-            stdout, stderr = await result.communicate()
-
-            if result.returncode == 0:
-                import json
-                data = json.loads(stdout.decode())
-                return data.get('origin', '').split(',')[0].strip()
-
-        except Exception as e:
-            logger.debug(f"Error getting IP via interface {interface}: {e}")
-
-        # Альтернативный способ
-        try:
-            result = await asyncio.create_subprocess_exec(
-                'wget', '-qO-', '--timeout=10', '--bind-address',
-                await self._get_interface_ip(interface), 'https://icanhazip.com',
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-            stdout, stderr = await result.communicate()
-
-            if result.returncode == 0:
-                ip = stdout.decode().strip()
-                if self._is_valid_ip(ip):
-                    return ip
-
-        except Exception as e:
-            logger.debug(f"Error getting IP via wget for interface {interface}: {e}")
+            return {
+                'type': 'android_usb',
+                'interface': interface,
+                'method': 'interface_binding',
+                'device_id': device.get('adb_id')
+            }
 
         return None
-
-    async def _get_interface_ip(self, interface: str) -> Optional[str]:
-        """Получение локального IP интерфейса"""
-        try:
-            addrs = netifaces.ifaddresses(interface)
-            if netifaces.AF_INET in addrs:
-                return addrs[netifaces.AF_INET][0]['addr']
-        except:
-            pass
-        return None
-
-    def _is_valid_ip(self, ip: str) -> bool:
-        """Проверка валидности IP адреса"""
-        try:
-            import ipaddress
-            ipaddress.ip_address(ip)
-            return True
-        except:
-            return False
-
-    async def enhanced_rotate_device_ip(self, device_id: str) -> bool:
-        """Улучшенная ротация IP с автоматическим выбором метода"""
-        try:
-            from ..core.managers import get_enhanced_rotation_manager
-
-            rotation_manager = get_enhanced_rotation_manager()
-            if not rotation_manager:
-                logger.error("Enhanced rotation manager not available")
-                return False
-
-            success, result = await rotation_manager.rotate_device_ip(device_id)
-
-            if success:
-                logger.info(f"Enhanced IP rotation successful for {device_id}: {result}")
-
-                # Обновляем информацию об устройстве
-                if device_id in self.devices:
-                    # Ждем немного для стабилизации соединения
-                    await asyncio.sleep(5)
-
-                    # Получаем новый IP
-                    device_info = self.devices[device_id]
-                    new_ip = await self._get_device_external_ip_enhanced(device_info)
-
-                    if new_ip:
-                        self.devices[device_id]['external_ip'] = new_ip
-                        logger.info(f"New IP for {device_id}: {new_ip}")
-
-                return True
-            else:
-                logger.error(f"Enhanced IP rotation failed for {device_id}: {result}")
-                return False
-
-        except Exception as e:
-            logger.error(f"Error in enhanced IP rotation for {device_id}: {e}")
-            return False
-
-    async def get_device_rotation_capabilities(self, device_id: str) -> dict:
-        """Получение возможностей ротации устройства"""
-        device = self.devices.get(device_id)
-        if not device:
-            return {"error": "Device not found"}
-
-        device_type = device.get('type', 'unknown')
-
-        capabilities = {
-            'device_id': device_id,
-            'device_type': device_type,
-            'available_methods': device.get('rotation_methods', []),
-            'recommended_method': self._get_recommended_rotation_method(device_type),
-            'supports_auto_rotation': True,
-            'estimated_rotation_time': self._get_estimated_rotation_time(device_type),
-            'risk_factors': self._get_rotation_risk_factors(device_type)
-        }
-
-        # Проверяем специфические возможности устройства
-        if device_type == 'android':
-            capabilities.update({
-                'adb_available': device.get('adb_id') is not None,
-                'usb_tethering': device.get('interface') is not None,
-                'battery_level': device.get('battery_level', 0)
-            })
-        elif device_type == 'usb_modem':
-            capabilities.update({
-                'serial_port': device.get('interface'),
-                'at_commands_support': True,
-                'manufacturer': device.get('manufacturer', 'Unknown')
-            })
-
-        return capabilities
-
-    def _get_recommended_rotation_method(self, device_type: str) -> str:
-        """Получение рекомендуемого метода ротации"""
-        recommendations = {
-            'android': 'data_toggle',
-            'usb_modem': 'at_commands',
-            'raspberry_pi': 'ppp_restart',
-            'network_device': 'interface_restart'
-        }
-        return recommendations.get(device_type, 'data_toggle')
-
-    def _get_estimated_rotation_time(self, device_type: str) -> int:
-        """Получение предполагаемого времени ротации в секундах"""
-        times = {
-            'android': 15,
-            'usb_modem': 25,
-            'raspberry_pi': 30,
-            'network_device': 10
-        }
-        return times.get(device_type, 20)
-
-    def _get_rotation_risk_factors(self, device_type: str) -> list:
-        """Получение факторов риска при ротации"""
-        risks = {
-            'android': [
-                'Временная потеря соединения (10-15 сек)',
-                'Возможна необходимость разблокировки устройства'
-            ],
-            'usb_modem': [
-                'Длительное время восстановления (20-30 сек)',
-                'Возможны проблемы с AT командами'
-            ],
-            'raspberry_pi': [
-                'Наиболее длительный процесс (30+ сек)',
-                'Может потребоваться физический доступ'
-            ],
-            'network_device': [
-                'Кратковременная потеря соединения',
-                'Минимальные риски'
-            ]
-        }
-        return risks.get(device_type, ['Неизвестные риски'])
-
-    async def _android_data_toggle(self, device_id: str) -> bool:
-        """Ротация через переключение мобильных данных (ваш текущий метод)"""
-        try:
-            logger.info(f"Using data toggle method for {device_id}")
-
-            # Отключение мобильных данных
-            result = await asyncio.create_subprocess_exec(
-                'adb', '-s', device_id, 'shell', 'svc', 'data', 'disable'
-            )
-            await result.wait()
-
-            # Ждем немного
-            await asyncio.sleep(3)
-
-            # Включение мобильных данных
-            result = await asyncio.create_subprocess_exec(
-                'adb', '-s', device_id, 'shell', 'svc', 'data', 'enable'
-            )
-            await result.wait()
-
-            # Ждем восстановления соединения
-            await asyncio.sleep(10)
-
-            logger.info(f"Data toggle rotation completed for {device_id}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Error in data toggle rotation: {e}")
-            return False
-
-    async def _android_airplane_mode(self, device_id: str) -> bool:
-        """Ротация через режим полета"""
-        try:
-            logger.info(f"Using airplane mode method for {device_id}")
-
-            # Включение режима полета
-            result = await asyncio.create_subprocess_exec(
-                'adb', '-s', device_id, 'shell', 'settings', 'put', 'global', 'airplane_mode_on', '1'
-            )
-            await result.wait()
-
-            # Применение настроек
-            # result = await asyncio.create_subprocess_exec(
-            #     'adb', '-s', device_id, 'shell', 'am', 'broadcast',
-            #     '-a', 'android.intent.action.AIRPLANE_MODE', '--ez', 'state', 'true'
-            # )
-            # await result.wait()
-
-            # Ожидание в режиме полета
-            logger.info(f"Device {device_id} in airplane mode, waiting 5 seconds...")
-            await asyncio.sleep(5)
-
-            # Отключение режима полета
-            result = await asyncio.create_subprocess_exec(
-                'adb', '-s', device_id, 'shell', 'settings', 'put', 'global', 'airplane_mode_on', '0'
-            )
-            await result.wait()
-
-            # Применение настроек
-            # result = await asyncio.create_subprocess_exec(
-            #     'adb', '-s', device_id, 'shell', 'am', 'broadcast',
-            #     '-a', 'android.intent.action.AIRPLANE_MODE', '--ez', 'state', 'false'
-            # )
-            # await result.wait()
-
-            # Ожидание восстановления соединения
-            logger.info(f"Device {device_id} exited airplane mode, waiting 15 seconds for reconnection...")
-            await asyncio.sleep(5)
-
-            logger.info(f"Airplane mode rotation completed for {device_id}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Error in airplane mode rotation: {e}")
-            return False
-
-    async def _android_usb_reconnect(self, device_id: str) -> bool:
-        """Ротация через переподключение USB tethering"""
-        try:
-            logger.info(f"Using USB reconnect method for {device_id}")
-
-            # Отключение USB tethering
-            result = await asyncio.create_subprocess_exec(
-                'adb', '-s', device_id, 'shell', 'svc', 'usb', 'setFunctions', 'none'
-            )
-            await result.wait()
-
-            await asyncio.sleep(3)
-
-            # Включение USB tethering (rndis = USB ethernet)
-            result = await asyncio.create_subprocess_exec(
-                'adb', '-s', device_id, 'shell', 'svc', 'usb', 'setFunctions', 'rndis'
-            )
-            await result.wait()
-
-            # Ждем восстановления USB соединения
-            await asyncio.sleep(8)
-
-            logger.info(f"USB reconnect rotation completed for {device_id}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Error in USB reconnect rotation: {e}")
-            return False

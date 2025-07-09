@@ -1,33 +1,37 @@
-# backend/app/core/modem_manager.py
+# backend/app/core/modem_manager.py - МЕНЕДЖЕР ДЛЯ HUAWEI E3372h МОДЕМОВ
+
 import asyncio
-import serial
 import subprocess
 import time
 import re
 import json
-from typing import Dict, List, Optional, Tuple
+import netifaces
+import aiohttp
+from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime, timezone
 import structlog
-import psutil
-import netifaces
+import random
+import uuid
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, update, func
+from ..models.database import AsyncSessionLocal
+from ..models.base import ProxyDevice
 
 logger = structlog.get_logger()
 
 
 class ModemManager:
-    """Менеджер для прямого управления модемами без агентов"""
+    """Менеджер для работы с USB модемами Huawei E3372h"""
 
     def __init__(self):
         self.modems: Dict[str, dict] = {}
         self.running = False
+        self.huawei_oui = "0c:5b:8f"  # Официальный OUI Huawei Technologies Co.,Ltd.
 
     async def start(self):
         """Запуск менеджера модемов"""
         self.running = True
-
-        # Автоматическое обнаружение модемов
-        await self.discover_modems()
-
+        await self.discover_all_devices()
         logger.info("Modem manager started")
 
     async def stop(self):
@@ -35,650 +39,748 @@ class ModemManager:
         self.running = False
         logger.info("Modem manager stopped")
 
-    async def discover_modems(self):
-        """Автоматическое обнаружение подключенных модемов"""
+    async def discover_all_devices(self):
+        """Обнаружение всех Huawei E3372h модемов с сохранением в БД"""
         try:
-            # Обнаружение USB модемов
-            usb_modems = await self.discover_usb_modems()
+            # Очищаем старый список
+            self.modems.clear()
 
-            # Обнаружение Android устройств
-            android_devices = await self.discover_android_devices()
+            logger.info("Starting Huawei E3372h modem discovery...")
 
-            # Обнаружение сетевых модемов (Raspberry Pi)
-            network_modems = await self.discover_network_modems()
+            # Обнаружение USB модемов Huawei
+            huawei_modems = await self.discover_huawei_modems()
 
             # Объединение всех найденных модемов
-            all_modems = {**usb_modems, **android_devices, **network_modems}
-
-            for modem_id, modem_info in all_modems.items():
+            for modem_id, modem_info in huawei_modems.items():
+                # Сохраняем в память
                 self.modems[modem_id] = modem_info
+
                 logger.info(
-                    "Discovered modem",
+                    "Huawei modem discovered",
                     modem_id=modem_id,
                     type=modem_info['type'],
+                    interface=modem_info.get('interface', 'N/A'),
+                    web_interface=modem_info.get('web_interface', 'N/A'),
                     info=modem_info.get('device_info', 'Unknown')
                 )
 
-        except Exception as e:
-            logger.error("Error discovering modems", error=str(e))
+                # Сохраняем в базу данных
+                await self.save_device_to_db(modem_id, modem_info)
 
-    async def discover_usb_modems(self) -> Dict[str, dict]:
-        """Обнаружение USB модемов"""
+            logger.info(f"✅ Total Huawei modems discovered: {len(self.modems)}")
+            logger.info(f"✅ Modems saved to database")
+
+        except Exception as e:
+            logger.error("Error discovering Huawei modems", error=str(e))
+
+    async def discover_huawei_modems(self) -> Dict[str, dict]:
+        """Обнаружение Huawei E3372h модемов по MAC-адресу"""
         modems = {}
 
         try:
-            # Поиск USB serial портов
-            for device in ['/dev/ttyUSB0', '/dev/ttyUSB1', '/dev/ttyUSB2', '/dev/ttyACM0', '/dev/ttyACM1']:
+            logger.info("Scanning for Huawei E3372h modems by MAC address...")
+
+            # Получаем все сетевые интерфейсы
+            all_interfaces = netifaces.interfaces()
+
+            for interface in all_interfaces:
                 try:
-                    # Попытка открыть порт для проверки
-                    with serial.Serial(device, timeout=1) as ser:
-                        modem_id = f"usb_{device.split('/')[-1]}"
-                        modems[modem_id] = {
-                            'id': modem_id,
-                            'type': 'usb_modem',
-                            'interface': device,
-                            'device_info': f"USB modem on {device}",
-                            'status': 'detected'
-                        }
-                        logger.info(f"Found USB modem on {device}")
+                    # Получаем MAC-адрес интерфейса
+                    mac_addr = await self.get_interface_mac(interface)
+                    if not mac_addr:
+                        continue
 
-                except (serial.SerialException, PermissionError):
+                    # Проверяем, является ли это Huawei устройством
+                    if not mac_addr.lower().startswith(self.huawei_oui.lower()):
+                        continue
+
+                    logger.info(f"Found Huawei interface: {interface} with MAC: {mac_addr}")
+
+                    # Получаем IP-адрес интерфейса
+                    interface_ip = await self.get_interface_ip(interface)
+                    if not interface_ip:
+                        logger.warning(f"No IP address for Huawei interface {interface}")
+                        continue
+
+                    # Извлекаем номер подсети из IP (например, 192.168.108.100 -> 108)
+                    subnet_number = await self.extract_subnet_number(interface_ip)
+                    if subnet_number is None:
+                        logger.warning(f"Cannot extract subnet number from IP {interface_ip}")
+                        continue
+
+                    # Формируем адрес веб-интерфейса
+                    web_interface = f"192.168.{subnet_number}.1"
+
+                    # Проверяем доступность веб-интерфейса
+                    web_accessible = await self.check_web_interface_accessibility(web_interface)
+
+                    # Получаем детальную информацию о модеме
+                    modem_details = await self.get_modem_details(web_interface, interface_ip)
+
+                    modem_id = f"huawei_{interface}"
+                    modem_info = {
+                        'id': modem_id,
+                        'type': 'usb_modem',
+                        'model': 'E3372h',
+                        'manufacturer': 'Huawei',
+                        'interface': interface,
+                        'mac_address': mac_addr,
+                        'interface_ip': interface_ip,
+                        'web_interface': web_interface,
+                        'subnet_number': subnet_number,
+                        'device_info': f"Huawei E3372h on {interface} (subnet {subnet_number})",
+                        'status': 'online' if web_accessible else 'offline',
+                        'web_accessible': web_accessible,
+                        'routing_capable': True,
+                        'last_seen': datetime.now().isoformat()
+                    }
+
+                    # Добавляем детальную информацию если получена
+                    if modem_details:
+                        modem_info.update(modem_details)
+
+                    modems[modem_id] = modem_info
+
+                    logger.info(
+                        f"✅ Huawei E3372h discovered: {interface} -> {web_interface} "
+                        f"(subnet {subnet_number}, web {'accessible' if web_accessible else 'not accessible'})"
+                    )
+
+                except Exception as e:
+                    logger.warning(f"Error processing interface {interface}: {e}")
                     continue
 
         except Exception as e:
-            logger.error("Error discovering USB modems", error=str(e))
+            logger.error("Error discovering Huawei modems", error=str(e))
 
         return modems
 
-    async def discover_android_devices_not_advanced(self) -> Dict[str, dict]:
-        """Обнаружение Android устройств через ADB - ИСПРАВЛЕННАЯ РЕАЛИЗАЦИЯ"""
-        modems = {}
-
+    async def get_interface_mac(self, interface: str) -> Optional[str]:
+        """Получение MAC-адреса интерфейса"""
         try:
-            logger.info("Scanning for Android devices via ADB...")
+            # Метод 1: через netifaces
+            try:
+                interface_info = netifaces.ifaddresses(interface)
+                if netifaces.AF_LINK in interface_info:
+                    link_info = interface_info[netifaces.AF_LINK][0]
+                    mac_addr = link_info.get('addr')
+                    if mac_addr and mac_addr != '00:00:00:00:00:00':
+                        return mac_addr
+            except Exception:
+                pass
 
-            # Проверка доступности ADB
-            result = await asyncio.create_subprocess_exec(
-                'adb', 'devices', '-l',
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await result.communicate()
+            # Метод 2: через ip command
+            try:
+                result = await asyncio.create_subprocess_exec(
+                    'ip', 'link', 'show', interface,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, _ = await result.communicate()
 
-            logger.info(f"ADB command return code: {result.returncode}")
-            logger.info(f"ADB stdout: {stdout.decode()}")
-            logger.info(f"ADB stderr: {stderr.decode()}")
+                if result.returncode == 0:
+                    output = stdout.decode()
+                    mac_match = re.search(r'link/ether ([0-9a-f:]{17})', output)
+                    if mac_match:
+                        return mac_match.group(1)
+            except Exception:
+                pass
 
-            if result.returncode != 0:
-                logger.error(f"ADB command failed with code {result.returncode}: {stderr.decode()}")
-                return modems
+            # Метод 3: через /sys/class/net
+            try:
+                with open(f'/sys/class/net/{interface}/address', 'r') as f:
+                    mac_addr = f.read().strip()
+                    if mac_addr and mac_addr != '00:00:00:00:00:00':
+                        return mac_addr
+            except Exception:
+                pass
 
-            devices_output = stdout.decode().strip()
-            logger.info(f"ADB devices output: '{devices_output}'")
-
-            lines = devices_output.split('\n')
-            logger.info(f"Split into {len(lines)} lines: {lines}")
-
-            # Пропускаем заголовок "List of devices attached"
-            device_lines = lines[1:]
-
-            for i, line in enumerate(device_lines):
-                line = line.strip()
-                logger.info(f"Processing line {i}: '{line}' (length: {len(line)})")
-
-                if not line:
-                    logger.info(f"Line {i} is empty, skipping")
-                    continue
-
-                # ИСПРАВЛЕННЫЙ ПАРСИНГ: используем регулярное выражение или разбиение по пробелам
-                # Формат: "AH3SCP4B11207250       device usb:1-1.2 product:JDY-LX1 model:JDY_LX1 device:HNJDY-M1 transport_id:1"
-
-                # Вариант 1: Простое разбиение по пробелам
-                parts = line.split()
-                logger.info(f"Line {i} split into {len(parts)} parts: {parts}")
-
-                if len(parts) >= 2:
-                    device_id = parts[0]
-                    status = parts[1]
-
-                    logger.info(f"Found Android device: {device_id}, status: {status}")
-
-                    if status == 'device':  # Только полностью подключенные устройства
-                        logger.info(f"Device {device_id} is fully connected, getting details...")
-
-                        # Получаем детальную информацию об устройстве
-                        device_details = await self.get_android_device_details(device_id)
-                        logger.info(f"Device details for {device_id}: {device_details}")
-
-                        modem_id = f"android_{device_id}"
-                        modems[modem_id] = {
-                            'id': modem_id,
-                            'type': 'android',
-                            'interface': device_id,
-                            'adb_id': device_id,
-                            'device_info': device_details.get('friendly_name', f"Android device {device_id}"),
-                            'status': 'online',
-                            'manufacturer': device_details.get('manufacturer', 'Unknown'),
-                            'model': device_details.get('model', 'Unknown'),
-                            'android_version': device_details.get('android_version', 'Unknown'),
-                            'battery_level': device_details.get('battery_level', 0),
-                            'usb_tethering': device_details.get('usb_tethering', False),
-                            'rotation_methods': ['data_toggle', 'airplane_mode'],
-                            'last_seen': datetime.now().isoformat()
-                        }
-
-                        logger.info(
-                            "Android device discovered successfully",
-                            device_id=device_id,
-                            modem_id=modem_id,
-                            manufacturer=device_details.get('manufacturer'),
-                            model=device_details.get('model'),
-                            battery=device_details.get('battery_level')
-                        )
-                    else:
-                        logger.warning(f"Device {device_id} has status '{status}', not 'device'")
-                else:
-                    logger.warning(f"Line {i} doesn't have enough parts: {parts}")
-
-            logger.info(f"Total Android devices found: {len(modems)}")
-
-        except FileNotFoundError:
-            logger.error("ADB not found - install android-tools-adb")
         except Exception as e:
-            logger.error("Error discovering Android devices", error=str(e))
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
+            logger.debug(f"Error getting MAC for interface {interface}: {e}")
 
-        return modems
+        return None
 
-    # АЛЬТЕРНАТИВНЫЙ БОЛЕЕ ПРОДВИНУТЫЙ ПАРСЕР
-    async def discover_android_devices(self) -> Dict[str, dict]:
-        """Обнаружение Android устройств через ADB - ПРОДВИНУТАЯ РЕАЛИЗАЦИЯ"""
-        modems = {}
-
+    async def get_interface_ip(self, interface: str) -> Optional[str]:
+        """Получение IP-адреса интерфейса"""
         try:
-            logger.info("Scanning for Android devices via ADB...")
+            if interface not in netifaces.interfaces():
+                return None
 
-            # Проверка доступности ADB
-            result = await asyncio.create_subprocess_exec(
-                'adb', 'devices', '-l',
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await result.communicate()
+            addrs = netifaces.ifaddresses(interface)
+            if netifaces.AF_INET not in addrs:
+                return None
 
-            if result.returncode != 0:
-                logger.error(f"ADB command failed with code {result.returncode}: {stderr.decode()}")
-                return modems
+            ip_info = addrs[netifaces.AF_INET][0]
+            return ip_info['addr']
 
-            devices_output = stdout.decode().strip()
-            lines = devices_output.split('\n')
-
-            # Пропускаем заголовок "List of devices attached"
-            device_lines = lines[1:]
-
-            import re
-
-            for i, line in enumerate(device_lines):
-                line = line.strip()
-
-                if not line:
-                    continue
-
-                # Используем регулярное выражение для более точного парсинга
-                # Паттерн: device_id + пробелы + status + остальная информация
-                match = re.match(r'^(\w+)\s+(device|offline|unauthorized)\s*(.*)', line)
-
-                if match:
-                    device_id = match.group(1)
-                    status = match.group(2)
-                    extra_info = match.group(3)
-
-                    logger.info(f"Parsed device: {device_id}, status: {status}, extra: {extra_info}")
-
-                    if status == 'device':
-                        # Парсим дополнительную информацию из extra_info
-                        device_info = {}
-
-                        # Извлекаем модель из строки типа "product:JDY-LX1 model:JDY_LX1"
-                        model_match = re.search(r'model:(\S+)', extra_info)
-                        if model_match:
-                            device_info['model_from_adb'] = model_match.group(1)
-
-                        product_match = re.search(r'product:(\S+)', extra_info)
-                        if product_match:
-                            device_info['product_from_adb'] = product_match.group(1)
-
-                        # Получаем детальную информацию об устройстве
-                        device_details = await self.get_android_device_details(device_id)
-                        device_details.update(device_info)
-
-                        modem_id = f"android_{device_id}"
-                        modems[modem_id] = {
-                            'id': modem_id,
-                            'type': 'android',
-                            'interface': device_id,
-                            'adb_id': device_id,
-                            'device_info': device_details.get('friendly_name',
-                                                              f"Android {device_details.get('model', device_id)}"),
-                            'status': 'online',
-                            'manufacturer': device_details.get('manufacturer', 'Unknown'),
-                            'model': device_details.get('model', device_details.get('model_from_adb', 'Unknown')),
-                            'android_version': device_details.get('android_version', 'Unknown'),
-                            'battery_level': device_details.get('battery_level', 0),
-                            'usb_tethering': device_details.get('usb_tethering', False),
-                            'rotation_methods': ['data_toggle', 'airplane_mode'],
-                            'last_seen': datetime.now().isoformat()
-                        }
-
-                        logger.info(
-                            f"Android device discovered: {device_id} ({device_details.get('model', 'Unknown')})")
-
-                    elif status == 'unauthorized':
-                        logger.warning(
-                            f"Device {device_id} is unauthorized - enable USB debugging and accept the prompt")
-                    elif status == 'offline':
-                        logger.warning(f"Device {device_id} is offline")
-                else:
-                    logger.warning(f"Could not parse line: '{line}'")
-
-            logger.info(f"Total Android devices found: {len(modems)}")
-
-        except FileNotFoundError:
-            logger.error("ADB not found - install android-tools-adb")
         except Exception as e:
-            logger.error("Error discovering Android devices", error=str(e))
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
+            logger.debug(f"Error getting IP for interface {interface}: {e}")
+            return None
 
-        return modems
+    async def extract_subnet_number(self, ip_address: str) -> Optional[int]:
+        """Извлечение номера подсети из IP-адреса (например, 192.168.108.100 -> 108)"""
+        try:
+            # Ожидаем формат 192.168.XXX.100
+            parts = ip_address.split('.')
+            if len(parts) == 4 and parts[0] == '192' and parts[1] == '168':
+                return int(parts[2])
+        except Exception as e:
+            logger.debug(f"Error extracting subnet number from {ip_address}: {e}")
 
-    async def get_android_device_details(self, device_id: str) -> Dict[str, any]:
-        """Получение детальной информации об Android устройстве"""
+        return None
+
+    async def check_web_interface_accessibility(self, web_interface: str) -> bool:
+        """Проверка доступности веб-интерфейса модема"""
+        try:
+            url = f"http://{web_interface}"
+            timeout = aiohttp.ClientTimeout(total=5)
+
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url) as response:
+                    return response.status == 200
+        except Exception as e:
+            logger.debug(f"Web interface {web_interface} not accessible: {e}")
+            return False
+
+    async def get_modem_details(self, web_interface: str, interface_ip: str) -> Optional[Dict[str, Any]]:
+        """Получение детальной информации о модеме через веб-интерфейс"""
         details = {}
 
         try:
-            # Команды для получения информации об устройстве
-            commands = {
-                'manufacturer': ['getprop', 'ro.product.manufacturer'],
-                'model': ['getprop', 'ro.product.model'],
-                'android_version': ['getprop', 'ro.build.version.release'],
-                'brand': ['getprop', 'ro.product.brand'],
-                'device': ['getprop', 'ro.product.device'],
-                'sdk_version': ['getprop', 'ro.build.version.sdk'],
-            }
+            # Получаем внешний IP через интерфейс
+            external_ip = await self.get_external_ip_via_interface(interface_ip)
+            if external_ip:
+                details['external_ip'] = external_ip
 
-            # Выполняем команды для получения информации
-            for key, command in commands.items():
-                try:
-                    result = await asyncio.create_subprocess_exec(
-                        'adb', '-s', device_id, 'shell', *command,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE
-                    )
-                    stdout, _ = await result.communicate()
-
-                    if result.returncode == 0:
-                        value = stdout.decode().strip()
-                        if value and value != 'unknown':
-                            details[key] = value
-                        else:
-                            details[key] = "Unknown"
-                    else:
-                        details[key] = "Unknown"
-
-                except Exception as e:
-                    logger.warning(f"Failed to get {key} for {device_id}: {e}")
-                    details[key] = "Unknown"
-
-            # Получаем информацию о батарее
-            try:
-                result = await asyncio.create_subprocess_exec(
-                    'adb', '-s', device_id, 'shell', 'dumpsys', 'battery',
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                stdout, _ = await result.communicate()
-
-                if result.returncode == 0:
-                    battery_output = stdout.decode()
-                    # Парсим уровень батареи
-                    battery_match = re.search(r'level: (\d+)', battery_output)
-                    if battery_match:
-                        details['battery_level'] = int(battery_match.group(1))
-                    else:
-                        details['battery_level'] = 0
-                else:
-                    details['battery_level'] = 0
-
-            except Exception as e:
-                logger.warning(f"Failed to get battery info for {device_id}: {e}")
-                details['battery_level'] = 0
-
-            # Проверяем статус USB tethering (не обязательно для работы)
-            try:
-                result = await asyncio.create_subprocess_exec(
-                    'adb', '-s', device_id, 'shell', 'dumpsys', 'connectivity',
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                stdout, _ = await result.communicate()
-
-                if result.returncode == 0:
-                    connectivity_output = stdout.decode()
-                    # Ищем USB tethering статус
-                    details['usb_tethering'] = 'USB tethering' in connectivity_output
-                else:
-                    details['usb_tethering'] = False
-
-            except Exception as e:
-                logger.warning(f"Failed to get USB tethering status for {device_id}: {e}")
-                details['usb_tethering'] = False
-
-            # Создаем friendly name
-            manufacturer = details.get('manufacturer', 'Unknown')
-            model = details.get('model', 'Unknown')
-            details['friendly_name'] = f"{manufacturer} {model}".strip()
+            # Пытаемся получить дополнительную информацию через веб-интерфейс
+            # Это может потребовать авторизации, поэтому пока оставляем базовую информацию
+            details.update({
+                'signal_strength': 'N/A',
+                'operator': 'Unknown',
+                'technology': '4G LTE',
+                'connection_status': 'Connected' if external_ip else 'Disconnected'
+            })
 
         except Exception as e:
-            logger.error(f"Error getting Android device details for {device_id}: {e}")
+            logger.debug(f"Error getting modem details for {web_interface}: {e}")
 
-        return details
+        return details if details else None
 
-    async def check_android_tethering(self, device_id: str) -> bool:
-        """Проверка поддержки USB tethering"""
+    async def get_external_ip_via_interface(self, interface_ip: str) -> Optional[str]:
+        """Получение внешнего IP через интерфейс модема"""
         try:
+            # Найдем интерфейс по IP
+            interface_name = None
+            for interface in netifaces.interfaces():
+                ip = await self.get_interface_ip(interface)
+                if ip == interface_ip:
+                    interface_name = interface
+                    break
+
+            if not interface_name:
+                return None
+
+            # Получаем внешний IP через curl с привязкой к интерфейсу
             result = await asyncio.create_subprocess_exec(
-                'adb', '-s', device_id, 'shell', 'which', 'svc',
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, _ = await result.communicate()
-
-            # Если команда svc доступна, значит устройство поддерживает управление данными
-            return result.returncode == 0 and stdout.decode().strip()
-
-        except Exception:
-            return False
-
-    async def discover_network_modems(self) -> Dict[str, dict]:
-        """Обнаружение сетевых модемов (Raspberry Pi и др.)"""
-        modems = {}
-
-        try:
-            # Поиск PPP интерфейсов (обычно используются с модемами)
-            interfaces = netifaces.interfaces()
-
-            for interface in interfaces:
-                if interface.startswith('ppp') or interface.startswith('wwan'):
-                    modem_id = f"network_{interface}"
-                    modems[modem_id] = {
-                        'id': modem_id,
-                        'type': 'network_modem',
-                        'interface': interface,
-                        'device_info': f"Network modem on {interface}",
-                        'status': 'detected'
-                    }
-
-        except Exception as e:
-            logger.error("Error discovering network modems", error=str(e))
-
-        return modems
-
-    async def rotate_usb_modem(self, modem: dict) -> bool:
-        """Ротация IP для USB модема"""
-        try:
-            interface = modem['interface']
-
-            logger.info("Starting USB modem rotation", modem_id=modem['id'])
-
-            # Простая ротация через AT команды
-            with serial.Serial(interface, 115200, timeout=5) as ser:
-                # Отключение модема
-                ser.write(b'AT+CFUN=0\r\n')
-                time.sleep(2)
-
-                # Включение модема
-                ser.write(b'AT+CFUN=1\r\n')
-                time.sleep(10)
-
-            logger.info("USB modem rotation completed", modem_id=modem['id'])
-            return True
-
-        except Exception as e:
-            logger.error("Error in USB modem rotation", modem_id=modem['id'], error=str(e))
-            return False
-
-    async def rotate_android_modem(self, modem: dict) -> bool:
-        """Ротация IP для Android устройства через ADB - РЕАЛЬНАЯ РЕАЛИЗАЦИЯ"""
-        try:
-            device_id = modem['adb_id']
-
-            logger.info("Starting Android modem rotation", modem_id=modem['id'], device_id=device_id)
-
-            # Отключение мобильных данных
-            result = await asyncio.create_subprocess_exec(
-                'adb', '-s', device_id, 'shell', 'svc', 'data', 'disable',
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            await result.wait()
-
-            if result.returncode != 0:
-                logger.error("Failed to disable mobile data", device_id=device_id)
-                return False
-
-            logger.info("Mobile data disabled, waiting...", device_id=device_id)
-
-            # Ожидание
-            await asyncio.sleep(3)
-
-            # Включение мобильных данных
-            result = await asyncio.create_subprocess_exec(
-                'adb', '-s', device_id, 'shell', 'svc', 'data', 'enable',
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            await result.wait()
-
-            if result.returncode != 0:
-                logger.error("Failed to enable mobile data", device_id=device_id)
-                return False
-
-            logger.info("Mobile data enabled, waiting for connection...", device_id=device_id)
-
-            # Ожидание подключения
-            await asyncio.sleep(10)
-
-            logger.info("Android modem rotation completed", modem_id=modem['id'])
-            return True
-
-        except Exception as e:
-            logger.error("Error in Android modem rotation", modem_id=modem['id'], error=str(e))
-            return False
-
-    async def rotate_network_modem(self, modem: dict) -> bool:
-        """Ротация IP для сетевого модема"""
-        try:
-            interface = modem['interface']
-
-            logger.info("Starting network modem rotation", modem_id=modem['id'])
-
-            # Отключение интерфейса
-            result = await asyncio.create_subprocess_exec(
-                'sudo', 'ifdown', interface
-            )
-            await result.wait()
-
-            # Ожидание
-            await asyncio.sleep(5)
-
-            # Включение интерфейса
-            result = await asyncio.create_subprocess_exec(
-                'sudo', 'ifup', interface
-            )
-            await result.wait()
-
-            # Ожидание подключения
-            await asyncio.sleep(15)
-
-            logger.info("Network modem rotation completed", modem_id=modem['id'])
-            return True
-
-        except Exception as e:
-            logger.error("Error in network modem rotation", modem_id=modem['id'], error=str(e))
-            return False
-
-    async def get_modem_external_ip(self, modem_id: str) -> Optional[str]:
-        """Получение внешнего IP модема"""
-        if modem_id not in self.modems:
-            return None
-
-        modem = self.modems[modem_id]
-
-        try:
-            if modem['type'] == 'usb_modem':
-                return await self.get_usb_modem_ip(modem)
-            elif modem['type'] == 'android':
-                return await self.get_android_modem_ip(modem)
-            elif modem['type'] == 'network_modem':
-                return await self.get_network_modem_ip(modem)
-
-        except Exception as e:
-            logger.error("Error getting modem IP", modem_id=modem_id, error=str(e))
-
-        return None
-
-    async def get_usb_modem_ip(self, modem: dict) -> Optional[str]:
-        """Получение IP USB модема"""
-        try:
-            # Поиск PPP интерфейса
-            interfaces = netifaces.interfaces()
-
-            for interface in interfaces:
-                if interface.startswith('ppp'):
-                    addrs = netifaces.ifaddresses(interface)
-                    if netifaces.AF_INET in addrs:
-                        return addrs[netifaces.AF_INET][0]['addr']
-
-        except Exception as e:
-            logger.error("Error getting USB modem IP", error=str(e))
-
-        return None
-
-    async def get_android_modem_ip(self, modem: dict) -> Optional[str]:
-        """Получение IP Android устройства - РЕАЛЬНАЯ РЕАЛИЗАЦИЯ"""
-        try:
-            device_id = modem['adb_id']
-
-            # Получение IP через ADB
-            result = await asyncio.create_subprocess_exec(
-                'adb', '-s', device_id, 'shell', 'ip', 'route', 'get', '8.8.8.8',
+                'curl', '--interface', interface_name, '-s', '--connect-timeout', '10',
+                'https://httpbin.org/ip',
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
             stdout, stderr = await result.communicate()
 
             if result.returncode == 0:
-                # Парсинг IP из вывода
-                output = stdout.decode()
-                ip_match = re.search(r'src (\d+\.\d+\.\d+\.\d+)', output)
-
-                if ip_match:
-                    return ip_match.group(1)
-
-        except Exception as e:
-            logger.error("Error getting Android modem IP", error=str(e))
-
-        return None
-
-    async def get_network_modem_ip(self, modem: dict) -> Optional[str]:
-        """Получение IP сетевого модема"""
-        try:
-            interface = modem['interface']
-            addrs = netifaces.ifaddresses(interface)
-
-            if netifaces.AF_INET in addrs:
-                return addrs[netifaces.AF_INET][0]['addr']
-
-        except Exception as e:
-            logger.error("Error getting network modem IP", error=str(e))
-
-        return None
-
-    async def get_usb_modem_details(self, modem: dict) -> dict:
-        """Получение детальной информации о USB модеме"""
-        try:
-            interface = modem['interface']
-            details = {
-                'signal_strength': 'N/A',
-                'operator': 'Unknown',
-                'technology': 'Unknown',
-                'temperature': 'N/A'
-            }
-
-            with serial.Serial(interface, 115200, timeout=5) as ser:
-                commands = {
-                    'signal_strength': 'AT+CSQ',
-                    'operator': 'AT+COPS?',
-                    'technology': 'AT+CREG?'
-                }
-
-                for key, command in commands.items():
-                    try:
-                        ser.write(f'{command}\r\n'.encode())
-                        response = ser.read(200).decode()
-                        details[key] = response.strip()
-                    except:
-                        details[key] = "N/A"
-
-                ser.close()
-                return details
-
-        except Exception as e:
-            logger.error("Error getting USB modem details", error=str(e))
-            return {}
-
-    async def get_android_modem_details(self, modem: dict) -> dict:
-        """Получение детальной информации об Android устройстве"""
-        try:
-            device_id = modem['adb_id']
-            details = {}
-
-            # Получение информации об устройстве
-            commands = {
-                'manufacturer': 'getprop ro.product.manufacturer',
-                'model': 'getprop ro.product.model',
-                'android_version': 'getprop ro.build.version.release',
-                'battery_level': 'dumpsys battery | grep level'
-            }
-
-            for key, command in commands.items():
                 try:
-                    result = await asyncio.create_subprocess_exec(
-                        'adb', '-s', device_id, 'shell', command,
-                        stdout=asyncio.subprocess.PIPE
-                    )
-                    stdout, _ = await result.communicate()
-                    details[key] = stdout.decode().strip()
-                except:
-                    details[key] = "N/A"
-
-            return details
+                    import json
+                    response = json.loads(stdout.decode())
+                    return response.get('origin', '').split(',')[0].strip()
+                except json.JSONDecodeError:
+                    # Пробуем найти IP в тексте
+                    ip_match = re.search(r'(\d+\.\d+\.\d+\.\d+)', stdout.decode())
+                    if ip_match:
+                        return ip_match.group(1)
 
         except Exception as e:
-            logger.error("Error getting Android modem details", error=str(e))
-            return {}
+            logger.debug(f"Error getting external IP via interface {interface_ip}: {e}")
 
-    async def get_all_modems(self) -> Dict[str, dict]:
-        """Получение информации о всех модемах"""
+        return None
+
+    async def save_device_to_db(self, modem_id: str, modem_info: dict):
+        """Сохранение информации о модеме в базу данных"""
+        try:
+            async with AsyncSessionLocal() as db:
+                # Проверяем, существует ли модем в БД
+                stmt = select(ProxyDevice).where(ProxyDevice.name == modem_id)
+                result = await db.execute(stmt)
+                existing_device = result.scalar_one_or_none()
+
+                # Определяем тип устройства
+                device_type = modem_info.get('type', 'usb_modem')
+
+                # IP адрес интерфейса
+                ip_address = modem_info.get('interface_ip', '0.0.0.0')
+
+                # Получаем внешний IP
+                external_ip = modem_info.get('external_ip')
+
+                if existing_device:
+                    # Обновляем существующий модем
+                    stmt = update(ProxyDevice).where(
+                        ProxyDevice.name == modem_id
+                    ).values(
+                        device_type=device_type,
+                        ip_address=ip_address,
+                        status=modem_info.get('status', 'offline'),
+                        current_external_ip=external_ip,
+                        operator=modem_info.get('operator', 'Unknown'),
+                        last_heartbeat=datetime.now()
+                    )
+                    await db.execute(stmt)
+                    logger.info(f"Updated Huawei modem {modem_id} in database")
+                else:
+                    # Создаем новый модем с уникальным портом
+                    unique_port = await self.get_next_available_port(db)
+
+                    new_device = ProxyDevice(
+                        name=modem_id,
+                        device_type=device_type,
+                        ip_address=ip_address,
+                        port=unique_port,
+                        status=modem_info.get('status', 'offline'),
+                        current_external_ip=external_ip,
+                        operator=modem_info.get('operator', 'Unknown'),
+                        region=modem_info.get('region', 'Unknown'),
+                        rotation_interval=600
+                    )
+                    db.add(new_device)
+                    logger.info(f"Created new Huawei modem {modem_id} in database with port {unique_port}")
+
+                await db.commit()
+
+        except Exception as e:
+            logger.error(
+                "Error saving Huawei modem to database",
+                modem_id=modem_id,
+                error=str(e)
+            )
+
+    async def get_next_available_port(self, db: AsyncSession, start_port: int = 9000, max_port: int = 65535) -> int:
+        """Получение следующего доступного порта с проверкой доступности"""
+        try:
+            # Получаем максимальный используемый порт
+            stmt = select(func.max(ProxyDevice.port)).where(
+                ProxyDevice.port.between(start_port, max_port)
+            )
+            result = await db.execute(stmt)
+            max_used_port = result.scalar()
+
+            if max_used_port is None:
+                return start_port
+
+            # Начинаем поиск с max_used_port + 1
+            candidate_port = max(max_used_port + 1, start_port)
+
+            # Проверяем доступность портов
+            for port in range(candidate_port, max_port + 1):
+                if not await self.is_port_used(db, port):
+                    logger.info(f"Selected next available port: {port}")
+                    return port
+
+            # Если не нашли свободный порт, ищем пропуски
+            for port in range(start_port, max_used_port):
+                if not await self.is_port_used(db, port):
+                    logger.info(f"Found gap in port range, using: {port}")
+                    return port
+
+            raise RuntimeError(f"No available ports in range {start_port}-{max_port}")
+
+        except Exception as e:
+            logger.error(f"Error finding available port: {e}")
+            import random
+            fallback_port = random.randint(start_port, max_port)
+            logger.warning(f"Using fallback random port: {fallback_port}")
+            return fallback_port
+
+    async def is_port_used(self, db: AsyncSession, port: int) -> bool:
+        """Проверка, используется ли порт другим устройством"""
+        try:
+            stmt = select(ProxyDevice.id).where(ProxyDevice.port == port)
+            result = await db.execute(stmt)
+            return result.scalar_one_or_none() is not None
+        except Exception as e:
+            logger.error(f"Error checking port usage: {e}")
+            return True
+
+    # Методы для получения информации о модемах (аналогично DeviceManager)
+    async def get_all_devices(self) -> Dict[str, Dict[str, Any]]:
+        """Получение всех модемов"""
         return self.modems.copy()
 
-    async def is_modem_online(self, modem_id: str) -> bool:
-        """Проверка, что модем онлайн"""
-        if modem_id not in self.modems:
+    async def get_device_by_id(self, modem_id: str) -> Optional[Dict[str, Any]]:
+        """Получение модема по ID"""
+        return self.modems.get(modem_id)
+
+    async def get_available_devices(self) -> List[dict]:
+        """Получение доступных (онлайн) модемов"""
+        return [modem for modem in self.modems.values() if modem.get('status') == 'online']
+
+    async def get_random_device(self) -> Optional[Dict[str, Any]]:
+        """Получение случайного онлайн модема"""
+        online_modems = [
+            modem for modem in self.modems.values()
+            if modem.get('status') == 'online'
+        ]
+
+        if not online_modems:
+            return None
+
+        return random.choice(online_modems)
+
+    async def is_device_online(self, modem_id: str) -> bool:
+        """Проверка онлайн статуса модема"""
+        modem = self.modems.get(modem_id)
+        return modem is not None and modem.get('status') == 'online'
+
+    async def get_device_external_ip(self, modem_id: str) -> Optional[str]:
+        """Получение внешнего IP модема"""
+        modem = self.modems.get(modem_id)
+        if not modem:
+            return None
+
+        try:
+            # Если IP уже есть в кэше, возвращаем его
+            if modem.get('external_ip'):
+                return modem['external_ip']
+
+            # Получаем внешний IP через интерфейс
+            interface_ip = modem.get('interface_ip')
+            if interface_ip:
+                external_ip = await self.get_external_ip_via_interface(interface_ip)
+                if external_ip:
+                    # Обновляем кэш
+                    modem['external_ip'] = external_ip
+                    return external_ip
+
+        except Exception as e:
+            logger.error(f"Error getting external IP for modem {modem_id}: {e}")
+
+        return None
+
+    async def update_device_status(self, modem_id: str, status: str):
+        """Обновление статуса модема в памяти и БД"""
+        try:
+            # Обновляем в памяти
+            if modem_id in self.modems:
+                self.modems[modem_id]['status'] = status
+                self.modems[modem_id]['last_seen'] = datetime.now(timezone.utc).isoformat()
+
+            # Обновляем в БД
+            async with AsyncSessionLocal() as db:
+                stmt = update(ProxyDevice).where(
+                    ProxyDevice.name == modem_id
+                ).values(
+                    status=status,
+                    last_heartbeat=datetime.now()
+                )
+                await db.execute(stmt)
+                await db.commit()
+
+        except Exception as e:
+            logger.error(f"Error updating modem status: {e}")
+
+    async def get_devices_from_db(self) -> List[dict]:
+        """Получение списка модемов из базы данных"""
+        try:
+            async with AsyncSessionLocal() as db:
+                stmt = select(ProxyDevice).where(ProxyDevice.device_type == 'usb_modem')
+                result = await db.execute(stmt)
+                devices = result.scalars().all()
+
+                devices_list = []
+                for device in devices:
+                    device_data = {
+                        "id": str(device.id),
+                        "name": device.name,
+                        "device_type": device.device_type,
+                        "ip_address": device.ip_address,
+                        "port": device.port,
+                        "status": device.status,
+                        "current_external_ip": device.current_external_ip,
+                        "operator": device.operator,
+                        "region": device.region,
+                        "last_heartbeat": device.last_heartbeat,
+                        "rotation_interval": device.rotation_interval,
+                        "proxy_enabled": device.proxy_enabled or False,
+                        "dedicated_port": device.dedicated_port,
+                        "proxy_username": device.proxy_username,
+                        "proxy_password": device.proxy_password
+                    }
+                    devices_list.append(device_data)
+
+                return devices_list
+
+        except Exception as e:
+            logger.error(f"Error getting modems from database: {e}")
+            return []
+
+    async def sync_devices_with_db(self):
+        """Синхронизация обнаруженных модемов с базой данных"""
+        try:
+            logger.info("Syncing discovered modems with database...")
+
+            for modem_id, modem_info in self.modems.items():
+                await self.save_device_to_db(modem_id, modem_info)
+
+            logger.info("✅ Modem synchronization completed")
+
+        except Exception as e:
+            logger.error(f"Error syncing modems with database: {e}")
+
+    async def force_sync_to_db(self):
+        """Принудительная синхронизация всех модемов с БД"""
+        logger.info("🔄 Starting forced modem synchronization to database...")
+        await self.sync_devices_with_db()
+        return len(self.modems)
+
+    async def get_summary(self) -> Dict[str, any]:
+        """Получение сводной информации о модемах"""
+        total = len(self.modems)
+        online = len([d for d in self.modems.values() if d.get('status') == 'online'])
+        routing_capable = len([d for d in self.modems.values() if d.get('routing_capable', False)])
+
+        by_type = {}
+        for modem in self.modems.values():
+            device_type = modem.get('type', 'unknown')
+            by_type[device_type] = by_type.get(device_type, 0) + 1
+
+        return {
+            'total_devices': total,
+            'online_devices': online,
+            'offline_devices': total - online,
+            'routing_capable_devices': routing_capable,
+            'devices_by_type': by_type,
+            'last_discovery': datetime.now().isoformat()
+        }
+
+    async def get_device_proxy_route(self, modem_id: str) -> Optional[dict]:
+        """Получение маршрута для проксирования через модем"""
+        all_modems = await self.get_all_devices()
+        modem = all_modems.get(modem_id)
+
+        if not modem:
+            return None
+
+        interface = modem.get('interface')
+        if interface:
+            return {
+                'type': 'usb_modem',
+                'interface': interface,
+                'method': 'interface_binding',
+                'web_interface': modem.get('web_interface')
+            }
+
+        return None
+
+    async def get_device_by_operator(self, operator: str) -> Optional[dict]:
+        """Получение модема по оператору"""
+        for modem in self.modems.values():
+            if modem.get('operator', '').lower() == operator.lower() and modem.get('status') == 'online':
+                return modem
+        return None
+
+    async def get_device_by_region(self, region: str) -> Optional[dict]:
+        """Получение модема по региону"""
+        for modem in self.modems.values():
+            if modem.get('region', '').lower() == region.lower() and modem.get('status') == 'online':
+                return modem
+        return None
+
+    async def test_modem_connectivity(self, modem_id: str) -> Dict[str, Any]:
+        """Тестирование подключения модема"""
+        modem = self.modems.get(modem_id)
+        if not modem:
+            return {"error": "Modem not found"}
+
+        try:
+            test_results = {
+                "modem_id": modem_id,
+                "timestamp": datetime.now().isoformat(),
+                "tests": {}
+            }
+
+            # Тест 1: Проверка веб-интерфейса
+            web_interface = modem.get('web_interface')
+            if web_interface:
+                web_test = await self.check_web_interface_accessibility(web_interface)
+                test_results["tests"]["web_interface"] = {
+                    "url": f"http://{web_interface}",
+                    "accessible": web_test
+                }
+
+            # Тест 2: Проверка внешнего IP
+            external_ip = await self.get_device_external_ip(modem_id)
+            test_results["tests"]["external_ip"] = {
+                "ip": external_ip,
+                "available": external_ip is not None
+            }
+
+            # Тест 3: Ping test через интерфейс
+            interface = modem.get('interface')
+            if interface:
+                ping_test = await self.ping_via_interface(interface)
+                test_results["tests"]["ping"] = ping_test
+
+            # Общий результат
+            test_results["overall_success"] = all(
+                test.get("accessible", test.get("available", test.get("success", False)))
+                for test in test_results["tests"].values()
+            )
+
+            return test_results
+
+        except Exception as e:
+            logger.error(f"Error testing modem connectivity: {e}")
+            return {"error": str(e)}
+
+    async def ping_via_interface(self, interface: str) -> Dict[str, Any]:
+        """Ping тест через интерфейс"""
+        try:
+            result = await asyncio.create_subprocess_exec(
+                'ping', '-I', interface, '-c', '3', '-W', '5', '8.8.8.8',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await result.communicate()
+
+            if result.returncode == 0:
+                # Парсим результат ping
+                output = stdout.decode()
+                loss_match = re.search(r'(\d+)% packet loss', output)
+                time_match = re.search(r'time=(\d+\.\d+)ms', output)
+
+                return {
+                    "success": True,
+                    "packet_loss": int(loss_match.group(1)) if loss_match else 0,
+                    "avg_time_ms": float(time_match.group(1)) if time_match else 0,
+                    "interface": interface
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": stderr.decode().strip(),
+                    "interface": interface
+                }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "interface": interface
+            }
+
+    async def get_modem_web_info(self, modem_id: str) -> Optional[Dict[str, Any]]:
+        """Получение информации о модеме через веб-интерфейс"""
+        modem = self.modems.get(modem_id)
+        if not modem:
+            return None
+
+        web_interface = modem.get('web_interface')
+        if not web_interface:
+            return None
+
+        try:
+            # Базовая информация (без авторизации)
+            info = {
+                "web_interface": web_interface,
+                "model": modem.get('model', 'E3372h'),
+                "manufacturer": modem.get('manufacturer', 'Huawei'),
+                "mac_address": modem.get('mac_address'),
+                "interface": modem.get('interface'),
+                "subnet_number": modem.get('subnet_number'),
+                "accessible": await self.check_web_interface_accessibility(web_interface)
+            }
+
+            # Дополнительная информация через API (если доступно)
+            # Здесь можно добавить запросы к API модема для получения статуса сигнала,
+            # информации о сети и т.д., но это потребует знания API модема
+
+            return info
+
+        except Exception as e:
+            logger.error(f"Error getting modem web info: {e}")
+            return None
+
+    async def refresh_modem_status(self, modem_id: str) -> bool:
+        """Обновление статуса модема"""
+        modem = self.modems.get(modem_id)
+        if not modem:
             return False
 
-        # Простая проверка - есть ли IP адрес
-        ip = await self.get_modem_external_ip(modem_id)
-        return ip is not None
+        try:
+            # Проверяем доступность веб-интерфейса
+            web_interface = modem.get('web_interface')
+            if web_interface:
+                web_accessible = await self.check_web_interface_accessibility(web_interface)
+                modem['web_accessible'] = web_accessible
+
+                # Обновляем статус на основе доступности
+                new_status = 'online' if web_accessible else 'offline'
+                if modem.get('status') != new_status:
+                    await self.update_device_status(modem_id, new_status)
+
+            # Обновляем внешний IP
+            external_ip = await self.get_external_ip_via_interface(modem.get('interface_ip'))
+            if external_ip:
+                modem['external_ip'] = external_ip
+
+            modem['last_seen'] = datetime.now().isoformat()
+            return True
+
+        except Exception as e:
+            logger.error(f"Error refreshing modem status: {e}")
+            return False
+
+    async def get_modem_stats(self, modem_id: str) -> Optional[Dict[str, Any]]:
+        """Получение статистики модема"""
+        modem = self.modems.get(modem_id)
+        if not modem:
+            return None
+
+        try:
+            stats = {
+                "modem_id": modem_id,
+                "model": modem.get('model', 'E3372h'),
+                "manufacturer": modem.get('manufacturer', 'Huawei'),
+                "status": modem.get('status', 'unknown'),
+                "interface": modem.get('interface'),
+                "web_interface": modem.get('web_interface'),
+                "subnet_number": modem.get('subnet_number'),
+                "interface_ip": modem.get('interface_ip'),
+                "external_ip": modem.get('external_ip'),
+                "mac_address": modem.get('mac_address'),
+                "last_seen": modem.get('last_seen'),
+                "web_accessible": modem.get('web_accessible', False),
+                "routing_capable": modem.get('routing_capable', True),
+                "connection_status": modem.get('connection_status', 'Unknown'),
+                "signal_strength": modem.get('signal_strength', 'N/A'),
+                "operator": modem.get('operator', 'Unknown'),
+                "technology": modem.get('technology', '4G LTE')
+            }
+
+            return stats
+
+        except Exception as e:
+            logger.error(f"Error getting modem stats: {e}")
+            return None
+
+    async def discover_android_devices(self) -> Dict[str, dict]:
+        """Заглушка для совместимости - модемы не поддерживают Android"""
+        return {}
+
+    async def get_usb_modem_details(self, device_path: str) -> dict:
+        """Заглушка для совместимости - используем веб-интерфейс вместо AT команд"""
+        return {}
+
+    async def discover_network_modems(self) -> Dict[str, dict]:
+        """Заглушка для совместимости - используем только USB модемы Huawei"""
+        return {}
