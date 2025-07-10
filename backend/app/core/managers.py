@@ -75,6 +75,74 @@ async def init_managers():
         _managers_initialized = False
         raise
 
+# backend/app/core/managers.py - ИСПРАВЛЕННАЯ ВЕРСИЯ ПОЛУЧЕНИЯ МЕТОДОВ РОТАЦИИ
+
+async def _get_usb_modem_rotation_methods(device_id: str, modem_info: dict) -> dict:
+    """Получение методов ротации для USB модема E3372h - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
+    rotation_methods = [
+        {
+            'method': 'usb_reboot',
+            'name': 'USB перезагрузка модема (ЕДИНСТВЕННЫЙ МЕТОД)',
+            'description': 'Полная перезагрузка USB модема для смены IP - самый надежный метод для E3372h',
+            'recommended': True,
+            'risk_level': 'low',
+            'effectiveness': 'very_high',
+            'explanation': 'Отключает и включает USB устройство на уровне системы, что гарантированно меняет IP',
+            'requirements': ['sudo доступ для управления USB устройствами'],
+            'time_estimate': '30-45 секунд',
+            'success_rate': '95%+'
+        }
+    ]
+
+    return {
+        "device_id": device_id,
+        "device_type": "usb_modem",
+        "device_mode": "e3372h",
+        "available_methods": rotation_methods,
+        "current_method": 'usb_reboot',  # ВСЕГДА USB ПЕРЕЗАГРУЗКА
+        "device_status": modem_info.get('status', 'unknown'),
+        "usb_reboot_info": {
+            "title": "USB перезагрузка модема E3372h",
+            "description": "Единственный поддерживаемый метод ротации для обеспечения максимальной надежности",
+            "why_only_usb": "Для модемов E3372h USB перезагрузка является наиболее надежным методом смены IP",
+            "other_methods_disabled": "Другие методы отключены для предотвращения проблем с соединением"
+        }
+    }
+
+async def perform_device_rotation(device_id: str, method: str = None) -> tuple[bool, str]:
+    """ИСПРАВЛЕННАЯ ВЕРСИЯ с принудительным USB методом"""
+    rotation_manager = get_enhanced_rotation_manager()
+    if not rotation_manager:
+        return False, "Enhanced rotation manager not available"
+
+    try:
+        logger.info(f"Performing rotation for device: {device_id} with method: {method}")
+
+        # Получаем UUID устройства по его имени из базы данных
+        device_uuid = await _get_device_uuid_by_name(device_id)
+        if not device_uuid:
+            logger.error(f"Device not found in database: {device_id}")
+            return False, f"Device not found in database: {device_id}"
+
+        # Для USB модемов ВСЕГДА используем USB перезагрузку
+        device_type = await _get_device_type_by_name(device_id)
+        if device_type == 'usb_modem':
+            method = 'usb_reboot'
+            logger.info(f"USB modem detected, forcing USB reboot method for {device_id}")
+
+        # Выполняем ротацию
+        success, result = await rotation_manager.rotate_device_ip(str(device_uuid), force_method=method)
+
+        if success:
+            logger.info(f"✅ Rotation successful for {device_id} (UUID: {device_uuid}): {result}")
+            return True, result
+        else:
+            logger.error(f"❌ Rotation failed for {device_id} (UUID: {device_uuid}): {result}")
+            return False, result
+
+    except Exception as e:
+        logger.error(f"Error in device rotation: {e}")
+        return False, f"Rotation error: {str(e)}"
 
 def get_device_manager() -> Optional[DeviceManager]:
     """Получение экземпляра DeviceManager (Android устройства)"""
@@ -199,53 +267,6 @@ async def cleanup_managers():
         logger.error(f"❌ Error cleaning up managers: {e}")
 
 
-async def perform_device_rotation(device_id: str, method: str = None) -> tuple[bool, str]:
-    """
-    Выполнение ротации устройства с поддержкой USB перезагрузки
-
-    Args:
-        device_id: ID устройства (строковый ID из DeviceManager или ModemManager)
-        method: Принудительный метод ротации (для USB модемов игнорируется - всегда usb_reboot)
-
-    Returns:
-        tuple[bool, str]: (успех, сообщение/новый_IP)
-    """
-    rotation_manager = get_enhanced_rotation_manager()
-    if not rotation_manager:
-        return False, "Enhanced rotation manager not available"
-
-    try:
-        logger.info(f"Performing rotation for device: {device_id} with method: {method}")
-
-        # Получаем UUID устройства по его имени из базы данных
-        device_uuid = await _get_device_uuid_by_name(device_id)
-        if not device_uuid:
-            logger.error(f"Device not found in database: {device_id}")
-            return False, f"Device not found in database: {device_id}"
-
-        logger.info(f"Found device UUID: {device_uuid} for device name: {device_id}")
-
-        # Для USB модемов принудительно используем USB перезагрузку
-        device_type = await _get_device_type_by_name(device_id)
-        if device_type == 'usb_modem':
-            logger.info(f"USB modem detected, forcing USB reboot method for {device_id}")
-            method = 'usb_reboot'
-
-        # Выполняем ротацию
-        success, result = await rotation_manager.rotate_device_ip(str(device_uuid), force_method=method)
-
-        if success:
-            logger.info(f"✅ Rotation successful for {device_id} (UUID: {device_uuid}): {result}")
-            return True, result
-        else:
-            logger.error(f"❌ Rotation failed for {device_id} (UUID: {device_uuid}): {result}")
-            return False, result
-
-    except Exception as e:
-        logger.error(f"Error in device rotation: {e}")
-        return False, f"Rotation error: {str(e)}"
-
-
 async def _get_device_uuid_by_name(device_name: str) -> Optional[str]:
     """Получение UUID устройства по его имени из базы данных"""
     try:
@@ -354,108 +375,6 @@ async def _get_android_rotation_methods(device_id: str, device_info: dict) -> di
         "available_methods": rotation_methods,
         "current_method": device_info.get('rotation_method', 'data_toggle'),
         "device_status": device_info.get('status', 'unknown')
-    }
-
-
-async def _get_usb_modem_rotation_methods(device_id: str, modem_info: dict) -> dict:
-    """Получение методов ротации для USB модема E3372h - только USB перезагрузка"""
-    rotation_methods = [
-        {
-            'method': 'usb_reboot',
-            'name': 'USB перезагрузка модема (РЕКОМЕНДУЕТСЯ)',
-            'description': 'Полная перезагрузка USB модема для смены IP - самый надежный метод',
-            'recommended': True,
-            'risk_level': 'low',
-            'effectiveness': 'very_high',
-            'explanation': 'Отключает и включает USB устройство на уровне системы, что гарантированно меняет IP',
-            'requirements': ['sudo доступ для управления USB устройствами'],
-            'time_estimate': '30-45 секунд',
-            'success_rate': '95%+'
-        }
-    ]
-
-    return {
-        "device_id": device_id,
-        "device_type": "usb_modem",
-        "device_mode": "e3372h",
-        "available_methods": rotation_methods,
-        "current_method": modem_info.get('rotation_method', 'usb_reboot'),
-        "device_status": modem_info.get('status', 'unknown'),
-        "usb_reboot_info": {
-            "title": "USB перезагрузка модема E3372h",
-            "description": "Единственный поддерживаемый метод ротации для обеспечения максимальной надежности",
-            "how_it_works": [
-                "Находит USB устройство Huawei по VID 12d1",
-                "Получает путь к устройству в /sys/bus/usb/devices/",
-                "Отключает устройство записью '0' в authorized файл",
-                "Ждет 2 секунды для полного отключения",
-                "Включает устройство записью '1' в authorized файл",
-                "Мониторит восстановление соединения",
-                "Проверяет новый внешний IP"
-            ],
-            "advantages": [
-                "Гарантированная смена IP (95%+ успешных случаев)",
-                "Работает на уровне USB, не зависит от настроек модема",
-                "Не требует знания API модема",
-                "Быстрое выполнение (30-45 секунд)",
-                "Стабильная работа с любыми операторами"
-            ],
-            "requirements": [
-                "sudo доступ для записи в sysfs",
-                "USB модем Huawei E3372h",
-                "Модем должен быть в режиме HiLink",
-                "Curl для проверки внешнего IP"
-            ]
-        },
-        "comparison_with_other_methods": {
-            "title": "Почему только USB перезагрузка?",
-            "explanation": "Другие методы для E3372h менее надежны",
-            "rejected_methods": [
-                {
-                    "method": "hilink_api",
-                    "reason": "Требует знания API, может не работать с кастомными прошивками"
-                },
-                {
-                    "method": "dhcp_renew",
-                    "reason": "Не меняет внешний IP, только внутренний"
-                },
-                {
-                    "method": "interface_restart",
-                    "reason": "Может нарушить соединение, не гарантирует смену IP"
-                },
-                {
-                    "method": "at_commands",
-                    "reason": "E3372h в HiLink режиме не поддерживает AT команды"
-                }
-            ]
-        },
-        "troubleshooting": {
-            "title": "Устранение проблем",
-            "common_issues": [
-                {
-                    "problem": "Нет sudo доступа",
-                    "solution": "Добавьте пользователя в sudoers или настройте права на sysfs"
-                },
-                {
-                    "problem": "USB устройство не найдено",
-                    "solution": "Проверьте, что модем подключен и определяется командой lsusb"
-                },
-                {
-                    "problem": "Устройство не отключается",
-                    "solution": "Проверьте путь к authorized файлу, возможно нужен другой подход"
-                },
-                {
-                    "problem": "IP не изменился",
-                    "solution": "Это может быть нормально для некоторых операторов, соединение обновлено"
-                }
-            ]
-        },
-        "performance_metrics": {
-            "average_time": "35 секунд",
-            "success_rate": "95%+",
-            "ip_change_rate": "85%",
-            "connection_stable_rate": "98%"
-        }
     }
 
 

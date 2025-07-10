@@ -681,7 +681,7 @@ async def test_rotation_method(
 
 @router.post("/devices/discover")
 async def discover_devices(current_user=Depends(get_admin_user)):
-    """Принудительное обнаружение устройств (Android и USB модемы)"""
+    """Принудительное обнаружение устройств - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
     try:
         from ..core.managers import get_device_manager, get_modem_manager
 
@@ -704,21 +704,27 @@ async def discover_devices(current_user=Depends(get_admin_user)):
         # Обнаружение Android устройств
         if device_manager:
             try:
+                logger.info("Starting Android device discovery...")
                 await device_manager.discover_all_devices()
                 android_devices = await device_manager.get_all_devices()
                 results["android_devices"]["found"] = len(android_devices)
                 results["android_devices"]["devices"] = list(android_devices.values())
+                logger.info(f"Android devices found: {len(android_devices)}")
             except Exception as e:
+                logger.error(f"Android discovery error: {e}")
                 results["errors"].append(f"Android discovery error: {str(e)}")
 
         # Обнаружение USB модемов
         if modem_manager:
             try:
+                logger.info("Starting USB modem discovery...")
                 await modem_manager.discover_all_devices()
                 usb_modems = await modem_manager.get_all_devices()
                 results["usb_modems"]["found"] = len(usb_modems)
                 results["usb_modems"]["devices"] = list(usb_modems.values())
+                logger.info(f"USB modems found: {len(usb_modems)}")
             except Exception as e:
+                logger.error(f"USB modem discovery error: {e}")
                 results["errors"].append(f"USB modem discovery error: {str(e)}")
 
         results["total_found"] = results["android_devices"]["found"] + results["usb_modems"]["found"]
@@ -729,6 +735,7 @@ async def discover_devices(current_user=Depends(get_admin_user)):
         }
 
     except Exception as e:
+        logger.error(f"Discovery failed: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Discovery failed: {str(e)}"

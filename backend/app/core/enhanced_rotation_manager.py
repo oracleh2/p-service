@@ -66,6 +66,36 @@ class EnhancedRotationManager:
         # Запуск фонового мониторинга
         asyncio.create_task(self._monitor_rotation_tasks())
 
+    # backend/app/core/enhanced_rotation_manager.py - ИСПРАВЛЕННАЯ ВЕРСИЯ МЕТОДОВ РОТАЦИИ
+
+    async def _create_default_rotation_config(self, device: ProxyDevice) -> RotationConfig:
+        """Создание конфигурации ротации по умолчанию с правильными методами"""
+        default_methods = {
+            'android': 'data_toggle',
+            'usb_modem': 'usb_reboot',  # ТОЛЬКО USB ПЕРЕЗАГРУЗКА для модемов
+            'raspberry_pi': 'ppp_restart',
+            'network_device': 'interface_restart'
+        }
+
+        method = default_methods.get(device.device_type, 'data_toggle')
+
+        config = RotationConfig(
+            device_id=device.id,
+            rotation_method=method,
+            rotation_interval=600,
+            auto_rotation=True
+        )
+
+        async with AsyncSessionLocal() as db:
+            db.add(config)
+            await db.commit()
+            await db.refresh(config)
+
+        return config
+
+    # Поддерживаемые методы ротации для каждого типа устройства
+
+
     async def rotate_device_ip(self, device_id: str, force_method: str = None) -> Tuple[bool, str]:
         """
         Универсальная ротация IP устройства с поддержкой USB перезагрузки

@@ -28,29 +28,10 @@ class ModemManager:
         self.running = False
         self.huawei_oui = "0c:5b:8f"  # Официальный OUI Huawei Technologies Co.,Ltd.
 
-    async def start(self):
-        """Запуск менеджера модемов - оптимизированная версия"""
-        self.running = True
-
-        logger.info("Starting optimized modem manager...")
-        start_time = time.time()
-
-        # Быстрое обнаружение модемов
-        await self.discover_all_devices()
-
-        # Быстрая проверка здоровья
-        await self.quick_health_check()
-
-        total_time = time.time() - start_time
-        logger.info(f"✅ Modem manager started in {total_time:.2f}s")
-
-    async def stop(self):
-        """Остановка менеджера модемов"""
-        self.running = False
-        logger.info("Modem manager stopped")
+    # backend/app/core/modem_manager.py - ИСПРАВЛЕННАЯ ВЕРСИЯ ДЛЯ ОБНАРУЖЕНИЯ МОДЕМОВ
 
     async def discover_all_devices(self):
-        """Обнаружение всех Huawei E3372h модемов - оптимизированная версия"""
+        """Обнаружение всех Huawei E3372h модемов - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
         try:
             # Очищаем старый список
             self.modems.clear()
@@ -83,13 +64,9 @@ class ModemManager:
                 # Сохраняем в базу данных
                 await self.save_device_to_db(modem_id, modem_info)
 
-            # Получаем сводку обнаружения
-            summary = await self.get_discovery_summary()
-
             logger.info(f"✅ Huawei modems discovery completed in {discovery_time:.2f}s")
             logger.info(f"✅ Total modems discovered: {len(self.modems)}")
             logger.info(f"✅ Online modems: {len([m for m in self.modems.values() if m.get('status') == 'online'])}")
-            logger.info(f"✅ Modems saved to database")
 
             # Выводим детальную информацию о каждом модеме
             for modem_id, modem_info in self.modems.items():
@@ -102,11 +79,11 @@ class ModemManager:
             logger.error("Error discovering Huawei modems", error=str(e))
 
     async def discover_huawei_modems(self) -> Dict[str, dict]:
-        """Обнаружение Huawei E3372h модемов по MAC-адресу - оптимизированная версия"""
+        """Обнаружение Huawei E3372h модемов по MAC-адресу - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
         modems = {}
 
         try:
-            logger.info("Scanning for Huawei E3372h modems by MAC address (optimized)...")
+            logger.info("Scanning for Huawei E3372h modems by MAC address...")
 
             # Получаем все сетевые интерфейсы
             all_interfaces = netifaces.interfaces()
@@ -134,14 +111,12 @@ class ModemManager:
                         continue
 
                     # Извлекаем номер подсети из IP интерфейса
-                    # Например: 192.168.108.100 -> 108
                     subnet_number = await self.extract_subnet_number(interface_ip)
                     if subnet_number is None:
                         logger.warning(f"Cannot extract subnet number from IP {interface_ip}")
                         continue
 
-                    # Формируем адрес веб-интерфейса по вашей схеме
-                    # 192.168.108.100 -> 192.168.108.1
+                    # Формируем адрес веб-интерфейса
                     web_interface = f"192.168.{subnet_number}.1"
 
                     logger.info(f"Processing Huawei modem: {interface} (IP: {interface_ip}) -> Web: {web_interface}")
@@ -171,7 +146,7 @@ class ModemManager:
                         'web_accessible': web_accessible,
                         'external_ip': external_ip,
                         'routing_capable': True,
-                        'rotation_methods': ['web_interface', 'interface_restart', 'dhcp_renew'],
+                        'rotation_methods': ['usb_reboot'],  # ТОЛЬКО USB РОТАЦИЯ
                         'last_seen': datetime.now().isoformat()
                     }
 
@@ -195,6 +170,27 @@ class ModemManager:
             logger.error("Error discovering Huawei modems", error=str(e))
 
         return modems
+
+    async def start(self):
+        """Запуск менеджера модемов - оптимизированная версия"""
+        self.running = True
+
+        logger.info("Starting optimized modem manager...")
+        start_time = time.time()
+
+        # Быстрое обнаружение модемов
+        await self.discover_all_devices()
+
+        # Быстрая проверка здоровья
+        await self.quick_health_check()
+
+        total_time = time.time() - start_time
+        logger.info(f"✅ Modem manager started in {total_time:.2f}s")
+
+    async def stop(self):
+        """Остановка менеджера модемов"""
+        self.running = False
+        logger.info("Modem manager stopped")
 
     async def quick_health_check(self):
         """Быстрая проверка здоровья всех модемов"""
@@ -1078,3 +1074,4 @@ class ModemManager:
         except Exception as e:
             logger.error(f"Error force refreshing external IP for {modem_id}: {e}")
             return None
+
