@@ -314,8 +314,7 @@ class EnhancedRotationManager:
 
     async def _perform_usb_reboot(self) -> Tuple[bool, str]:
         """
-        Выполнение USB перезагрузки модема
-        Реализация на основе bash скрипта
+        Выполнение USB перезагрузки модема - ИСПРАВЛЕННАЯ ВЕРСИЯ
         """
         try:
             logger.info("Starting USB reboot...")
@@ -355,15 +354,20 @@ class EnhancedRotationManager:
 
             logger.info(f"Found Huawei USB device: Bus {bus} Device {device}")
 
-            # Шаг 2: Поиск sysfs пути к устройству
+            # Шаг 2: Запуск диагностики если нужно
+            await self._debug_usb_device_structure(usb_vid)
+
+            # Шаг 3: Поиск sysfs пути к устройству
             device_path = await self._find_usb_device_path(usb_vid)
             if not device_path:
-                return False, "Could not find sysfs path to USB device"
+                # Попробуем альтернативный метод через usbreset
+                logger.warning("Could not find sysfs path, trying usbreset method...")
+                return await self._usbreset_method(bus, device)
 
             auth_file = f"{device_path}/authorized"
             logger.info(f"Using authorization file: {auth_file}")
 
-            # Шаг 3: Отключение USB устройства
+            # Шаг 4: Отключение USB устройства
             logger.info("Disabling USB device...")
             result = await asyncio.create_subprocess_exec(
                 'sudo', 'tee', auth_file,
@@ -379,7 +383,7 @@ class EnhancedRotationManager:
             # Пауза для отключения
             await asyncio.sleep(2)
 
-            # Шаг 4: Включение USB устройства
+            # Шаг 5: Включение USB устройства
             logger.info("Enabling USB device...")
             result = await asyncio.create_subprocess_exec(
                 'sudo', 'tee', auth_file,
@@ -399,10 +403,71 @@ class EnhancedRotationManager:
             logger.error(f"Error during USB reboot: {e}")
             return False, f"USB reboot error: {str(e)}"
 
-    async def _find_usb_device_path(self, vendor_id: str) -> Optional[str]:
-        """Поиск sysfs пути к USB устройству"""
+    async def _usbreset_method(self, bus: str, device: str) -> Tuple[bool, str]:
+        """Альтернативный метод через usbreset"""
         try:
-            # Ищем устройства с нужным vendor ID
+            logger.info(f"Trying usbreset method for Bus {bus} Device {device}")
+
+            # Попробуем найти usbreset
+            result = await asyncio.create_subprocess_exec(
+                'which', 'usbreset',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await result.communicate()
+
+            if result.returncode == 0:
+                usbreset_path = stdout.decode().strip()
+                logger.info(f"Found usbreset at: {usbreset_path}")
+
+                # Выполняем usbreset
+                result = await asyncio.create_subprocess_exec(
+                    'sudo', usbreset_path, f'/dev/bus/usb/{bus.zfill(3)}/{device.zfill(3)}',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await result.communicate()
+
+                if result.returncode == 0:
+                    logger.info("USB reset via usbreset completed successfully")
+                    return True, "USB reset completed via usbreset"
+                else:
+                    logger.error(f"usbreset failed: {stderr.decode()}")
+
+            # Если usbreset не найден, пробуем через модули ядра
+            logger.info("Trying kernel module reset...")
+
+            # Перезагружаем модуль cdc_ether
+            result = await asyncio.create_subprocess_exec(
+                'sudo', 'modprobe', '-r', 'cdc_ether',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await result.communicate()
+
+            await asyncio.sleep(2)
+
+            result = await asyncio.create_subprocess_exec(
+                'sudo', 'modprobe', 'cdc_ether',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await result.communicate()
+
+            await asyncio.sleep(5)
+
+            return True, "USB reset completed via kernel module restart"
+
+        except Exception as e:
+            logger.error(f"Error in usbreset method: {e}")
+            return False, f"Alternative USB reset failed: {str(e)}"
+
+    async def _find_usb_device_path(self, vendor_id: str) -> Optional[str]:
+        """Поиск sysfs пути к USB устройству - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
+        try:
+            logger.info(f"Searching for USB device with vendor ID: {vendor_id}")
+
+            # Метод 1: Поиск через find команду
             result = await asyncio.create_subprocess_exec(
                 'find', '/sys/bus/usb/devices/', '-name', 'idVendor',
                 stdout=asyncio.subprocess.PIPE,
@@ -411,11 +476,12 @@ class EnhancedRotationManager:
             stdout, stderr = await result.communicate()
 
             if result.returncode != 0:
+                logger.error(f"Find command failed: {stderr.decode()}")
                 return None
 
             # Проверяем каждый найденный файл
             for vendor_file in stdout.decode().split('\n'):
-                if not vendor_file:
+                if not vendor_file.strip():
                     continue
 
                 try:
@@ -428,13 +494,92 @@ class EnhancedRotationManager:
                         device_path = vendor_file.replace('/idVendor', '')
                         auth_file = f"{device_path}/authorized"
 
+                        logger.info(f"Found potential device path: {device_path}")
+
                         # Проверяем, что файл authorized существует
                         if await self._file_exists(auth_file):
+                            logger.info(f"✅ Valid device path found: {device_path}")
                             return device_path
+                        else:
+                            logger.warning(f"Authorized file not found: {auth_file}")
 
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Error reading vendor file {vendor_file}: {e}")
                     continue
 
+            # Метод 2: Альтернативный поиск через lsusb и /sys/bus/usb/devices
+            logger.info("Trying alternative method using lsusb...")
+
+            # Получаем Bus и Device из lsusb
+            result = await asyncio.create_subprocess_exec(
+                'lsusb',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await result.communicate()
+
+            if result.returncode == 0:
+                lsusb_output = stdout.decode()
+
+                # Ищем строку с нужным vendor_id
+                for line in lsusb_output.split('\n'):
+                    if vendor_id in line:
+                        # Парсим строку: Bus 001 Device 011: ID 12d1:1f01 Huawei Technologies Co., Ltd.
+                        bus_match = re.search(r'Bus (\d+) Device (\d+)', line)
+                        if bus_match:
+                            bus_num = bus_match.group(1)
+                            dev_num = bus_match.group(2)
+
+                            # Формируем возможные пути
+                            possible_paths = [
+                                f"/sys/bus/usb/devices/{bus_num}-{dev_num}",
+                                f"/sys/bus/usb/devices/{bus_num}-{dev_num}.1",
+                                f"/sys/bus/usb/devices/{bus_num}-{dev_num}.2",
+                                f"/sys/bus/usb/devices/usb{bus_num}",
+                            ]
+
+                            # Попробуем найти все возможные пути для этого устройства
+                            for i in range(1, 20):  # Попробуем разные варианты
+                                for suffix in ['', '.1', '.2', '.3', '.4']:
+                                    path = f"/sys/bus/usb/devices/{bus_num}-{i}{suffix}"
+                                    auth_file = f"{path}/authorized"
+
+                                    if await self._file_exists(auth_file):
+                                        # Проверяем, что это наше устройство
+                                        vendor_file = f"{path}/idVendor"
+                                        if await self._file_exists(vendor_file):
+                                            try:
+                                                with open(vendor_file, 'r') as f:
+                                                    found_vendor = f.read().strip()
+                                                if found_vendor == vendor_id:
+                                                    logger.info(f"✅ Found device via alternative method: {path}")
+                                                    return path
+                                            except:
+                                                continue
+
+            # Метод 3: Прямой поиск в /sys/bus/usb/devices
+            logger.info("Trying direct search in /sys/bus/usb/devices...")
+
+            try:
+                import os
+                for device_name in os.listdir('/sys/bus/usb/devices'):
+                    device_path = f"/sys/bus/usb/devices/{device_name}"
+                    vendor_file = f"{device_path}/idVendor"
+                    auth_file = f"{device_path}/authorized"
+
+                    if os.path.exists(vendor_file) and os.path.exists(auth_file):
+                        try:
+                            with open(vendor_file, 'r') as f:
+                                found_vendor = f.read().strip()
+                            if found_vendor == vendor_id:
+                                logger.info(f"✅ Found device via direct search: {device_path}")
+                                return device_path
+                        except:
+                            continue
+            except Exception as e:
+                logger.error(f"Error in direct search: {e}")
+
+            logger.error(f"Could not find sysfs path for vendor ID: {vendor_id}")
             return None
 
         except Exception as e:
@@ -962,3 +1107,78 @@ class EnhancedRotationManager:
     async def _android_interface_reset(self, adb_id: str, device: ProxyDevice) -> Tuple[bool, str]:
         """Сброс сетевого интерфейса на Android"""
         return False, "Android interface reset not implemented"
+
+
+    async def _debug_usb_device_structure(self, vendor_id: str):
+        """Диагностика USB устройства для отладки"""
+        try:
+            logger.info(f"🔍 Debug USB device structure for vendor ID: {vendor_id}")
+
+            # 1. Показать все USB устройства
+            result = await asyncio.create_subprocess_exec(
+                'lsusb',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await result.communicate()
+
+            if result.returncode == 0:
+                logger.info("📋 All USB devices:")
+                for line in stdout.decode().split('\n'):
+                    if line.strip():
+                        logger.info(f"  {line}")
+
+            # 2. Показать структуру /sys/bus/usb/devices
+            result = await asyncio.create_subprocess_exec(
+                'ls', '-la', '/sys/bus/usb/devices/',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await result.communicate()
+
+            if result.returncode == 0:
+                logger.info("📁 /sys/bus/usb/devices/ structure:")
+                for line in stdout.decode().split('\n'):
+                    if line.strip():
+                        logger.info(f"  {line}")
+
+            # 3. Поиск устройств с нужным vendor_id
+            result = await asyncio.create_subprocess_exec(
+                'find', '/sys/bus/usb/devices/', '-name', 'idVendor', '-exec', 'grep', '-l', vendor_id, '{}', ';',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await result.communicate()
+
+            if result.returncode == 0:
+                logger.info(f"🔍 Files with vendor ID {vendor_id}:")
+                for line in stdout.decode().split('\n'):
+                    if line.strip():
+                        device_path = line.replace('/idVendor', '')
+                        auth_file = f"{device_path}/authorized"
+                        logger.info(f"  Device: {device_path}")
+                        logger.info(f"    Authorized file: {auth_file}")
+                        logger.info(f"    Exists: {await self._file_exists(auth_file)}")
+
+            # 4. Попробуем найти по другому пути
+            import os
+            if os.path.exists('/sys/bus/usb/devices'):
+                logger.info("🔍 Manual search in /sys/bus/usb/devices:")
+                for device_name in os.listdir('/sys/bus/usb/devices'):
+                    device_path = f"/sys/bus/usb/devices/{device_name}"
+                    vendor_file = f"{device_path}/idVendor"
+
+                    if os.path.exists(vendor_file):
+                        try:
+                            with open(vendor_file, 'r') as f:
+                                found_vendor = f.read().strip()
+                            if found_vendor == vendor_id:
+                                auth_file = f"{device_path}/authorized"
+                                logger.info(f"  ✅ Found matching device: {device_path}")
+                                logger.info(f"    Authorized file: {auth_file}")
+                                logger.info(f"    Exists: {os.path.exists(auth_file)}")
+                        except:
+                            continue
+
+        except Exception as e:
+            logger.error(f"Error in USB debug: {e}")
