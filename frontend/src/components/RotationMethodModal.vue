@@ -1,4 +1,5 @@
-<!-- frontend/src/components/RotationMethodModal.vue -->
+// frontend/src/components/RotationMethodModal.vue - ИСПРАВЛЕННАЯ ВЕРСИЯ С ТАЙМАУТОМ
+
 <template>
   <div v-if="isVisible" class="fixed inset-0 bg-gray-500 bg-opacity-75 flex items-center justify-center z-50" @click="closeModal">
     <div class="bg-white rounded-lg max-w-md w-full mx-4 shadow-xl" @click.stop>
@@ -15,6 +16,17 @@
         <p class="text-sm text-gray-500 mt-1">
           {{ formatDeviceType(deviceInfo.modem_type) }} • {{ deviceInfo.interface }}
         </p>
+        <!-- USB Modem Warning -->
+        <div v-if="deviceInfo.modem_type === 'usb_modem'" class="mt-2 p-2 bg-amber-50 border border-amber-200 rounded-md">
+          <div class="flex">
+            <ClockIcon class="h-4 w-4 text-amber-400 mt-0.5" />
+            <div class="ml-2">
+              <p class="text-xs text-amber-800">
+                USB модемы требуют 30-45 секунд для ротации IP
+              </p>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- Device Status -->
@@ -29,6 +41,30 @@
         <div class="flex items-center justify-between text-sm mt-2">
           <span class="text-gray-600">Current IP:</span>
           <span class="font-mono text-gray-900">{{ deviceInfo.external_ip || 'N/A' }}</span>
+        </div>
+      </div>
+
+      <!-- Progress Indicator for Rotation -->
+      <div v-if="isRotating" class="px-6 py-4 bg-blue-50 border-t border-blue-200">
+        <div class="flex items-center">
+          <div class="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600"></div>
+          <div class="ml-3 flex-1">
+            <p class="text-sm font-medium text-blue-900">
+              {{ rotationProgress.message }}
+            </p>
+            <div class="mt-1 bg-blue-200 rounded-full h-1.5">
+              <div
+                class="bg-blue-600 h-1.5 rounded-full transition-all duration-1000"
+                :style="{ width: `${rotationProgress.percent}%` }"
+              ></div>
+            </div>
+            <p class="text-xs text-blue-700 mt-1">
+              Прошло: {{ Math.floor(rotationProgress.elapsed / 1000) }}с
+              <span v-if="deviceInfo.modem_type === 'usb_modem'">
+                / ~40с
+              </span>
+            </p>
+          </div>
         </div>
       </div>
 
@@ -74,6 +110,10 @@
                         class="ml-2 px-2 py-0.5 bg-green-100 text-green-800 text-xs rounded-full font-medium">
                     Recommended
                   </span>
+                  <span v-if="method.method === 'usb_reboot'"
+                        class="ml-2 px-2 py-0.5 bg-blue-100 text-blue-800 text-xs rounded-full font-medium">
+                    ~40s
+                  </span>
                 </label>
                 <p class="text-xs text-gray-500 mt-1">{{ method.description }}</p>
                 <div class="flex items-center mt-2">
@@ -81,6 +121,9 @@
                   <span :class="getRiskLevelClass(method.risk_level)"
                         class="ml-1 text-xs font-medium">
                     {{ formatRiskLevel(method.risk_level) }}
+                  </span>
+                  <span v-if="method.time_estimate" class="ml-3 text-xs text-gray-400">
+                    Time: {{ method.time_estimate }}
                   </span>
                 </div>
               </div>
@@ -119,14 +162,14 @@
           </button>
 
           <div class="flex space-x-3">
-            <button @click="closeModal" class="btn btn-sm btn-secondary">
+            <button @click="closeModal" :disabled="isRotating" class="btn btn-sm btn-secondary">
               Cancel
             </button>
             <button @click="executeRotation"
                     :disabled="!selectedMethod || isProcessing"
                     class="btn btn-sm btn-primary">
               <ArrowPathIcon class="h-4 w-4 mr-1" :class="{ 'animate-spin': isRotating }" />
-              {{ isRotating ? 'Rotating...' : 'Rotate IP' }}
+              {{ getRotationButtonText() }}
             </button>
           </div>
         </div>
@@ -167,14 +210,14 @@
   </div>
 </template>
 
-
 <script>
 import { ref, computed, watch } from 'vue'
 import {
   XMarkIcon,
   ArrowPathIcon,
   BeakerIcon,
-  ExclamationTriangleIcon
+  ExclamationTriangleIcon,
+  ClockIcon
 } from '@heroicons/vue/24/outline'
 import api from '@/utils/api'
 
@@ -184,7 +227,8 @@ export default {
     XMarkIcon,
     ArrowPathIcon,
     BeakerIcon,
-    ExclamationTriangleIcon
+    ExclamationTriangleIcon,
+    ClockIcon
   },
   props: {
     isVisible: {
@@ -206,18 +250,93 @@ export default {
     const errorMessage = ref('')
     const testResult = ref(null)
 
+    // Прогресс ротации
+    const rotationProgress = ref({
+      message: 'Initializing rotation...',
+      percent: 0,
+      elapsed: 0
+    })
+
+    let rotationTimer = null
+    let progressTimer = null
+
     const isProcessing = computed(() => isRotating.value || isTesting.value)
 
-    // ИСПРАВЛЕНО: Функция для получения правильного device_id
+    // Получение правильного device_id
     const getDeviceId = () => {
-      // Используем modem_id если есть, иначе device_id, иначе id
       return props.deviceInfo?.modem_id ||
              props.deviceInfo?.device_id ||
              props.deviceInfo?.id ||
              ''
     }
 
-    // Load available rotation methods when modal opens
+    // Текст кнопки ротации
+    const getRotationButtonText = () => {
+      if (!isRotating.value) return 'Rotate IP'
+
+      if (props.deviceInfo?.modem_type === 'usb_modem') {
+        return 'USB Reboot... (~40s)'
+      }
+
+      return 'Rotating...'
+    }
+
+    // Симуляция прогресса для USB модемов
+    const startRotationProgress = () => {
+      if (props.deviceInfo?.modem_type !== 'usb_modem') return
+
+      const startTime = Date.now()
+      const expectedDuration = 40000 // 40 секунд для USB модемов
+
+      rotationProgress.value = {
+        message: 'Starting USB reboot...',
+        percent: 0,
+        elapsed: 0
+      }
+
+      progressTimer = setInterval(() => {
+        const elapsed = Date.now() - startTime
+        const percent = Math.min((elapsed / expectedDuration) * 100, 95)
+
+        let message = 'Starting USB reboot...'
+        if (elapsed > 5000) message = 'Disabling USB device...'
+        if (elapsed > 10000) message = 'Enabling USB device...'
+        if (elapsed > 20000) message = 'Waiting for reconnection...'
+        if (elapsed > 30000) message = 'Verifying IP change...'
+
+        rotationProgress.value = {
+          message,
+          percent,
+          elapsed
+        }
+      }, 1000)
+    }
+
+    const stopRotationProgress = () => {
+      if (progressTimer) {
+        clearInterval(progressTimer)
+        progressTimer = null
+      }
+
+      rotationProgress.value = {
+        message: 'Completed',
+        percent: 100,
+        elapsed: rotationProgress.value.elapsed
+      }
+    }
+
+    // Создание API клиента с увеличенным таймаутом
+    const createApiClientWithTimeout = (timeoutMs = 70000) => {
+      // Создаем отдельный экземпляр axios с увеличенным таймаутом
+      const axios = require('axios')
+      return axios.create({
+        baseURL: api.defaults.baseURL,
+        timeout: timeoutMs,
+        headers: api.defaults.headers
+      })
+    }
+
+    // Загрузка методов ротации
     const loadRotationMethods = async () => {
       const deviceId = getDeviceId()
       if (!deviceId) {
@@ -232,12 +351,11 @@ export default {
 
         console.log('Loading rotation methods for device:', deviceId)
 
-        // ИСПРАВЛЕНО: Используем admin endpoint вместо обычного devices endpoint
         const response = await api.get(`/admin/devices/${deviceId}/rotation-methods`)
 
         availableMethods.value = response.data.available_methods || []
 
-        // Select recommended method by default
+        // Выбираем рекомендуемый метод по умолчанию
         const recommended = availableMethods.value.find(m => m.recommended)
         if (recommended) {
           selectedMethod.value = recommended.method
@@ -250,7 +368,6 @@ export default {
       } catch (error) {
         console.error('Failed to load rotation methods:', error)
 
-        // Более детальная обработка ошибок
         if (error.response?.status === 404) {
           errorMessage.value = 'Устройство не найдено или методы ротации недоступны'
         } else if (error.response?.status === 500) {
@@ -263,7 +380,7 @@ export default {
       }
     }
 
-    // Test selected rotation method
+    // Тестирование метода ротации
     const testMethod = async () => {
       if (!selectedMethod.value) return
 
@@ -280,8 +397,9 @@ export default {
 
         console.log('Testing rotation method:', selectedMethod.value, 'for device:', deviceId)
 
-        // ИСПРАВЛЕНО: Используем admin endpoint
-        const response = await api.post(`/admin/devices/${deviceId}/test-rotation`, {
+        // Используем увеличенный таймаут для тестирования
+        const apiClient = createApiClientWithTimeout(70000)
+        const response = await apiClient.post(`/admin/devices/${deviceId}/test-rotation`, {
           method: selectedMethod.value
         })
 
@@ -291,7 +409,9 @@ export default {
       } catch (error) {
         console.error('Test rotation failed:', error)
 
-        if (error.response?.status === 404) {
+        if (error.code === 'ECONNABORTED') {
+          errorMessage.value = 'Тест занял слишком много времени. Это нормально для USB модемов.'
+        } else if (error.response?.status === 404) {
           errorMessage.value = 'Устройство не найдено'
         } else if (error.response?.status === 500) {
           errorMessage.value = 'Ошибка сервера при тестировании ротации'
@@ -303,7 +423,7 @@ export default {
       }
     }
 
-    // Execute IP rotation
+    // Выполнение ротации IP
     const executeRotation = async () => {
       if (!selectedMethod.value) return
 
@@ -317,23 +437,33 @@ export default {
         isRotating.value = true
         errorMessage.value = ''
 
+        // Запускаем индикатор прогресса для USB модемов
+        startRotationProgress()
+
         console.log('Executing rotation with method:', selectedMethod.value, 'for device:', deviceId)
 
-        // ИСПРАВЛЕНО: Используем admin endpoint с правильными параметрами
         const requestBody = selectedMethod.value ?
           { force_method: selectedMethod.value } :
           {}
 
-        const response = await api.post(`/admin/devices/${deviceId}/rotate`, requestBody)
+        // Определяем таймаут в зависимости от типа устройства
+        const timeoutMs = props.deviceInfo?.modem_type === 'usb_modem' ? 70000 : 35000
+
+        const apiClient = createApiClientWithTimeout(timeoutMs)
+        const response = await apiClient.post(`/admin/devices/${deviceId}/rotate`, requestBody)
 
         console.log('Rotation response:', response.data)
+
+        stopRotationProgress()
 
         if (response.data.success) {
           emit('rotation-success', {
             device_id: deviceId,
             method: selectedMethod.value,
             new_ip: response.data.new_ip,
-            message: response.data.message
+            old_ip: response.data.old_ip,
+            message: response.data.message,
+            ip_changed: response.data.ip_changed
           })
           closeModal()
         } else {
@@ -342,8 +472,16 @@ export default {
 
       } catch (error) {
         console.error('Rotation failed:', error)
+        stopRotationProgress()
 
-        if (error.response?.status === 404) {
+        if (error.code === 'ECONNABORTED') {
+          // Таймаут - это может быть нормально для USB модемов
+          if (props.deviceInfo?.modem_type === 'usb_modem') {
+            errorMessage.value = 'Ротация заняла более 70 секунд. Проверьте статус устройства через несколько минут.'
+          } else {
+            errorMessage.value = 'Ротация заняла слишком много времени'
+          }
+        } else if (error.response?.status === 404) {
           errorMessage.value = 'Устройство не найдено'
         } else if (error.response?.status === 500) {
           errorMessage.value = 'Ошибка сервера при выполнении ротации'
@@ -356,6 +494,14 @@ export default {
     }
 
     const closeModal = () => {
+      // Останавливаем таймеры
+      if (rotationTimer) {
+        clearTimeout(rotationTimer)
+        rotationTimer = null
+      }
+
+      stopRotationProgress()
+
       emit('close')
       // Reset state
       selectedMethod.value = ''
@@ -363,7 +509,7 @@ export default {
       errorMessage.value = ''
     }
 
-    // Utility functions (остаются без изменений)
+    // Utility functions
     const formatDeviceType = (type) => {
       const types = {
         'android': 'Android Device',
@@ -401,7 +547,7 @@ export default {
       return classes[status] || 'bg-gray-100 text-gray-800'
     }
 
-    // Load methods when modal becomes visible
+    // Загружаем методы при открытии модального окна
     watch(() => props.isVisible, (newValue) => {
       if (newValue) {
         console.log('Modal opened with device info:', props.deviceInfo)
@@ -418,6 +564,7 @@ export default {
       isProcessing,
       errorMessage,
       testResult,
+      rotationProgress,
       testMethod,
       executeRotation,
       closeModal,
@@ -425,8 +572,31 @@ export default {
       formatRiskLevel,
       getRiskLevelClass,
       getStatusBadgeClass,
-      getDeviceId
+      getDeviceId,
+      getRotationButtonText
     }
   }
 }
 </script>
+
+<style scoped>
+.btn {
+  @apply inline-flex items-center px-3 py-2 border text-sm font-medium rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2;
+}
+
+.btn-sm {
+  @apply px-2.5 py-1.5 text-xs;
+}
+
+.btn-primary {
+  @apply border-transparent text-white bg-blue-600 hover:bg-blue-700 focus:ring-blue-500;
+}
+
+.btn-secondary {
+  @apply border-gray-300 text-gray-700 bg-white hover:bg-gray-50 focus:ring-blue-500;
+}
+
+.btn:disabled {
+  @apply opacity-50 cursor-not-allowed;
+}
+</style>

@@ -1,14 +1,15 @@
 # backend/app/api/admin.py - ОБНОВЛЕННЫЕ БЛОКИ С ПОДДЕРЖКОЙ USB РОТАЦИИ
 
 import subprocess
+import uuid
 from typing import Optional
 
 import netifaces
-from datetime import (datetime, timezone)
+from datetime import (datetime, timezone, timedelta)
 import time
 
 import structlog
-from fastapi import HTTPException, Depends, APIRouter
+from fastapi import HTTPException, Depends, APIRouter, BackgroundTasks
 from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,7 +21,7 @@ from ..models.database import get_db
 
 router = APIRouter()
 logger = structlog.get_logger()
-
+rotation_status_storage: Dict[str, Dict[str, Any]] = {}
 
 # Существующие модели остаются без изменений...
 class SystemConfigUpdate(BaseModel):
@@ -67,6 +68,17 @@ class DeviceManagementResponse(BaseModel):
 class RotationRequest(BaseModel):
     force_method: Optional[str] = None
 
+class RotationStatusResponse(BaseModel):
+    device_id: str
+    status: str  # 'idle', 'starting', 'in_progress', 'completed', 'failed'
+    progress_percent: int = 0
+    message: str = ""
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    estimated_completion: Optional[datetime] = None
+    current_step: Optional[str] = None
+    total_steps: Optional[int] = None
+    error_message: Optional[str] = None
 
 class TestRotationRequest(BaseModel):
     method: str
@@ -384,6 +396,86 @@ async def get_usb_device_diagnostics(
             detail=f"USB diagnostics failed: {str(e)}"
         )
 
+@router.get("/devices/{device_id}/rotation-status", response_model=RotationStatusResponse)
+async def get_rotation_status(
+    device_id: str,
+    current_user=Depends(get_admin_user)
+):
+    """Получение статуса ротации устройства"""
+    try:
+        status_info = rotation_status_storage.get(device_id, {
+            'device_id': device_id,
+            'status': 'idle',
+            'progress_percent': 0,
+            'message': 'No rotation in progress',
+            'started_at': None,
+            'completed_at': None,
+            'estimated_completion': None,
+            'current_step': None,
+            'total_steps': None,
+            'error_message': None
+        })
+
+        return RotationStatusResponse(**status_info)
+
+    except Exception as e:
+        logger.error(f"Error getting rotation status for {device_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get rotation status: {str(e)}"
+        )
+
+
+async def update_rotation_status(
+    device_id: str,
+    status: str,
+    progress_percent: int = 0,
+    message: str = "",
+    current_step: str = None,
+    error_message: str = None
+):
+    """Обновление статуса ротации устройства"""
+    try:
+        current_time = datetime.now()
+
+        if device_id not in rotation_status_storage:
+            rotation_status_storage[device_id] = {
+                'device_id': device_id,
+                'status': 'idle',
+                'progress_percent': 0,
+                'message': '',
+                'started_at': None,
+                'completed_at': None,
+                'estimated_completion': None,
+                'current_step': None,
+                'total_steps': 5,  # Примерное количество шагов для USB ротации
+                'error_message': None
+            }
+
+        status_info = rotation_status_storage[device_id]
+
+        # Обновляем статус
+        status_info['status'] = status
+        status_info['progress_percent'] = progress_percent
+        status_info['message'] = message
+        status_info['current_step'] = current_step
+        status_info['error_message'] = error_message
+
+        # Устанавливаем время начала
+        if status == 'starting' and not status_info['started_at']:
+            status_info['started_at'] = current_time
+            # Для USB модемов оцениваем 40 секунд
+            status_info['estimated_completion'] = current_time + timedelta(seconds=40)
+
+        # Устанавливаем время завершения
+        if status in ['completed', 'failed']:
+            status_info['completed_at'] = current_time
+            status_info['progress_percent'] = 100
+
+        logger.debug(f"Updated rotation status for {device_id}: {status} ({progress_percent}%)")
+
+    except Exception as e:
+        logger.error(f"Error updating rotation status: {e}")
 
 @router.get("/system/usb-rotation-status")
 async def get_usb_rotation_system_status(current_user=Depends(get_admin_user)):
@@ -444,12 +536,13 @@ async def test_usb_rotation_system(current_user=Depends(get_admin_user)):
 
 # Обновленный endpoint для ротации с поддержкой USB
 @router.post("/devices/{device_id}/rotate", response_model=EnhancedRotationResponse)
-async def rotate_device_ip(
+async def rotate_device_ip_with_progress(
     device_id: str,
     rotation_request: RotationRequest = RotationRequest(),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
     current_user=Depends(get_admin_user)
 ):
-    """Принудительная ротация IP устройства с автоматическим выбором USB перезагрузки для модемов"""
+    """Принудительная ротация IP устройства с отслеживанием прогресса"""
     try:
         from ..core.managers import perform_device_rotation, get_device_uuid_by_name, perform_device_rotation_by_uuid, \
             _get_device_type_by_name
@@ -457,6 +550,15 @@ async def rotate_device_ip(
 
         logger.info(f"Starting IP rotation for device: {device_id}")
         logger.info(f"Rotation request: {rotation_request.dict()}")
+
+        # Инициализируем статус ротации
+        await update_rotation_status(
+            device_id,
+            'starting',
+            0,
+            'Initializing rotation...',
+            'initialization'
+        )
 
         # Получаем текущий IP до ротации
         old_ip = await get_device_current_ip(device_id)
@@ -476,11 +578,30 @@ async def rotate_device_ip(
                 final_method = 'usb_reboot'
                 logger.info(f"USB modem detected, forcing USB reboot method")
 
-            success, result = await perform_device_rotation_by_uuid(
-                str(device_uuid),
-                final_method
+                await update_rotation_status(
+                    device_id,
+                    'in_progress',
+                    10,
+                    'USB modem detected, using USB reboot method',
+                    'method_selection'
+                )
+
+            # Обновляем статус перед началом ротации
+            await update_rotation_status(
+                device_id,
+                'in_progress',
+                20,
+                f'Starting rotation with method: {final_method}',
+                'rotation_start'
             )
-            logger.info(f"Used UUID-based rotation for device UUID: {device_uuid}")
+
+            # Выполняем ротацию с обновлениями статуса
+            success, result = await perform_device_rotation_with_status(
+                device_uuid if 'device_uuid' in locals() else device_id,
+                final_method,
+                device_id,
+                device_type == 'usb_modem'
+            )
 
         except ValueError:
             # Если не UUID, значит это имя устройства
@@ -491,19 +612,44 @@ async def rotate_device_ip(
                 final_method = 'usb_reboot'
                 logger.info(f"USB modem detected, forcing USB reboot method")
 
-            success, result = await perform_device_rotation(
+            await update_rotation_status(
                 device_id,
-                final_method
+                'in_progress',
+                20,
+                f'Starting rotation with method: {final_method}',
+                'rotation_start'
             )
-            logger.info(f"Used name-based rotation for device name: {device_id}")
+
+            success, result = await perform_device_rotation_with_status(
+                device_id,
+                final_method,
+                device_id,
+                device_type == 'usb_modem'
+            )
 
         # Получаем новый IP после ротации
+        await update_rotation_status(
+            device_id,
+            'in_progress',
+            80,
+            'Verifying IP change...',
+            'ip_verification'
+        )
+
         new_ip = await get_device_current_ip(device_id)
 
         # Анализируем результат
         ip_changed = old_ip != new_ip if old_ip and new_ip else False
 
         if success:
+            await update_rotation_status(
+                device_id,
+                'completed',
+                100,
+                f'Rotation completed successfully! New IP: {new_ip}' if ip_changed else 'Rotation completed successfully',
+                'completed'
+            )
+
             if ip_changed:
                 rotation_type = "ip_changed"
                 explanation = f"IP successfully changed from {old_ip} to {new_ip} using {final_method}"
@@ -530,6 +676,15 @@ async def rotate_device_ip(
                 explanation=explanation
             )
         else:
+            await update_rotation_status(
+                device_id,
+                'failed',
+                0,
+                f'Rotation failed: {result}',
+                'failed',
+                error_message=result
+            )
+
             logger.error(f"❌ IP rotation failed for {device_id}: {result}")
             return EnhancedRotationResponse(
                 success=False,
@@ -544,6 +699,15 @@ async def rotate_device_ip(
             )
 
     except Exception as e:
+        await update_rotation_status(
+            device_id,
+            'failed',
+            0,
+            f'Rotation error: {str(e)}',
+            'error',
+            error_message=str(e)
+        )
+
         logger.error(f"Error during IP rotation for {device_id}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1757,6 +1921,15 @@ async def get_devices_from_database(current_user=Depends(get_admin_user)):
             detail=f"Failed to get devices from database: {str(e)}"
         )
 
+@router.post("/devices/cleanup-rotation-statuses")
+async def manual_cleanup_rotation_statuses(current_user=Depends(get_admin_user)):
+    """Ручная очистка статусов ротации"""
+    await cleanup_rotation_statuses()
+    return {
+        "success": True,
+        "message": "Rotation statuses cleaned up",
+        "active_rotations": len(rotation_status_storage)
+    }
 
 @router.get("/system/stats", response_model=SystemStatsResponse)
 async def get_system_stats(
@@ -2171,3 +2344,104 @@ async def get_device_current_ip(device_id: str) -> Optional[str]:
 
 # Остальные endpoint'ы остаются без изменений, но добавляем импорт asyncio
 import asyncio
+
+
+async def perform_device_rotation_with_status(
+    device_identifier: str,
+    method: str,
+    status_device_id: str,
+    is_usb_modem: bool = False
+):
+    """Выполнение ротации с обновлением статуса"""
+    try:
+        from ..core.managers import perform_device_rotation_by_uuid, perform_device_rotation
+
+        if is_usb_modem:
+            # Специальные статусы для USB модемов
+            await update_rotation_status(
+                status_device_id,
+                'in_progress',
+                30,
+                'Finding USB device...',
+                'usb_discovery'
+            )
+
+            await asyncio.sleep(2)  # Симуляция времени поиска
+
+            await update_rotation_status(
+                status_device_id,
+                'in_progress',
+                40,
+                'Disabling USB device...',
+                'usb_disable'
+            )
+
+            # Выполняем ротацию
+            try:
+                device_uuid = uuid.UUID(device_identifier)
+                success, result = await perform_device_rotation_by_uuid(str(device_uuid), method)
+            except ValueError:
+                success, result = await perform_device_rotation(device_identifier, method)
+
+            if success:
+                await update_rotation_status(
+                    status_device_id,
+                    'in_progress',
+                    60,
+                    'USB device disabled, waiting...',
+                    'usb_waiting'
+                )
+
+                await asyncio.sleep(2)
+
+                await update_rotation_status(
+                    status_device_id,
+                    'in_progress',
+                    70,
+                    'Enabling USB device...',
+                    'usb_enable'
+                )
+        else:
+            # Обычная ротация для Android устройств
+            await update_rotation_status(
+                status_device_id,
+                'in_progress',
+                50,
+                'Executing rotation...',
+                'rotation_execution'
+            )
+
+            try:
+                device_uuid = uuid.UUID(device_identifier)
+                success, result = await perform_device_rotation_by_uuid(str(device_uuid), method)
+            except ValueError:
+                success, result = await perform_device_rotation(device_identifier, method)
+
+        return success, result
+
+    except Exception as e:
+        logger.error(f"Error in rotation with status: {e}")
+        return False, str(e)
+
+
+# Очистка старых статусов ротации (можно вызывать периодически)
+async def cleanup_rotation_statuses():
+    """Очистка статусов ротации старше 1 часа"""
+    try:
+        current_time = datetime.now()
+        expired_devices = []
+
+        for device_id, status_info in rotation_status_storage.items():
+            if status_info.get('completed_at'):
+                time_since_completion = current_time - status_info['completed_at']
+                if time_since_completion.total_seconds() > 3600:  # 1 час
+                    expired_devices.append(device_id)
+
+        for device_id in expired_devices:
+            del rotation_status_storage[device_id]
+
+        if expired_devices:
+            logger.info(f"Cleaned up rotation statuses for {len(expired_devices)} devices")
+
+    except Exception as e:
+        logger.error(f"Error cleaning up rotation statuses: {e}")
