@@ -1098,6 +1098,125 @@ async def admin_get_devices_combined():
         logger.error(f"Error getting combined devices: {e}")
         return []
 
+@router.get("/devices/test-discovery")
+async def test_discovery(current_user=Depends(get_admin_user)):
+    """Тестирование отдельных частей обнаружения (Android и USB модемы)"""
+    try:
+        from ..core.managers import get_device_manager, get_modem_manager
+
+        device_manager = get_device_manager()
+        modem_manager = get_modem_manager()
+
+        if not device_manager and not modem_manager:
+            return {"error": "No device managers available"}
+
+        discovery_results = {
+            "android_discovery": {},
+            "usb_modem_discovery": {},
+            "combined_summary": {}
+        }
+
+        # Тестирование Android устройств
+        if device_manager:
+            try:
+                # Тест 1: ADB устройства
+                adb_devices = await device_manager.get_adb_devices()
+
+                # Тест 2: USB интерфейсы для Android
+                usb_interfaces = await device_manager.detect_usb_tethering_interfaces()
+
+                # Тест 3: Android устройства с интерфейсами
+                android_devices = await device_manager.discover_android_devices_with_interfaces()
+
+                discovery_results["android_discovery"] = {
+                    "adb_devices": adb_devices,
+                    "usb_interfaces": usb_interfaces,
+                    "android_devices": android_devices,
+                    "summary": {
+                        "adb_count": len(adb_devices),
+                        "usb_interfaces_count": len(usb_interfaces),
+                        "matched_devices": len(android_devices)
+                    }
+                }
+            except Exception as e:
+                discovery_results["android_discovery"]["error"] = str(e)
+
+        # Тестирование USB модемов
+        if modem_manager:
+            try:
+                # Тест 1: Обнаружение Huawei модемов по MAC
+                huawei_modems = await modem_manager.discover_huawei_modems()
+
+                # Тест 2: Все интерфейсы с Huawei MAC
+                huawei_interfaces = []
+                all_interfaces = netifaces.interfaces()
+                for interface in all_interfaces:
+                    mac_addr = await modem_manager.get_interface_mac(interface)
+                    if mac_addr and mac_addr.lower().startswith('0c:5b:8f'):
+                        interface_ip = await modem_manager.get_interface_ip(interface)
+                        huawei_interfaces.append({
+                            'interface': interface,
+                            'mac': mac_addr,
+                            'ip': interface_ip
+                        })
+
+                # Тест 3: Веб-интерфейсы модемов
+                web_interfaces = []
+                for modem_id, modem_info in huawei_modems.items():
+                    web_ip = modem_info.get('web_interface')
+                    if web_ip:
+                        # Тест доступности веб-интерфейса
+                        try:
+                            import aiohttp
+                            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3)) as session:
+                                async with session.get(f"http://{web_ip}") as response:
+                                    web_accessible = response.status == 200
+                        except:
+                            web_accessible = False
+
+                        web_interfaces.append({
+                            'modem_id': modem_id,
+                            'web_ip': web_ip,
+                            'accessible': web_accessible
+                        })
+
+                discovery_results["usb_modem_discovery"] = {
+                    "huawei_modems": huawei_modems,
+                    "huawei_interfaces": huawei_interfaces,
+                    "web_interfaces": web_interfaces,
+                    "summary": {
+                        "modems_found": len(huawei_modems),
+                        "interfaces_found": len(huawei_interfaces),
+                        "web_accessible": sum(1 for w in web_interfaces if w['accessible'])
+                    }
+                }
+            except Exception as e:
+                discovery_results["usb_modem_discovery"]["error"] = str(e)
+
+        # Объединенная сводка
+        android_count = discovery_results.get("android_discovery", {}).get("summary", {}).get("matched_devices", 0)
+        modem_count = discovery_results.get("usb_modem_discovery", {}).get("summary", {}).get("modems_found", 0)
+
+        discovery_results["combined_summary"] = {
+            "total_android_devices": android_count,
+            "total_usb_modems": modem_count,
+            "total_devices": android_count + modem_count,
+            "discovery_successful": android_count > 0 or modem_count > 0,
+            "managers_available": {
+                "device_manager": device_manager is not None,
+                "modem_manager": modem_manager is not None
+            }
+        }
+
+        return discovery_results
+
+    except Exception as e:
+        import traceback
+        return {
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+            "discovery_results": {}
+        }
 
 @router.post("/devices/rotate-all")
 async def rotate_all_devices(current_user=Depends(get_admin_user)):
@@ -2007,125 +2126,7 @@ async def get_system_stats(
         )
 
 
-@router.get("/devices/test-discovery")
-async def test_discovery(current_user=Depends(get_admin_user)):
-    """Тестирование отдельных частей обнаружения (Android и USB модемы)"""
-    try:
-        from ..core.managers import get_device_manager, get_modem_manager
 
-        device_manager = get_device_manager()
-        modem_manager = get_modem_manager()
-
-        if not device_manager and not modem_manager:
-            return {"error": "No device managers available"}
-
-        discovery_results = {
-            "android_discovery": {},
-            "usb_modem_discovery": {},
-            "combined_summary": {}
-        }
-
-        # Тестирование Android устройств
-        if device_manager:
-            try:
-                # Тест 1: ADB устройства
-                adb_devices = await device_manager.get_adb_devices()
-
-                # Тест 2: USB интерфейсы для Android
-                usb_interfaces = await device_manager.detect_usb_tethering_interfaces()
-
-                # Тест 3: Android устройства с интерфейсами
-                android_devices = await device_manager.discover_android_devices_with_interfaces()
-
-                discovery_results["android_discovery"] = {
-                    "adb_devices": adb_devices,
-                    "usb_interfaces": usb_interfaces,
-                    "android_devices": android_devices,
-                    "summary": {
-                        "adb_count": len(adb_devices),
-                        "usb_interfaces_count": len(usb_interfaces),
-                        "matched_devices": len(android_devices)
-                    }
-                }
-            except Exception as e:
-                discovery_results["android_discovery"]["error"] = str(e)
-
-        # Тестирование USB модемов
-        if modem_manager:
-            try:
-                # Тест 1: Обнаружение Huawei модемов по MAC
-                huawei_modems = await modem_manager.discover_huawei_modems()
-
-                # Тест 2: Все интерфейсы с Huawei MAC
-                huawei_interfaces = []
-                all_interfaces = netifaces.interfaces()
-                for interface in all_interfaces:
-                    mac_addr = await modem_manager.get_interface_mac(interface)
-                    if mac_addr and mac_addr.lower().startswith('0c:5b:8f'):
-                        interface_ip = await modem_manager.get_interface_ip(interface)
-                        huawei_interfaces.append({
-                            'interface': interface,
-                            'mac': mac_addr,
-                            'ip': interface_ip
-                        })
-
-                # Тест 3: Веб-интерфейсы модемов
-                web_interfaces = []
-                for modem_id, modem_info in huawei_modems.items():
-                    web_ip = modem_info.get('web_interface')
-                    if web_ip:
-                        # Тест доступности веб-интерфейса
-                        try:
-                            import aiohttp
-                            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3)) as session:
-                                async with session.get(f"http://{web_ip}") as response:
-                                    web_accessible = response.status == 200
-                        except:
-                            web_accessible = False
-
-                        web_interfaces.append({
-                            'modem_id': modem_id,
-                            'web_ip': web_ip,
-                            'accessible': web_accessible
-                        })
-
-                discovery_results["usb_modem_discovery"] = {
-                    "huawei_modems": huawei_modems,
-                    "huawei_interfaces": huawei_interfaces,
-                    "web_interfaces": web_interfaces,
-                    "summary": {
-                        "modems_found": len(huawei_modems),
-                        "interfaces_found": len(huawei_interfaces),
-                        "web_accessible": sum(1 for w in web_interfaces if w['accessible'])
-                    }
-                }
-            except Exception as e:
-                discovery_results["usb_modem_discovery"]["error"] = str(e)
-
-        # Объединенная сводка
-        android_count = discovery_results.get("android_discovery", {}).get("summary", {}).get("matched_devices", 0)
-        modem_count = discovery_results.get("usb_modem_discovery", {}).get("summary", {}).get("modems_found", 0)
-
-        discovery_results["combined_summary"] = {
-            "total_android_devices": android_count,
-            "total_usb_modems": modem_count,
-            "total_devices": android_count + modem_count,
-            "discovery_successful": android_count > 0 or modem_count > 0,
-            "managers_available": {
-                "device_manager": device_manager is not None,
-                "modem_manager": modem_manager is not None
-            }
-        }
-
-        return discovery_results
-
-    except Exception as e:
-        import traceback
-        return {
-            "error": str(e),
-            "traceback": traceback.format_exc(),
-            "discovery_results": {}
-        }
 
 @router.get("/system/health")
 async def get_system_health(current_user=Depends(get_admin_user)):
