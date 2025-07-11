@@ -13,12 +13,13 @@ logger = structlog.get_logger()
 class DedicatedProxyServer:
     """Индивидуальный прокси-сервер для конкретного устройства на чистом TCP"""
 
-    def __init__(self, device_id: str, port: int, username: str, password: str, device_manager):
+    def __init__(self, device_id: str, port: int, username: str, password: str, device_manager, modem_manager=None):
         self.device_id = device_id
         self.port = port
         self.username = username
         self.password = password
         self.device_manager = device_manager
+        self.modem_manager = modem_manager
         self.server = None
         self._running = False
 
@@ -257,9 +258,21 @@ class DedicatedProxyServer:
             logger.info(f"🔗 RAW CONNECT: {host}:{port}")
 
             # Получаем информацию об устройстве
-            device = await self.device_manager.get_device_by_id(self.device_id)
+            device = None
+            # Сначала пробуем найти в device_manager (Android)
+            if self.device_manager:
+                device = await self.device_manager.get_device_by_id(self.device_id)
+                if device:
+                    logger.debug(f"Device found in device_manager: {self.device_id}")
+
+            # Если не найдено, ищем в modem_manager (USB модемы)
+            if not device and self.modem_manager:
+                device = await self.modem_manager.get_device_by_id(self.device_id)
+                if device:
+                    logger.debug(f"Device found in modem_manager: {self.device_id}")
+
             if not device or device.get('status') != 'online':
-                logger.error(f"Device {self.device_id} not available")
+                logger.error(f"Device {self.device_id} not available or not online")
                 await self.send_http_error_to_writer(writer, 503, "Device not available")
                 return
 
