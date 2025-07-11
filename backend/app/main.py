@@ -65,6 +65,8 @@ app.add_middleware(
 )
 
 # Подключение роутеров - ТОЛЬКО ПОДКЛЮЧЕНИЕ, БЕЗ ДУБЛИРОВАНИЯ
+app.include_router(dedicated_proxy.router, prefix="/admin/dedicated-proxy", tags=["dedicated-proxy"])
+
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
 app.include_router(auth.router, prefix="/auth", tags=["auth-legacy"])  # Для совместимости с фронтендом
 app.include_router(proxy.router, prefix="/api/v1/proxy", tags=["proxy"])
@@ -74,7 +76,7 @@ app.include_router(admin.router, prefix="/admin", tags=["admin-legacy"])  # Дл
 app.include_router(stats.router, prefix="/api/v1/stats", tags=["stats"])
 app.include_router(stats.router, prefix="/stats", tags=["stats-legacy"])  # Для совместимости с фронтендом
 
-app.include_router(dedicated_proxy.router, prefix="/admin/dedicated-proxy", tags=["dedicated-proxy"])
+
 
 
 # Middleware для логирования запросов
