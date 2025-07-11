@@ -948,7 +948,7 @@ class EnhancedRotationManager:
         """Получение времени стабилизации в зависимости от типа устройства"""
         delays = {
             'android': 8,
-            'usb_modem': 15,  # Увеличено для USB перезагрузки
+            'usb_modem': 10,  # Увеличено для USB перезагрузки
             'raspberry_pi': 15,
             'network_device': 5
         }
