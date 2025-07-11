@@ -9,7 +9,6 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 import structlog
 
-from ..core.managers import get_modem_manager
 from ..models.database import AsyncSessionLocal
 from ..models.base import ProxyDevice
 from .dedicated_proxy_server import DedicatedProxyServer
