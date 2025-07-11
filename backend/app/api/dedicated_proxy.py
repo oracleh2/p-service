@@ -71,28 +71,113 @@ async def create_dedicated_proxy(
 ):
     """Создание индивидуального прокси для устройства"""
     try:
+        logger.info(f"🎯 Creating dedicated proxy for device: {request.device_id}")
+
         device_manager = get_device_manager()
         dedicated_proxy_manager = get_dedicated_proxy_manager()
 
-        if not device_manager:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Device manager not available"
-            )
-
         if not dedicated_proxy_manager:
+            logger.error("❌ Dedicated proxy manager not available")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Dedicated proxy manager not available"
             )
 
-        # Проверка существования устройства
-        device = await device_manager.get_device_by_id(request.device_id)
+        # ИСПРАВЛЕНО: Правильный поиск устройства в зависимости от его типа
+        device = None
+        device_source = None
+
+        logger.info(f"🔍 Searching for device: {request.device_id}")
+
+        # 1. Если имя начинается с 'huawei_' - это USB модем
+        if request.device_id.startswith('huawei_'):
+            logger.info(f"🔧 Device looks like USB modem: {request.device_id}")
+            from ..core.managers import get_modem_manager
+            modem_manager = get_modem_manager()
+
+            if modem_manager:
+                device = await modem_manager.get_device_by_id(request.device_id)
+                if device:
+                    device_source = "modem_manager (USB)"
+                    logger.info(f"✅ USB modem found in modem_manager: {request.device_id}")
+
+        # 2. Если имя начинается с 'android_' - это Android устройство
+        elif request.device_id.startswith('android_'):
+            logger.info(f"📱 Device looks like Android: {request.device_id}")
+            if device_manager:
+                device = await device_manager.get_device_by_id(request.device_id)
+                if device:
+                    device_source = "device_manager (Android)"
+                    logger.info(f"✅ Android device found in device_manager: {request.device_id}")
+
+        # 3. Если не найдено по префиксу, ищем в обоих менеджерах
         if not device:
+            logger.info(f"🔍 Searching in both managers...")
+
+            # Сначала в device_manager (Android)
+            if device_manager:
+                device = await device_manager.get_device_by_id(request.device_id)
+                if device:
+                    device_source = "device_manager (Android)"
+                    logger.info(f"✅ Device found in device_manager: {request.device_id}")
+
+            # Потом в modem_manager (USB)
+            if not device:
+                from ..core.managers import get_modem_manager
+                modem_manager = get_modem_manager()
+                if modem_manager:
+                    device = await modem_manager.get_device_by_id(request.device_id)
+                    if device:
+                        device_source = "modem_manager (USB)"
+                        logger.info(f"✅ Device found in modem_manager: {request.device_id}")
+
+        # 4. Если не найдено в менеджерах, ищем в базе данных
+        if not device:
+            logger.info(f"🔍 Device not found in managers, checking database...")
+            async with AsyncSessionLocal() as db_session:
+                stmt = select(ProxyDevice).where(ProxyDevice.name == request.device_id)
+                result = await db_session.execute(stmt)
+                db_device = result.scalar_one_or_none()
+
+                if db_device:
+                    device = {
+                        "id": request.device_id,
+                        "name": db_device.name,
+                        "device_info": db_device.name,
+                        "status": db_device.status,
+                        "type": db_device.device_type
+                    }
+                    device_source = "database"
+                    logger.info(f"✅ Device found in database: {request.device_id}")
+
+        if not device:
+            logger.error(f"❌ Device not found anywhere: {request.device_id}")
+
+            # Для отладки, покажем список доступных устройств
+            logger.info("📋 Available devices for debugging:")
+
+            if device_manager:
+                try:
+                    available_android = await device_manager.get_all_devices()
+                    logger.info(f"📱 Android devices: {list(available_android.keys())}")
+                except Exception as e:
+                    logger.warning(f"Could not get Android devices: {e}")
+
+            from ..core.managers import get_modem_manager
+            modem_manager = get_modem_manager()
+            if modem_manager:
+                try:
+                    available_modems = await modem_manager.get_all_devices()
+                    logger.info(f"🔧 USB modems: {list(available_modems.keys())}")
+                except Exception as e:
+                    logger.warning(f"Could not get USB modems: {e}")
+
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Device not found"
+                detail=f"Device not found: {request.device_id}"
             )
+
+        logger.info(f"✅ Device found via {device_source}: {request.device_id}")
 
         # Проверка, что у устройства еще нет индивидуального прокси
         existing_proxy = await dedicated_proxy_manager.get_device_proxy_info(request.device_id)
@@ -110,7 +195,7 @@ async def create_dedicated_proxy(
             password=request.password
         )
 
-        # ИСПРАВЛЕНО: Правильная обработка данных устройства
+        # Правильная обработка данных устройства
         device_name = "Unknown"
         device_status = "unknown"
 
@@ -129,16 +214,6 @@ async def create_dedicated_proxy(
             device_status = (device.get("status") or
                              device.get("device_status") or
                              "unknown")
-        else:
-            # Если устройство не найдено в DeviceManager, получаем из БД
-            async with AsyncSessionLocal() as db:
-                stmt = select(ProxyDevice).where(ProxyDevice.name == request.device_id)
-                result = await db.execute(stmt)
-                db_device = result.scalar_one_or_none()
-
-                if db_device:
-                    device_name = db_device.name
-                    device_status = db_device.status
 
         return DedicatedProxyResponse(
             device_id=proxy_info["device_id"],
@@ -154,16 +229,13 @@ async def create_dedicated_proxy(
     except HTTPException:
         raise
     except Exception as e:
-        # ИСПРАВЛЕНО: Добавляем детальное логирование ошибки
+        # Детальное логирование ошибки
         import traceback
         error_details = traceback.format_exc()
 
-        # Логируем полную ошибку для диагностики
         logger.error(f"Failed to create dedicated proxy: {str(e)}")
         logger.error(f"Full traceback: {error_details}")
         logger.error(f"Request data: device_id={request.device_id}, port={request.port}")
-        logger.error(f"Device data: {device if 'device' in locals() else 'Not retrieved'}")
-        logger.error(f"Proxy info: {proxy_info if 'proxy_info' in locals() else 'Not created'}")
 
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -220,7 +292,24 @@ async def update_dedicated_proxy(
         )
 
         # Получение информации об устройстве
-        device = await device_manager.get_device_by_id(device_id)
+        device = None
+        if device_id.startswith('huawei_'):
+            from ..core.managers import get_modem_manager
+            modem_manager = get_modem_manager()
+            if modem_manager:
+                device = await modem_manager.get_device_by_id(device_id)
+        elif device_id.startswith('android_'):
+            if device_manager:
+                device = await device_manager.get_device_by_id(device_id)
+        else:
+            # Ищем в обоих менеджерах
+            if device_manager:
+                device = await device_manager.get_device_by_id(device_id)
+            if not device:
+                from ..core.managers import get_modem_manager
+                modem_manager = get_modem_manager()
+                if modem_manager:
+                    device = await modem_manager.get_device_by_id(device_id)
 
         return DedicatedProxyResponse(
             device_id=updated_proxy["device_id"],
@@ -362,7 +451,24 @@ async def get_dedicated_proxy_info(
             )
 
         # Получение информации об устройстве
-        device = await device_manager.get_device_by_id(device_id)
+        device = None
+        if device_id.startswith('huawei_'):
+            from ..core.managers import get_modem_manager
+            modem_manager = get_modem_manager()
+            if modem_manager:
+                device = await modem_manager.get_device_by_id(device_id)
+        elif device_id.startswith('android_'):
+            if device_manager:
+                device = await device_manager.get_device_by_id(device_id)
+        else:
+            # Ищем в обоих менеджерах
+            if device_manager:
+                device = await device_manager.get_device_by_id(device_id)
+            if not device:
+                from ..core.managers import get_modem_manager
+                modem_manager = get_modem_manager()
+                if modem_manager:
+                    device = await modem_manager.get_device_by_id(device_id)
 
         return DedicatedProxyResponse(
             device_id=proxy_info["device_id"],
