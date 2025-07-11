@@ -22,6 +22,7 @@ class DedicatedProxyManager:
 
     def __init__(self, device_manager):
         self.device_manager = device_manager
+        self.modem_manager = None
         self.proxy_servers: Dict[str, DedicatedProxyServer] = {}
         self.used_ports: Set[int] = set()
         self.port_range_start = 6001
@@ -149,7 +150,7 @@ class DedicatedProxyManager:
                 username=username,
                 password=password,
                 device_manager=self.device_manager,
-                modem_manager=get_modem_manager()
+                modem_manager=self.modem_manager
             )
 
             # Запуск сервера
