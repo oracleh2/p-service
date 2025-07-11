@@ -355,7 +355,7 @@ class EnhancedRotationManager:
             logger.info(f"Found Huawei USB device: Bus {bus} Device {device}")
 
             # Шаг 2: Запуск диагностики если нужно
-            await self._debug_usb_device_structure(usb_vid)
+            # await self._debug_usb_device_structure(usb_vid)
 
             # Шаг 3: Поиск sysfs пути к устройству
             device_path = await self._find_usb_device_path(usb_vid)
