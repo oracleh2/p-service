@@ -845,7 +845,7 @@ async def test_rotation_method(
 
 @router.post("/devices/discover")
 async def discover_devices(current_user=Depends(get_admin_user)):
-    """Принудительное обнаружение устройств - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
+    """Принудительное обнаружение устройств (Android и USB модемы)"""
     try:
         from ..core.managers import get_device_manager, get_modem_manager
 
@@ -893,9 +893,14 @@ async def discover_devices(current_user=Depends(get_admin_user)):
 
         results["total_found"] = results["android_devices"]["found"] + results["usb_modems"]["found"]
 
+        # ИСПРАВЛЕНО: Возвращаем данные в формате, который ожидает компонент
+        all_devices = results["android_devices"]["devices"] + results["usb_modems"]["devices"]
+
         return {
             "message": "Device discovery completed",
-            "results": results
+            "devices_found": results["total_found"],  # Добавлено для компонента
+            "devices": all_devices,  # Плоский список всех устройств
+            "results": results  # Оставляем детальную информацию
         }
 
     except Exception as e:
@@ -1983,11 +1988,13 @@ async def sync_devices_to_database(current_user=Depends(get_admin_user)):
             modem_devices = await modem_manager.get_devices_from_db()
             db_devices.extend(modem_devices)
 
+        # ИСПРАВЛЕНО: Возвращаем данные в формате, который ожидает компонент
         return {
             "message": "All devices synchronized to database successfully",
-            "results": results,
+            "discovered_devices": results["total_synced"],  # Добавлено для компонента
             "database_devices": len(db_devices),
-            "devices": db_devices
+            "devices": db_devices,
+            "results": results  # Оставляем детальную информацию
         }
 
     except Exception as e:
