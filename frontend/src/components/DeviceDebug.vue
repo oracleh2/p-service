@@ -504,6 +504,11 @@ export default {
         }
 
         const getResultClass = (result) => {
+            // Для базы данных проверяем connection_test
+            if (result.connection_test) {
+                return result.connection_test.success ? 'success' : 'error'
+            }
+            // Для остальных результатов проверяем общий success
             return result.success ? 'success' : 'error'
         }
 
