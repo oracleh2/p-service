@@ -1,5 +1,4 @@
-// frontend/src/components/RotationMethodModal.vue - ИСПРАВЛЕННАЯ ВЕРСИЯ С ТАЙМАУТОМ
-
+<!--frontend/src/components/RotationMethodModal.vue - ИСПРАВЛЕННАЯ ВЕРСИЯ ДЛЯ БРАУЗЕРА-->
 <template>
   <div v-if="isVisible" class="fixed inset-0 bg-gray-500 bg-opacity-75 flex items-center justify-center z-50" @click="closeModal">
     <div class="bg-white rounded-lg max-w-md w-full mx-4 shadow-xl" @click.stop>
@@ -212,7 +211,7 @@
 
 <script>
 import { ref, computed, watch } from 'vue'
-import axios from "axios";
+import axios from 'axios'
 import {
   XMarkIcon,
   ArrowPathIcon,
@@ -326,14 +325,15 @@ export default {
       }
     }
 
-    // Создание API клиента с увеличенным таймаутом
+    // ИСПРАВЛЕНО: Создание API клиента с увеличенным таймаутом для браузера
     const createApiClientWithTimeout = (timeoutMs = 70000) => {
-      // Создаем отдельный экземпляр axios с увеличенным таймаутом
-      // const axios = require('axios')
       return axios.create({
         baseURL: api.defaults.baseURL,
         timeout: timeoutMs,
-        headers: api.defaults.headers
+        headers: {
+          ...api.defaults.headers,
+          'Authorization': api.defaults.headers.Authorization || ''
+        }
       })
     }
 
@@ -398,11 +398,17 @@ export default {
 
         console.log('Testing rotation method:', selectedMethod.value, 'for device:', deviceId)
 
-        // Используем увеличенный таймаут для тестирования
-        const apiClient = createApiClientWithTimeout(70000)
-        const response = await apiClient.post(`/admin/devices/${deviceId}/test-rotation`, {
-          method: selectedMethod.value
-        })
+        // ИСПРАВЛЕНО: Используем обновленную API утилиту если доступна
+        let response
+        if (api.rotation && typeof api.rotation.testRotation === 'function') {
+          response = await api.rotation.testRotation(deviceId, selectedMethod.value)
+        } else {
+          // Fallback на создание клиента с таймаутом
+          const apiClient = createApiClientWithTimeout(70000)
+          response = await apiClient.post(`/admin/devices/${deviceId}/test-rotation`, {
+            method: selectedMethod.value
+          })
+        }
 
         testResult.value = response.data
         console.log('Test result:', response.data)
@@ -447,11 +453,16 @@ export default {
           { force_method: selectedMethod.value } :
           {}
 
-        // Определяем таймаут в зависимости от типа устройства
-        const timeoutMs = props.deviceInfo?.modem_type === 'usb_modem' ? 70000 : 35000
-
-        const apiClient = createApiClientWithTimeout(timeoutMs)
-        const response = await apiClient.post(`/admin/devices/${deviceId}/rotate`, requestBody)
+        // ИСПРАВЛЕНО: Используем обновленную API утилиту если доступна
+        let response
+        if (api.rotation && typeof api.rotation.executeRotation === 'function') {
+          response = await api.rotation.executeRotation(deviceId, selectedMethod.value)
+        } else {
+          // Fallback на создание клиента с таймаутом
+          const timeoutMs = props.deviceInfo?.modem_type === 'usb_modem' ? 70000 : 35000
+          const apiClient = createApiClientWithTimeout(timeoutMs)
+          response = await apiClient.post(`/admin/devices/${deviceId}/rotate`, requestBody)
+        }
 
         console.log('Rotation response:', response.data)
 
