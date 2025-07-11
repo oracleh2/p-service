@@ -212,6 +212,7 @@
 
 <script>
 import { ref, computed, watch } from 'vue'
+import axios from "axios";
 import {
   XMarkIcon,
   ArrowPathIcon,
@@ -328,7 +329,7 @@ export default {
     // Создание API клиента с увеличенным таймаутом
     const createApiClientWithTimeout = (timeoutMs = 70000) => {
       // Создаем отдельный экземпляр axios с увеличенным таймаутом
-      const axios = require('axios')
+      // const axios = require('axios')
       return axios.create({
         baseURL: api.defaults.baseURL,
         timeout: timeoutMs,
