@@ -326,16 +326,41 @@ export default {
     }
 
     // ИСПРАВЛЕНО: Создание API клиента с увеличенным таймаутом для браузера
-    const createApiClientWithTimeout = (timeoutMs = 70000) => {
-      return axios.create({
-        baseURL: api.defaults.baseURL,
-        timeout: timeoutMs,
-        headers: {
-          ...api.defaults.headers,
-          'Authorization': api.defaults.headers.Authorization || ''
-        }
-      })
+const createApiClientWithTimeout = (timeoutMs = 70000) => {
+  // Получаем токен из localStorage или из основного API клиента
+  const getAuthToken = () => {
+    // Пробуем получить из localStorage
+    const token = localStorage.getItem('authToken')
+    if (token) return `Bearer ${token}`
+
+    // Пробуем получить из headers основного API клиента
+    const authHeader = api.defaults.headers.Authorization || api.defaults.headers.common?.Authorization
+    if (authHeader) return authHeader
+
+    return ''
+  }
+
+  const customClient = axios.create({
+    baseURL: api.defaults.baseURL,
+    timeout: timeoutMs,
+    headers: {
+      ...api.defaults.headers,
+      'Content-Type': 'application/json',
+      'Authorization': getAuthToken()
     }
+  })
+
+  // Добавляем интерсептор для обновления токена на каждый запрос
+  customClient.interceptors.request.use((config) => {
+    const token = getAuthToken()
+    if (token) {
+      config.headers.Authorization = token
+    }
+    return config
+  })
+
+  return customClient
+}
 
     // Загрузка методов ротации
     const loadRotationMethods = async () => {
