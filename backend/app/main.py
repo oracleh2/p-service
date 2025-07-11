@@ -64,19 +64,24 @@ app.add_middleware(
     max_age=3600,
 )
 
-# Подключение роутеров - ТОЛЬКО ПОДКЛЮЧЕНИЕ, БЕЗ ДУБЛИРОВАНИЯ
+# ПРАВИЛЬНЫЙ ПОРЯДОК ПОДКЛЮЧЕНИЯ РОУТЕРОВ
+# 1. Dedicated proxy роуты (специфичные роуты сначала)
 app.include_router(dedicated_proxy.router, prefix="/admin/dedicated-proxy", tags=["dedicated-proxy"])
 
+# 2. Основные API v1 роуты
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
-app.include_router(auth.router, prefix="/auth", tags=["auth-legacy"])  # Для совместимости с фронтендом
 app.include_router(proxy.router, prefix="/api/v1/proxy", tags=["proxy"])
-app.include_router(proxy.router, prefix="/proxy", tags=["proxy-legacy"])  # Для совместимости с фронтендом
 app.include_router(admin.router, prefix="/api/v1/admin", tags=["admin"])
-app.include_router(admin.router, prefix="/admin", tags=["admin-legacy"])  # Для совместимости с фронтендом
 app.include_router(stats.router, prefix="/api/v1/stats", tags=["stats"])
-app.include_router(stats.router, prefix="/stats", tags=["stats-legacy"])  # Для совместимости с фронтендом
+app.include_router(devices.router, prefix="/api/v1/devices", tags=["devices"])
 
+# 3. Legacy роуты для совместимости с фронтендом
+app.include_router(auth.router, prefix="/auth", tags=["auth-legacy"])
+app.include_router(proxy.router, prefix="/proxy", tags=["proxy-legacy"])
+app.include_router(admin.router, prefix="/admin", tags=["admin-legacy"])
+app.include_router(stats.router, prefix="/stats", tags=["stats-legacy"])
 
+app.include_router(devices.router, prefix="/devices", tags=["devices-legacy"])
 
 
 # Middleware для логирования запросов
