@@ -330,7 +330,7 @@ const createApiClientWithTimeout = (timeoutMs = 70000) => {
   // Получаем токен из localStorage или из основного API клиента
   const getAuthToken = () => {
     // Пробуем получить из localStorage
-    const token = localStorage.getItem('authToken')
+    const token = localStorage.getItem('token')
     if (token) return `Bearer ${token}`
 
     // Пробуем получить из headers основного API клиента

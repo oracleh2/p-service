@@ -22,7 +22,7 @@ const apiLongTimeout = axios.create({
 
 // Интерсептор для добавления токена авторизации
 const addAuthToken = (config) => {
-  const token = localStorage.getItem('authToken')
+  const token = localStorage.getItem('token')
   if (token) {
     config.headers.Authorization = `Bearer ${token}`
   }
@@ -32,7 +32,7 @@ const addAuthToken = (config) => {
 // Интерсептор для обработки ошибок
 const handleResponseError = (error) => {
   if (error.response?.status === 401) {
-    localStorage.removeItem('authToken')
+    localStorage.removeItem('token')
     window.location.href = '/login'
   }
   return Promise.reject(error)
