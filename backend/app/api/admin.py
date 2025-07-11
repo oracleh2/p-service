@@ -2,7 +2,7 @@
 
 import subprocess
 import uuid
-from typing import Optional
+from typing import Optional, Dict, Any
 
 import netifaces
 from datetime import (datetime, timezone, timedelta)

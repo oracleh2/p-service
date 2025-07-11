@@ -1,117 +1,204 @@
-// frontend/src/utils/api.js
-import axios from 'axios'
-import { useAuthStore } from '@/stores/auth'
-import { useToast } from 'vue-toastification'
+// frontend/src/utils/api.js - ОБНОВЛЕННАЯ ВЕРСИЯ С ТАЙМАУТОМ
 
-// Create axios instance
+import axios from 'axios'
+
+// Создаем основной экземпляр API
 const api = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000',
-  timeout: 30000,
+  baseURL: process.env.VUE_APP_API_URL || 'http://192.168.1.50:8000',
+  timeout: 30000, // Стандартный таймаут 30 секунд
   headers: {
-    'Content-Type': 'application/json'
-  }
+    'Content-Type': 'application/json',
+  },
 })
 
-// Request interceptor
-api.interceptors.request.use(
-  (config) => {
-    const authStore = useAuthStore()
-
-    // Add auth token if available
-    if (authStore.token) {
-      config.headers.Authorization = `Bearer ${authStore.token}`
-    }
-
-    // Add timestamp to prevent caching
-    if (config.method === 'get') {
-      config.params = {
-        ...config.params,
-        _t: Date.now()
-      }
-    }
-
-    return config
+// Создаем экземпляр API с увеличенным таймаутом для ротации
+const apiLongTimeout = axios.create({
+  baseURL: process.env.VUE_APP_API_URL || 'http://192.168.1.50:8000',
+  timeout: 70000, // Увеличенный таймаут 70 секунд для ротации USB модемов
+  headers: {
+    'Content-Type': 'application/json',
   },
-  (error) => {
-    return Promise.reject(error)
-  }
-)
+})
 
-// Response interceptor
-api.interceptors.response.use(
-  (response) => {
-    return response
+// Интерсептор для добавления токена авторизации
+const addAuthToken = (config) => {
+  const token = localStorage.getItem('authToken')
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
+}
+
+// Интерсептор для обработки ошибок
+const handleResponseError = (error) => {
+  if (error.response?.status === 401) {
+    localStorage.removeItem('authToken')
+    window.location.href = '/login'
+  }
+  return Promise.reject(error)
+}
+
+// Применяем интерсепторы к обоим экземплярам
+[api, apiLongTimeout].forEach(instance => {
+  instance.interceptors.request.use(addAuthToken)
+  instance.interceptors.response.use(
+    response => response,
+    handleResponseError
+  )
+})
+
+// Функция для создания API клиента с кастомным таймаутом
+export const createApiClient = (timeoutMs = 30000) => {
+  const customApi = axios.create({
+    baseURL: process.env.VUE_APP_API_URL || 'http://192.168.1.50:8000',
+    timeout: timeoutMs,
+    headers: {
+      'Content-Type': 'application/json',
+    },
+  })
+
+  customApi.interceptors.request.use(addAuthToken)
+  customApi.interceptors.response.use(
+    response => response,
+    handleResponseError
+  )
+
+  return customApi
+}
+
+// Специализированные функции для ротации с автоматическим выбором таймаута
+const rotationApi = {
+  // Тестирование ротации (может занять до 60 секунд)
+  testRotation: (deviceId, method) => {
+    return apiLongTimeout.post(`/admin/devices/${deviceId}/test-rotation`, { method })
   },
-  (error) => {
-    const authStore = useAuthStore()
-    const toast = useToast()
 
-    // Handle different error status codes
-    if (error.response) {
-      const { status, data } = error.response
+  // Выполнение ротации (может занять до 70 секунд для USB модемов)
+  executeRotation: (deviceId, forceMethod = null) => {
+    const data = forceMethod ? { force_method: forceMethod } : {}
+    return apiLongTimeout.post(`/admin/devices/${deviceId}/rotate`, data)
+  },
 
-      switch (status) {
-        case 401:
-          // Unauthorized - clear auth and redirect to login
-          authStore.logout()
-          window.location.href = '/login'
-          break
+  // USB перезагрузка (гарантированно занимает 30-45 секунд)
+  usbReboot: (deviceId) => {
+    return apiLongTimeout.post(`/admin/devices/${deviceId}/usb-reboot`)
+  },
 
-        case 403:
-          // Forbidden
-          toast.error('Access denied. You do not have permission to perform this action.')
-          break
+  // Получение методов ротации (быстрый запрос)
+  getRotationMethods: (deviceId) => {
+    return api.get(`/admin/devices/${deviceId}/rotation-methods`)
+  },
 
-        case 404:
-          // Not found
-          toast.error('Resource not found.')
-          break
-
-        case 422:
-          // Validation error
-          if (data.detail) {
-            if (Array.isArray(data.detail)) {
-              // FastAPI validation errors
-              const errorMessages = data.detail.map(err => err.msg).join(', ')
-              toast.error(`Validation error: ${errorMessages}`)
-            } else {
-              toast.error(`Validation error: ${data.detail}`)
-            }
-          } else {
-            toast.error('Validation error occurred.')
-          }
-          break
-
-        case 429:
-          // Rate limit
-          toast.error('Too many requests. Please try again later.')
-          break
-
-        case 500:
-          // Server error
-          toast.error('Server error occurred. Please try again later.')
-          break
-
-        case 503:
-          // Service unavailable
-          toast.error('Service temporarily unavailable. Please try again later.')
-          break
-
-        default:
-          // Generic error
-          const message = data.detail || data.message || 'An unexpected error occurred'
-          toast.error(message)
-      }
-    } else if (error.request) {
-      // Network error
-      toast.error('Network error. Please check your connection and try again.')
-    } else {
-      // Other error
-      toast.error('An unexpected error occurred.')
-    }
-
-    return Promise.reject(error)
+  // Ротация всех устройств (может занять очень много времени)
+  rotateAllDevices: () => {
+    const extendedTimeout = createApiClient(180000) // 3 минуты
+    return extendedTimeout.post('/admin/devices/rotate-all')
   }
-)
+}
+
+// Специализированные функции для диагностики с увеличенным таймаутом
+const diagnosticsApi = {
+  // Диагностика USB устройства
+  getUsbDiagnostics: (deviceId) => {
+    return apiLongTimeout.get(`/admin/devices/${deviceId}/usb-diagnostics`)
+  },
+
+  // Проверка здоровья устройства
+  getDeviceHealth: (deviceId) => {
+    return apiLongTimeout.get(`/admin/devices/${deviceId}/health`)
+  },
+
+  // Диагностика проблем устройства
+  diagnoseDevice: (deviceId) => {
+    return apiLongTimeout.post(`/admin/devices/${deviceId}/diagnose`)
+  },
+
+  // Тестирование соединения устройства
+  testConnection: (deviceId) => {
+    return apiLongTimeout.get(`/admin/devices/${deviceId}/connection-test`)
+  }
+}
+
+// Добавляем специальные методы к основному API объекту
+api.rotation = rotationApi
+api.diagnostics = diagnosticsApi
+api.createClient = createApiClient
+api.longTimeout = apiLongTimeout
+
+// Логирование запросов в режиме разработки
+if (process.env.NODE_ENV === 'development') {
+  [api, apiLongTimeout].forEach(instance => {
+    instance.interceptors.request.use(request => {
+      console.log('🚀 API Request:', {
+        method: request.method?.toUpperCase(),
+        url: request.url,
+        timeout: request.timeout,
+        data: request.data
+      })
+      return request
+    })
+
+    instance.interceptors.response.use(
+      response => {
+        console.log('✅ API Response:', {
+          status: response.status,
+          url: response.config.url,
+          duration: response.config.metadata?.endTime - response.config.metadata?.startTime
+        })
+        return response
+      },
+      error => {
+        console.error('❌ API Error:', {
+          status: error.response?.status,
+          url: error.config?.url,
+          message: error.message,
+          timeout: error.code === 'ECONNABORTED'
+        })
+        return Promise.reject(error)
+      }
+    )
+  })
+}
 
 export default api
+
+// Дополнительные утилиты для работы с таймаутами
+export const timeoutUtils = {
+  // Рекомендуемые таймауты для разных операций
+  timeouts: {
+    fast: 5000,          // 5 секунд - быстрые запросы
+    standard: 30000,     // 30 секунд - стандартные запросы
+    rotation: 70000,     // 70 секунд - ротация IP
+    bulk: 180000,        // 3 минуты - массовые операции
+    discovery: 120000    // 2 минуты - обнаружение устройств
+  },
+
+  // Получение рекомендуемого таймаута для операции
+  getRecommendedTimeout: (operation, deviceType = null) => {
+    const { timeouts } = timeoutUtils
+
+    switch (operation) {
+      case 'rotation':
+        return deviceType === 'usb_modem' ? timeouts.rotation : timeouts.standard
+      case 'test_rotation':
+        return timeouts.rotation
+      case 'discovery':
+        return timeouts.discovery
+      case 'bulk_rotation':
+        return timeouts.bulk
+      case 'diagnostics':
+        return timeouts.rotation
+      default:
+        return timeouts.standard
+    }
+  },
+
+  // Создание API клиента с рекомендуемым таймаутом
+  createClientForOperation: (operation, deviceType = null) => {
+    const timeout = timeoutUtils.getRecommendedTimeout(operation, deviceType)
+    return createApiClient(timeout)
+  }
+}
+
+// Экспорт для использования в компонентах
+export { api as apiClient, apiLongTimeout, rotationApi, diagnosticsApi }
