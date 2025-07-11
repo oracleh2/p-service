@@ -157,6 +157,7 @@ import {
     WifiIcon,
     BugAntIcon
 } from '@heroicons/vue/24/outline'
+import {NetworkIcon} from "lucide-vue-next";
 
 const route = useRoute()
 const authStore = useAuthStore()
@@ -171,7 +172,7 @@ const modemsOnline = computed(() => systemStore.onlineModems)
 // Navigation items
 const navigation = [
     {name: 'Dashboard', href: '/dashboard', icon: HomeIcon},
-    {name: 'Индивидуальные прокси', href: '/dedicated-proxies', icon: 'NetworkIcon', adminOnly: true},
+    {name: 'Индивидуальные прокси', href: '/dedicated-proxies', icon: NetworkIcon, adminOnly: true},
     {name: 'Modems', href: '/modems', icon: ServerIcon},
     {name: 'Statistics', href: '/statistics', icon: ChartBarIcon},
     {name: 'Logs', href: '/logs', icon: DocumentTextIcon}
