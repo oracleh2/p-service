@@ -408,127 +408,124 @@ const createApiClientWithTimeout = (timeoutMs = 70000) => {
 
     // Тестирование метода ротации
     const testMethod = async () => {
-      if (!selectedMethod.value) return
+  if (!selectedMethod.value) return
 
-      const deviceId = getDeviceId()
-      if (!deviceId) {
-        errorMessage.value = 'Device ID не найден'
-        return
-      }
+  const deviceId = getDeviceId()
+  if (!deviceId) {
+    errorMessage.value = 'Device ID не найден'
+    return
+  }
 
-      try {
-        isTesting.value = true
-        testResult.value = null
-        errorMessage.value = ''
+  try {
+    isTesting.value = true
+    testResult.value = null
+    errorMessage.value = ''
 
-        console.log('Testing rotation method:', selectedMethod.value, 'for device:', deviceId)
+    console.log('Testing rotation method:', selectedMethod.value, 'for device:', deviceId)
 
-        // ИСПРАВЛЕНО: Используем обновленную API утилиту если доступна
-        let response
-        if (api.rotation && typeof api.rotation.testRotation === 'function') {
-          response = await api.rotation.testRotation(deviceId, selectedMethod.value)
-        } else {
-          // Fallback на создание клиента с таймаутом
-          const apiClient = createApiClientWithTimeout(70000)
-          response = await apiClient.post(`/admin/devices/${deviceId}/test-rotation`, {
-            method: selectedMethod.value
-          })
-        }
-
-        testResult.value = response.data
-        console.log('Test result:', response.data)
-
-      } catch (error) {
-        console.error('Test rotation failed:', error)
-
-        if (error.code === 'ECONNABORTED') {
-          errorMessage.value = 'Тест занял слишком много времени. Это нормально для USB модемов.'
-        } else if (error.response?.status === 404) {
-          errorMessage.value = 'Устройство не найдено'
-        } else if (error.response?.status === 500) {
-          errorMessage.value = 'Ошибка сервера при тестировании ротации'
-        } else {
-          errorMessage.value = 'Тестирование ротации завершилось с ошибкой: ' + (error.response?.data?.detail || error.message)
-        }
-      } finally {
-        isTesting.value = false
-      }
+    // ИСПРАВЛЕНО: Используем api.longTimeout напрямую
+    let response
+    if (api.rotation && typeof api.rotation.testRotation === 'function') {
+      response = await api.rotation.testRotation(deviceId, selectedMethod.value)
+    } else {
+      // Используем api.longTimeout который уже настроен с правильными интерсепторами
+      response = await api.longTimeout.post(`/admin/devices/${deviceId}/test-rotation`, {
+        method: selectedMethod.value
+      })
     }
+
+    testResult.value = response.data
+    console.log('Test result:', response.data)
+
+  } catch (error) {
+    console.error('Test rotation failed:', error)
+
+    if (error.code === 'ECONNABORTED') {
+      errorMessage.value = 'Тест занял слишком много времени. Это нормально для USB модемов.'
+    } else if (error.response?.status === 404) {
+      errorMessage.value = 'Устройство не найдено'
+    } else if (error.response?.status === 500) {
+      errorMessage.value = 'Ошибка сервера при тестировании ротации'
+    } else {
+      errorMessage.value = 'Тестирование ротации завершилось с ошибкой: ' + (error.response?.data?.detail || error.message)
+    }
+  } finally {
+    isTesting.value = false
+  }
+}
 
     // Выполнение ротации IP
     const executeRotation = async () => {
-      if (!selectedMethod.value) return
+  if (!selectedMethod.value) return
 
-      const deviceId = getDeviceId()
-      if (!deviceId) {
-        errorMessage.value = 'Device ID не найден'
-        return
-      }
+  const deviceId = getDeviceId()
+  if (!deviceId) {
+    errorMessage.value = 'Device ID не найден'
+    return
+  }
 
-      try {
-        isRotating.value = true
-        errorMessage.value = ''
+  try {
+    isRotating.value = true
+    errorMessage.value = ''
 
-        // Запускаем индикатор прогресса для USB модемов
-        startRotationProgress()
+    // Запускаем индикатор прогресса для USB модемов
+    startRotationProgress()
 
-        console.log('Executing rotation with method:', selectedMethod.value, 'for device:', deviceId)
+    console.log('Executing rotation with method:', selectedMethod.value, 'for device:', deviceId)
 
-        const requestBody = selectedMethod.value ?
-          { force_method: selectedMethod.value } :
-          {}
+    const requestBody = selectedMethod.value ?
+      { force_method: selectedMethod.value } :
+      {}
 
-        // ИСПРАВЛЕНО: Используем обновленную API утилиту если доступна
-        let response
-        if (api.rotation && typeof api.rotation.executeRotation === 'function') {
-          response = await api.rotation.executeRotation(deviceId, selectedMethod.value)
-        } else {
-          // Fallback на создание клиента с таймаутом
-          const timeoutMs = props.deviceInfo?.modem_type === 'usb_modem' ? 70000 : 35000
-          const apiClient = createApiClientWithTimeout(timeoutMs)
-          response = await apiClient.post(`/admin/devices/${deviceId}/rotate`, requestBody)
-        }
-
-        console.log('Rotation response:', response.data)
-
-        stopRotationProgress()
-
-        if (response.data.success) {
-          emit('rotation-success', {
-            device_id: deviceId,
-            method: selectedMethod.value,
-            new_ip: response.data.new_ip,
-            old_ip: response.data.old_ip,
-            message: response.data.message,
-            ip_changed: response.data.ip_changed
-          })
-          closeModal()
-        } else {
-          errorMessage.value = response.data.message || 'Ротация завершилась с ошибкой'
-        }
-
-      } catch (error) {
-        console.error('Rotation failed:', error)
-        stopRotationProgress()
-
-        if (error.code === 'ECONNABORTED') {
-          // Таймаут - это может быть нормально для USB модемов
-          if (props.deviceInfo?.modem_type === 'usb_modem') {
-            errorMessage.value = 'Ротация заняла более 70 секунд. Проверьте статус устройства через несколько минут.'
-          } else {
-            errorMessage.value = 'Ротация заняла слишком много времени'
-          }
-        } else if (error.response?.status === 404) {
-          errorMessage.value = 'Устройство не найдено'
-        } else if (error.response?.status === 500) {
-          errorMessage.value = 'Ошибка сервера при выполнении ротации'
-        } else {
-          errorMessage.value = 'Ротация завершилась с ошибкой: ' + (error.response?.data?.detail || error.message)
-        }
-      } finally {
-        isRotating.value = false
-      }
+    // ИСПРАВЛЕНО: Используем api.longTimeout напрямую вместо fallback
+    let response
+    if (api.rotation && typeof api.rotation.executeRotation === 'function') {
+      response = await api.rotation.executeRotation(deviceId, selectedMethod.value)
+    } else {
+      // Используем api.longTimeout который уже настроен с правильными интерсепторами
+      response = await api.longTimeout.post(`/admin/devices/${deviceId}/rotate`, requestBody)
     }
+
+    console.log('Rotation response:', response.data)
+
+    stopRotationProgress()
+
+    if (response.data.success) {
+      emit('rotation-success', {
+        device_id: deviceId,
+        method: selectedMethod.value,
+        new_ip: response.data.new_ip,
+        old_ip: response.data.old_ip,
+        message: response.data.message,
+        ip_changed: response.data.ip_changed
+      })
+      closeModal()
+    } else {
+      errorMessage.value = response.data.message || 'Ротация завершилась с ошибкой'
+    }
+
+  } catch (error) {
+    console.error('Rotation failed:', error)
+    stopRotationProgress()
+
+    if (error.code === 'ECONNABORTED') {
+      // Таймаут - это может быть нормально для USB модемов
+      if (props.deviceInfo?.modem_type === 'usb_modem') {
+        errorMessage.value = 'Ротация заняла более 70 секунд. Проверьте статус устройства через несколько минут.'
+      } else {
+        errorMessage.value = 'Ротация заняла слишком много времени'
+      }
+    } else if (error.response?.status === 404) {
+      errorMessage.value = 'Устройство не найдено'
+    } else if (error.response?.status === 500) {
+      errorMessage.value = 'Ошибка сервера при выполнении ротации'
+    } else {
+      errorMessage.value = 'Ротация завершилась с ошибкой: ' + (error.response?.data?.detail || error.message)
+    }
+  } finally {
+    isRotating.value = false
+  }
+}
 
     const closeModal = () => {
       // Останавливаем таймеры
